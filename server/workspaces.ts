@@ -6,6 +6,7 @@ import { db } from './db/index.ts'
 import * as t from './db/schema.ts'
 import * as authSchema from './db/auth-schema.ts'
 import { store } from './store.ts'
+import { gatewayCap } from './mmGateway.ts'
 import * as billing from './billing.ts'
 import { mailerConfigured, sendMail } from './mailer.ts'
 import { isBillingInterval, isWorkspaceActive } from '../shared/billing.ts'
@@ -134,6 +135,8 @@ export function workspaceIdsFor(userId: string): string[] {
 /** Everything the dashboard lists for a user: personal, invited, and every
  *  canvas of every workspace they belong to. */
 export function canvasesFor(userId: string) {
+  /* mm fork: the gateway's people see every canvas of the project's Doop */
+  if (gatewayCap(userId)) return store.listEveryCanvas(userId)
   return store.listCanvases(userId, workspaceIdsFor(userId))
 }
 

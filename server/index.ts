@@ -34,6 +34,7 @@ import {
 } from './access.ts'
 import { isLinkAccess, roleAllows, type CanvasRole } from '../shared/canvasRole.ts'
 import { auth, initAuth, syncAdmins, getUserName, loginProvidersConfig } from './auth.ts'
+import { gatewayCap, loadGatewayConfig, startGatewaySide } from './mmGateway.ts'
 import { adminRouter } from './admin.ts'
 import { communityRouter, parseListing, publishableFrames } from './community.ts'
 import { automationsRouter, startScheduler } from './automations.ts'
@@ -284,6 +285,12 @@ setInterval(() => {
     }
   }
 }, 5000)
+
+/* mm fork: a room of someone the sign-in gateway no longer vouches for (no
+   assertion for a while) closes; its reconnect asks the gateway again */
+setInterval(() => {
+  for (const c of conns.values()) if (gatewayCap(c.userId) === null) c.ws.close(4403, 'no access')
+}, 60_000).unref()
 
 actions.wire(broadcast, agentTouch)
 /* after the room has been told: email for the people who were not in it */
@@ -2281,6 +2288,10 @@ if (env.isProduction) {
 
 const server = http.createServer(app)
 const wss = new WebSocketServer({ server, path: '/ws' })
+/* mm fork: behind mm's sign-in gateway, the public side is its own listener
+   (server/mmGateway.ts); none without a gateway key. Read at boot, so a
+   half-configured gateway stops the server here. */
+const gatewayConfig = loadGatewayConfig()
 
 wss.on('connection', (ws, upgradeReq) => {
   /* the session cookie rides the upgrade request; resolve it once */
@@ -2417,6 +2428,7 @@ wss.on('connection', (ws, upgradeReq) => {
   })
 })
 
+if (gatewayConfig) startGatewaySide(gatewayConfig, auth, app, wss)
 server.listen(PORT, () => {
   console.log(`⟡ doop server     http://localhost:${PORT}`)
   /* comments anchored before element ids: stamped now, while serving, so a

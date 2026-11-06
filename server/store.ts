@@ -103,6 +103,16 @@ class Store {
       .map((c) => this.toMeta(c, userId))
   }
 
+  /** mm fork: every owned canvas, as this user's dashboard shows it — for a
+   *  person the sign-in gateway let in, who works on all of this project's
+   *  canvases (server/mmGateway.ts gatewayCap; the caller checks that). */
+  listEveryCanvas(userId: string) {
+    return [...this.canvases.values()]
+      .filter((c) => !!c.ownerId)
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .map((c) => this.toMeta(c, userId))
+  }
+
   /** The canvas signup made for this user (server/auth.ts): the oldest one
    *  they own. Undefined once they have deleted it, or for an account that
    *  predates the signup hook. */

@@ -13,6 +13,7 @@ import { acceptInvites } from './workspaces.ts'
 import { purgeUserData } from './accountDeletion.ts'
 import { createHash } from 'node:crypto'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
+import { isGatewayCreating, isGatewayEmail, mmGateway } from './mmGateway.ts'
 
 /**
  * better-auth on our own database: email/password + cookie sessions now;
@@ -457,9 +458,18 @@ function buildAuth() {
       user: {
         create: {
           before: async (user) => {
+            /* mm fork: the gateway's people (server/mmGateway.ts) are made
+               only by the gateway, and only it may use their domain */
+            if (isGatewayCreating()) return
+            if (isGatewayEmail(user.email)) {
+              throw new APIError('BAD_REQUEST', { message: 'Sign up is restricted: that address is for the sign-in gateway.' })
+            }
             assertSignupDomainAllowed(user.email)
           },
           after: async (user) => {
+            /* mm fork: a person from the gateway works on the project's
+               canvases; no first canvas of their own, no demo */
+            if (isGatewayCreating()) return
             const first = (user.name || 'Your').split(/\s+/)[0]
             const canvas = store.createCanvas(`${first}'s first canvas`, user.id)
             demo.markPending(canvas.id)
@@ -508,6 +518,8 @@ function buildAuth() {
          session's cookie. Single use, hashed at rest, two minutes to live —
          it travels through a doop:// URL that lands in browser history. */
       oneTimeToken({ storeToken: 'hashed', expiresIn: 2 }),
+      /* mm fork: sessions for the sign-in gateway's people (server-only) */
+      mmGateway(),
       ...(oidc
         ? [
             genericOAuth({

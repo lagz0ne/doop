@@ -1,6 +1,7 @@
 import type { Canvas, ClientMessage } from '../shared/types.ts'
 import { roleAllows, type CanvasRole } from '../shared/canvasRole.ts'
 import { hasRole, isWorkspaceMember } from './workspaces.ts'
+import { gatewayCap } from './mmGateway.ts'
 
 /**
  * Canvas access, Figma-style: private by default. The owner always has
@@ -31,6 +32,11 @@ export function isAdmin(user: { role?: string | null } | undefined): boolean {
  *  owner, invited members and workspace members edit; anyone else gets the
  *  share link's level. */
 export function canvasRole(userId: string | undefined, canvas: Canvas): CanvasRole | null {
+  /* mm fork: a person the sign-in gateway let in has their project role's
+     level on every canvas of this (per-project) Doop, and nothing more:
+     not even a share link lifts a viewer (server/mmGateway.ts) */
+  const gateway = gatewayCap(userId)
+  if (gateway !== undefined) return gateway
   if (!canvas.ownerId) return 'edit'
   if (!userId) return null
   if (hasDurableCanvasAccess(userId, canvas)) return 'edit'
