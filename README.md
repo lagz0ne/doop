@@ -1110,3 +1110,42 @@ changes under the same license.
 
 The **doop name and logo are trademarks** and are not covered by the code license —
 please rebrand derived services.
+
+---
+
+# mm fork (lagz0ne/doop, branch mm/gateway-assertion)
+
+This fork adds one patch to Doop 0.12.0 so Doop accepts mm's sign-in gateway. Source of the patch: lagz0ne/mm, box/doop/0001-gateway-assertion.patch. License: AGPL-3.0, unchanged (see LICENSE).
+
+## What the patch does (Doop's side)
+- **The assertion.** mm's gateway answers the web proxy's forward-auth for Doop's host like for a board. On each
+  request it lets through, it adds `X-Mm-Assertion`: `base64url(JSON {u, r, h, exp, n})` `.` an Ed25519 signature of
+  that first part (mm `src/auth.ts`, `signAssertion`). `u` is the person, `r` their role on the project, `h` the host,
+  `exp` now + 60 s (ms), `n` a nonce.
+- **A second listener.** With the gateway's public key set, Doop opens `MM_GATEWAY_PORT` (4401) for its public host.
+  Every request and every WebSocket upgrade there needs a valid assertion: the signature with the gateway's key,
+  `h` = `MM_GATEWAY_HOST`, a future `exp`, a known role, a gateway name. Anything else is 401.
+- **The person.** Their Doop account is made on their first visit (`<name>@gateway.mm.invalid`, tied by an
+  `mm-gateway` account row, never by email; Doop's own sign-up refuses that domain). The request runs as a session of
+  that account that the server holds. Doop drops the client's own `Cookie` and `Authorization`, and sends no
+  `Set-Cookie`. So the browser never holds a Doop session, and nothing works without the gateway.
+- **Doop's own login is off there:** every `/api/auth/*` route except `GET /api/auth/get-session`, and
+  `/api/account-exists`, are 403 (the path is read decoded, lower case, with `//` and `..` resolved).
+- **The roles** (as mm's roles say, `src/auth.ts` `ORG_ROLES`, doop: read or edit):
+  - `owner` and `designer`: edit every canvas of this Doop (the design lead's too), and make new ones;
+  - `member` and `viewer`: look only. Only GET and HEAD pass, and every canvas is `view`, even with a share link.
+  - A role changes with the next assertion. An open room of someone with no assertion for 10 minutes closes; its
+    reconnect asks the gateway again.
+- **The rest is unchanged.** Doop's own listener (`PORT`, 4400: the loopback side) keeps its own login, the design
+  lead's account and agent key, and the MCP. Without a gateway key there is no second listener: Doop is as before.
+
+Its settings (environment):
+
+| Name | What |
+|---|---|
+| `MM_GATEWAY_PUBLIC_KEY_FILE` | the gateway's public key (PEM, Ed25519); or `MM_GATEWAY_PUBLIC_KEY` with the PEM itself |
+| `MM_GATEWAY_HOST` | Doop's public host, the one the assertions name (required with a key) |
+| `MM_GATEWAY_PORT` | the gateway listener (default 4401) |
+
+A key without a host, or a host without a key, stops Doop at boot.
+
