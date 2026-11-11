@@ -7,7 +7,8 @@ import type { Frame } from '../../shared/types'
 import { usePageCanvas, currentPageCanvas } from '../lib/pages'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
-import { FrameView, HiddenFrameView } from './FrameView'
+import { flushSync } from 'react-dom'
+import { FrameSlot, HiddenFrameView } from './FrameView'
 import { CanvasComments, type CanvasComposeAt } from './CanvasComments'
 import { placeComposer } from '../lib/composerPlacement'
 import { isCanvasComment, type CanvasComment } from '../../shared/comments'
@@ -54,7 +55,7 @@ import { spaceWouldScroll } from '../lib/spaceScroll'
 import { viewOptionForKey } from '../lib/viewOptions'
 import { ZOOM_DRAG_MIN, ZOOM_TOOL_STEP, zoomAtPoint, zoomToBox } from '../lib/zoomTool'
 import { isCanvasElement } from '../lib/drawing'
-import { computeLiveFrames, cullingEnabled, useLiveFrames, type FrameBox } from '../lib/liveFrames'
+import { computeLiveFrames, cullingEnabled, pinnedBySelection, useLiveFrames, type FrameBox } from '../lib/liveFrames'
 
 const MIN_ZOOM = 0.08
 /* The settled world is laid out at up to this zoom too (layoutZoomFor), so
@@ -159,21 +160,32 @@ const TOOL_ICONS: Record<Tool, React.ReactNode> = {
   frame: <FrameIcon />,
 }
 
+/** How many frame documents may start booting in one animation frame (see the
+ *  culling effect in Stage). */
+const BOOTS_PER_FRAME = 2
+
 const sendCursor = throttle((x: number, y: number) => sendWs({ type: 'cursor', x, y }), 50)
 /* the camera is shared so others can follow it — same cadence as the cursor */
-const sendViewport = throttle(
-  (vp: { x: number; y: number; zoom: number }, el: HTMLElement) =>
-    sendWs({
-      type: 'viewport',
-      viewport: {
-        ...vp,
-        pageId: useStore.getState().activePageId ?? undefined,
-        width: el.clientWidth,
-        height: el.clientHeight,
-      },
-    }),
-  50,
-)
+/* The stage's size as its ResizeObserver last reported it. The camera path
+   must not read clientWidth: it runs right after the camera's style writes,
+   where a layout read forces the whole canvas through style and layout
+   synchronously, once per wheel event instead of once per frame. */
+const stageSize = { width: 0, height: 0 }
+function measuredStage(el: HTMLElement): { width: number; height: number } {
+  if (stageSize.width === 0 && stageSize.height === 0) {
+    stageSize.width = el.clientWidth
+    stageSize.height = el.clientHeight
+  }
+  return stageSize
+}
+
+const sendViewport = throttle((vp: { x: number; y: number; zoom: number }, el: HTMLElement) => {
+  const { width, height } = measuredStage(el)
+  sendWs({
+    type: 'viewport',
+    viewport: { ...vp, pageId: useStore.getState().activePageId ?? undefined, width, height },
+  })
+}, 50)
 
 /** The stage's own paint when the page has a colour: the colour, and a dot
  *  grid that reads on it (the theme's dots are tuned to the theme paper). */
@@ -237,6 +249,19 @@ export function Stage({
   const gridRef = useRef<HTMLDivElement>(null)
   const pixelGridRef = useRef<HTMLDivElement>(null)
   const [labelLayer, setLabelLayer] = useState<HTMLDivElement | null>(null)
+  const labelLayerRef = useRef<HTMLDivElement | null>(null)
+  const attachLabelLayer = useCallback((el: HTMLDivElement | null) => {
+    labelLayerRef.current = el
+    if (el) {
+      const vp = useStore.getState().viewport
+      el.style.setProperty('--vx', `${vp.x}px`)
+      el.style.setProperty('--vy', `${vp.y}px`)
+    }
+    setLabelLayer(el)
+  }, [])
+  /* the zoom and grid period last written to the DOM (see apply) */
+  const appliedZoom = useRef<number | null>(null)
+  const appliedPeriod = useRef<number | null>(null)
   const zoomLabelRef = useRef<HTMLSpanElement>(null)
   const setViewport = useStore((s) => s.setViewport)
   const canvas = usePageCanvas()
@@ -304,28 +329,48 @@ export function Stage({
       const stage = ref.current
       if (!world || !grid || !stage) return
       world.style.transform = worldTransform(vp, layoutZoomRef.current)
-      stage.style.setProperty('--zoom', String(vp.zoom))
-      /* the camera's offset, for chrome drawn in screen px (FrameLabelLayer) */
-      stage.style.setProperty('--vx', `${vp.x}px`)
-      stage.style.setProperty('--vy', `${vp.y}px`)
+      /* The camera's offset, for chrome drawn in screen px, goes on the label
+         layer alone: it is the only reader (FrameLabelLayer), and a custom
+         property set on the stage restyles every element under it, so a pan
+         that should be one transform restyled the whole canvas per frame. */
+      const labels = labelLayerRef.current
+      if (labels) {
+        labels.style.setProperty('--vx', `${vp.x}px`)
+        labels.style.setProperty('--vy', `${vp.y}px`)
+      }
+      /* everything below follows the zoom alone: a pan leaves it untouched */
+      if (appliedZoom.current !== vp.zoom) {
+        appliedZoom.current = vp.zoom
+        stage.style.setProperty('--zoom', String(vp.zoom))
+      }
       const period = 26 * vp.zoom
-      grid.style.backgroundSize = `${period}px ${period}px`
-      /* one period of overhang: the layer slides back by up to a period */
-      grid.style.width = grid.style.height = `calc(100% + ${period}px)`
+      if (appliedPeriod.current !== period) {
+        appliedPeriod.current = period
+        grid.style.backgroundSize = `${period}px ${period}px`
+        /* one period of overhang: the layer slides back by up to a period */
+        grid.style.width = grid.style.height = `calc(100% + ${period}px)`
+      }
       const gx = (((vp.x % period) + period) % period) - period
       const gy = (((vp.y % period) + period) % period) - period
       grid.style.transform = `translate(${gx}px, ${gy}px)`
       const pixels = pixelGridRef.current
       if (pixels) {
         const opacity = useStore.getState().viewOptions.pixelGrid ? pixelGridOpacity(vp.zoom) : 0
-        pixels.hidden = opacity === 0
-        pixels.style.opacity = String(opacity)
-        pixels.style.backgroundSize = `${vp.zoom}px ${vp.zoom}px`
-        const px = (((vp.x % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
-        const py = (((vp.y % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
-        pixels.style.transform = `translate(${px}px, ${py}px)`
+        /* hidden below the zoom where pixels show: then a pan writes nothing
+           here, and the frame stays a compositor-only transform */
+        if (pixels.hidden !== (opacity === 0)) pixels.hidden = opacity === 0
+        if (opacity !== 0) {
+          pixels.style.opacity = String(opacity)
+          pixels.style.backgroundSize = `${vp.zoom}px ${vp.zoom}px`
+          const px = (((vp.x % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
+          const py = (((vp.y % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
+          pixels.style.transform = `translate(${px}px, ${py}px)`
+        }
       }
-      if (zoomLabelRef.current) zoomLabelRef.current.textContent = `${Math.round(vp.zoom * 100)}%`
+      /* replacing a text node repaints the pill even when it reads the same */
+      const percent = `${Math.round(vp.zoom * 100)}%`
+      if (zoomLabelRef.current && zoomLabelRef.current.textContent !== percent)
+        zoomLabelRef.current.textContent = percent
     }
     apply(useStore.getState().viewport)
     let settle = 0
@@ -349,45 +394,114 @@ export function Stage({
   }, [])
 
   /* Viewport culling (liveFrames.ts): which frames keep a live document.
-     Selection and editors pin frames at once; a moving camera is followed
-     once it rests, so a pan never mounts documents it is only passing. */
+     Selection, peers and streams pin frames at once; a moving camera is
+     followed once it rests, so a pan never mounts documents it only passes. */
   useEffect(() => {
     if (!cullingEnabled()) return
     const frames: FrameBox[] = (canvas?.frames ?? [])
       .filter((f) => !f.hidden)
       .map((f) => ({ id: f.id, x: f.x, y: f.y, width: f.width, height: f.height, element: isCanvasElement(f.html) }))
+    const elements = new Set(frames.filter((f) => f.element).map((f) => f.id))
     let timer = 0
+    let pump = 0
+    /* Documents boot a few per animation frame, nearest the view first. A
+       camera that comes to rest over twenty frames would otherwise create
+       twenty documents in one task: a visible hitch, and input queued behind
+       it. Pins and canvas elements (no preview to wait behind) are admitted
+       at once; what is already live and still wanted stays. (Tearing the
+       departed ones down a few per frame was measured too: no gain.) */
+    function admit(wanted: ReadonlySet<string>, pinned: ReadonlySet<string>) {
+      window.cancelAnimationFrame(pump)
+      const live = useLiveFrames.getState()
+      const next = new Set<string>()
+      let booting = 0
+      for (const id of wanted) {
+        const settled = live.ids?.has(id) || pinned.has(id) || elements.has(id)
+        if (!settled && booting >= BOOTS_PER_FRAME) continue
+        if (!settled) booting++
+        next.add(id)
+      }
+      live.set(next)
+      if (next.size < wanted.size) pump = window.requestAnimationFrame(() => admit(wanted, pinned))
+    }
     function compute() {
       const el = ref.current
       if (!el) return
       const s = useStore.getState()
-      const pinned = new Set<string>(s.selectedIds)
+      const pinned = new Set<string>(pinnedBySelection(s.selectedIds))
       for (const p of Object.values(s.presences)) if (p.activeFrameId) pinned.add(p.activeFrameId)
+      for (const id of Object.keys(s.streams)) pinned.add(id)
       const live = useLiveFrames.getState()
-      live.set(
-        computeLiveFrames(
-          frames,
-          s.viewport,
-          { width: el.clientWidth, height: el.clientHeight },
-          pinned,
-          live.ids ?? new Set(),
-        ),
-      )
+      admit(computeLiveFrames(frames, s.viewport, measuredStage(el), pinned, live.ids ?? new Set()), pinned)
     }
     compute()
     const unsub = useStore.subscribe((s, prev) => {
-      if (s.viewport === prev.viewport && s.selectedIds === prev.selectedIds && s.presences === prev.presences) return
+      const moved = s.viewport !== prev.viewport
+      if (!moved && s.selectedIds === prev.selectedIds && s.presences === prev.presences && s.streams === prev.streams)
+        return
       window.clearTimeout(timer)
-      timer = window.setTimeout(compute, s.viewport === prev.viewport ? 0 : 120)
+      timer = window.setTimeout(compute, moved ? 120 : 0)
     })
-    const resize = new ResizeObserver(compute)
+    const resize = new ResizeObserver(([entry]) => {
+      if (entry) {
+        stageSize.width = entry.contentRect.width
+        stageSize.height = entry.contentRect.height
+      }
+      compute()
+    })
     if (ref.current) resize.observe(ref.current)
     return () => {
       unsub()
       window.clearTimeout(timer)
+      window.cancelAnimationFrame(pump)
       resize.disconnect()
     }
   }, [canvas])
+
+  /* A press on a FrameShell wakes it first. The listener sits on the window's
+     capture phase, ahead of React's root: the shell becomes a FrameView
+     synchronously, the original press is withheld, and the same press is
+     delivered to whatever now lies under the pointer, so the FrameView's own
+     handlers (select, drag, context menu) and the Stage's see one ordinary
+     press on a frame. The pointer is really down, so capture works. */
+  useEffect(() => {
+    function onDown(e: PointerEvent) {
+      const shell = e.target instanceof Element ? e.target.closest('[data-frame-shell]') : null
+      const id = shell?.getAttribute('data-frame-shell')
+      if (!id) return
+      flushSync(() => useLiveFrames.getState().wake(id))
+      const target = document.elementFromPoint(e.clientX, e.clientY)
+      if (!target || target.closest('[data-frame-shell]')) return
+      e.stopImmediatePropagation()
+      target.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window,
+          detail: e.detail,
+          pointerId: e.pointerId,
+          pointerType: e.pointerType,
+          isPrimary: e.isPrimary,
+          width: e.width,
+          height: e.height,
+          pressure: e.pressure,
+          button: e.button,
+          buttons: e.buttons,
+          clientX: e.clientX,
+          clientY: e.clientY,
+          screenX: e.screenX,
+          screenY: e.screenY,
+          ctrlKey: e.ctrlKey,
+          shiftKey: e.shiftKey,
+          altKey: e.altKey,
+          metaKey: e.metaKey,
+        }),
+      )
+    }
+    window.addEventListener('pointerdown', onDown, true)
+    return () => window.removeEventListener('pointerdown', onDown, true)
+  }, [])
 
   /* a new layout zoom lands in the same commit as the frames' counter-zoom
      (FrameView), so no paint sees one without the other */
@@ -1228,7 +1342,7 @@ export function Stage({
               ref={gridRef}
             />
             {/* the selected frame's size badge, in screen px (FrameLabelLayer) */}
-            <div className="pointer-events-none absolute inset-0" ref={setLabelLayer} />
+            <div className="pointer-events-none absolute inset-0" ref={attachLabelLayer} />
             {/* `world` is likewise a behaviour hook: pan hit-testing checks
             classList.contains('world') to tell background from frame */}
             <div
@@ -1453,7 +1567,7 @@ function FrameStack({ frames, layoutZoom }: { frames: Frame[]; layoutZoom: numbe
         f.hidden ? (
           <HiddenFrameView key={f.id} frame={f} stack={rank.get(f.id)} />
         ) : (
-          <FrameView key={f.id} frame={f} stack={rank.get(f.id)} layoutZoom={layoutZoom} />
+          <FrameSlot key={f.id} frame={f} stack={rank.get(f.id)} layoutZoom={layoutZoom} />
         ),
       )}
     </div>
