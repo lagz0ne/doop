@@ -46,6 +46,8 @@ import { TOOLS, isDrawingTool, resolvePointerAction, toolForKey, type Tool } fro
 import { useCanvasDrawing } from './CanvasDrawing'
 import { FrameLabelLayer } from './FrameLabelLayer'
 import { layoutZoomFor } from '../lib/layoutZoom'
+import { isCanvasElement } from '../lib/drawing'
+import { computeLiveFrames, cullingEnabled, useLiveFrames, type FrameBox } from '../lib/liveFrames'
 
 const MIN_ZOOM = 0.08
 /* The settled world is laid out at up to this zoom too (layoutZoomFor), so
@@ -242,6 +244,47 @@ export function Stage({
       window.clearTimeout(settle)
     }
   }, [])
+
+  /* Viewport culling (liveFrames.ts): which frames keep a live document.
+     Selection and editors pin frames at once; a moving camera is followed
+     once it rests, so a pan never mounts documents it is only passing. */
+  useEffect(() => {
+    if (!cullingEnabled()) return
+    const frames: FrameBox[] = (canvas?.frames ?? [])
+      .filter((f) => !f.hidden)
+      .map((f) => ({ id: f.id, x: f.x, y: f.y, width: f.width, height: f.height, element: isCanvasElement(f.html) }))
+    let timer = 0
+    function compute() {
+      const el = ref.current
+      if (!el) return
+      const s = useStore.getState()
+      const pinned = new Set<string>(s.selectedIds)
+      for (const p of Object.values(s.presences)) if (p.activeFrameId) pinned.add(p.activeFrameId)
+      const live = useLiveFrames.getState()
+      live.set(
+        computeLiveFrames(
+          frames,
+          s.viewport,
+          { width: el.clientWidth, height: el.clientHeight },
+          pinned,
+          live.ids ?? new Set(),
+        ),
+      )
+    }
+    compute()
+    const unsub = useStore.subscribe((s, prev) => {
+      if (s.viewport === prev.viewport && s.selectedIds === prev.selectedIds && s.presences === prev.presences) return
+      window.clearTimeout(timer)
+      timer = window.setTimeout(compute, s.viewport === prev.viewport ? 0 : 120)
+    })
+    const resize = new ResizeObserver(compute)
+    if (ref.current) resize.observe(ref.current)
+    return () => {
+      unsub()
+      window.clearTimeout(timer)
+      resize.disconnect()
+    }
+  }, [canvas])
 
   /* a new layout zoom lands in the same commit as the frames' counter-zoom
      (FrameView), so no paint sees one without the other */
