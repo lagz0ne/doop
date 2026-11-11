@@ -379,6 +379,7 @@ app.get('/i/:id.:ext', async (req, res) => {
       quality: Math.min(100, Math.max(1, Number(req.query.quality) || 90)),
       /* ?preview — the dashboard-card variant; see previews.ts */
       preview: req.query.preview !== undefined,
+      ...(typeof req.query.v === 'string' && /^\d+$/.test(req.query.v) ? { version: Number(req.query.v) } : null),
       ip: req.ip ?? 'unknown',
       /* the render limit targets anonymous hotlink abuse — a logged-in user
          loading a dashboard of many canvases shouldn't hit it (and behind
@@ -397,7 +398,14 @@ app.get('/i/:id.:ext', async (req, res) => {
   const { buf } = result
 
   res.set('Content-Type', ext === 'jpg' ? 'image/jpeg' : 'image/png')
-  res.set('Cache-Control', 'public, max-age=60')
+  /* A URL that names the frame's current version (?v=<updatedAt>, as the
+     editor's culled frames ask for it) can never show anything else: the
+     browser keeps it for good and a page of hundreds of previews costs no
+     request on the next visit. A stale thumbnail served while its
+     re-render runs must not be pinned that way, so only bytes known to be
+     of this version qualify; everything else keeps the short lifetime. */
+  const versioned = req.query.v === String(frame.updatedAt) && result.fresh
+  res.set('Cache-Control', versioned ? 'public, max-age=31536000, immutable' : 'public, max-age=60')
   if (req.query.download !== undefined) {
     const safe = frame.name.replace(/[^\w\- ]+/g, '').trim() || 'frame'
     res.set('Content-Disposition', `attachment; filename="${safe}.${ext}"`)

@@ -39,12 +39,18 @@ export interface ImageRequest {
    *  meaningful for jpg — a png?preview would serve jpeg bytes under an
    *  image/png content-type, so the flag is ignored there. */
   preview: boolean
+  /** the frame version the URL names (?v=), if any. The editor's culled
+   *  frames ask for the current one and show nothing else until the next
+   *  edit, so a thumbnail known to be older is not an answer to them. */
+  version?: number
   ip: string
   /** consulted only when the render budget is exhausted */
   isAuthenticated: () => Promise<boolean>
 }
 
-export type ImageResult = { status: 'ok'; buf: Buffer } | { status: 'rate-limited' }
+/** `fresh`: the bytes were rendered from the frame as it is now (a stored
+ *  thumbnail may be served stale while its re-render runs). */
+export type ImageResult = { status: 'ok'; buf: Buffer; fresh: boolean } | { status: 'rate-limited' }
 
 /** May reject when the render itself fails — the caller owns the 500. */
 export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageResult> {
@@ -57,11 +63,29 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
   /* previews first try the persisted thumbnail: survives redeploys, serves
      instantly even when stale (thumbs revalidates in the background), and
      costs no Chromium boot — so it isn't metered either */
+  let fresh = true
   if (!pending && preview) {
     const stored = await thumbs.getStored(frame)
-    if (stored) {
-      pending = Promise.resolve(stored)
+    /* A request for exactly this version, answered from a thumbnail on record
+       as older, would pin the old picture on a frame that shows it until its
+       next edit: that one waits for the render instead (deduped and capped in
+       thumbs.ts; metered like any render, and served stale when over budget).
+       Everything else gets the stored bytes at once, stale or not. */
+    const mustRender =
+      !!stored &&
+      !stored.fresh &&
+      stored.known &&
+      req.version === frame.updatedAt &&
+      (await consumeRenderBudget(req.ip, req.isAuthenticated))
+    if (mustRender) {
+      pending = thumbs.create(frame)
       remember(key, pending, frame.updatedAt)
+    } else if (stored) {
+      pending = Promise.resolve(stored.buf)
+      fresh = stored.fresh
+      /* stale bytes are not remembered: the next request should find the
+         re-render, not five more minutes of the old picture */
+      if (fresh) remember(key, pending, frame.updatedAt)
     }
   }
 
@@ -76,7 +100,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
     remember(key, pending, frame.updatedAt)
   }
 
-  return { status: 'ok', buf: await pending }
+  return { status: 'ok', buf: await pending, fresh }
 }
 
 function imageKey(id: string, ext: 'png' | 'jpg', scale: 1 | 2, quality: number | '', preview: boolean): string {

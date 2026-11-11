@@ -9,10 +9,13 @@ import * as storage from './storage.ts'
  * cache — so a dashboard never shows blank tiles waiting on Chromium: a
  * possibly-stale thumbnail is served instantly and refreshed in the
  * background. The key is deliberately unversioned; freshness lives in the
- * in-memory `written` map (frameId → the frame.updatedAt the stored thumb
- * was rendered from). After a restart freshness is simply unknown, which
- * degrades to one background re-render per previewed frame — never to a
- * blank tile.
+ * `written` map (frameId → the frame.updatedAt the stored thumb was rendered
+ * from), and beside each thumbnail in `thumb/<frameId>.ver`, read back once
+ * per frame after a restart. Without that sidecar a restart forgot every
+ * version, and the first visit to a big canvas re-rendered each frame it
+ * showed (the editor's culled frames show these previews, hundreds a page).
+ * A thumbnail stored before the sidecar existed still degrades to one
+ * background re-render — never to a blank tile.
  */
 
 /** frame.updatedAt the stored thumb was rendered from; absent = unknown */
@@ -27,6 +30,7 @@ const MIN_REVALIDATE_MS = 30_000
 const dead = new Set<string>()
 
 const keyFor = (frameId: string) => `thumb/${frameId}.jpg`
+const versionKeyFor = (frameId: string) => `thumb/${frameId}.ver`
 
 /* Global bound on concurrent preview renders. Per-frame dedupe caps repeat
    requests but not breadth: a post-restart dashboard of 50 stale canvases
@@ -75,6 +79,7 @@ export function create(frame: Frame): Promise<Buffer> {
         /* purge may have run during the put — its delete can land before
            our write finishes, so re-check and clean up our own orphan */
         if (dead.has(frame.id)) await storage.deleteObject(keyFor(frame.id))
+        else await storage.putObject(versionKeyFor(frame.id), Buffer.from(String(frame.updatedAt)), 'text/plain')
       }
     } catch (e) {
       console.error(`thumb persist failed for ${frame.id}:`, e)
@@ -91,7 +96,7 @@ export function create(frame: Frame): Promise<Buffer> {
  *  off (throttled, deduped, errors logged and swallowed) and the stored
  *  bytes are returned anyway: stale beats blank. Returns null when nothing
  *  is stored yet. */
-export async function getStored(frame: Frame): Promise<Buffer | null> {
+export async function getStored(frame: Frame): Promise<{ buf: Buffer; fresh: boolean; known: boolean } | null> {
   let buf: Buffer | null
   try {
     buf = await storage.getObject(keyFor(frame.id))
@@ -105,11 +110,18 @@ export async function getStored(frame: Frame): Promise<Buffer | null> {
     written.delete(frame.id)
     return null
   }
+  /* after a restart the version is on storage, not in memory: read it once */
+  if (!written.has(frame.id)) {
+    const version = Number((await storage.getObject(versionKeyFor(frame.id)).catch(() => null))?.toString())
+    if (Number.isFinite(version) && !written.has(frame.id)) written.set(frame.id, version)
+  }
   const fresh = written.get(frame.id) === frame.updatedAt
   const throttled = Date.now() - (lastAttempt.get(frame.id) ?? 0) < MIN_REVALIDATE_MS
   if (!fresh && !throttled && !pending.has(frame.id))
     create(frame).catch((e) => console.error(`thumb revalidate failed for ${frame.id}:`, e))
-  return buf
+  /* `known`: the version it was rendered from is on record (a thumbnail from
+     before versions were stored is of unknown age, not known to be old) */
+  return { buf, fresh, known: written.has(frame.id) }
 }
 
 /** Frame (or its whole canvas) is gone — drop the derived object too, so the
@@ -119,4 +131,5 @@ export function purge(frameId: string): void {
   written.delete(frameId)
   lastAttempt.delete(frameId)
   storage.deleteObject(keyFor(frameId)).catch(() => {})
+  storage.deleteObject(versionKeyFor(frameId)).catch(() => {})
 }
