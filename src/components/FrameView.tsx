@@ -16,6 +16,7 @@ import { copyElementLink } from '../lib/elementLink'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
+import { previewSrc, useFrameLive } from '../lib/liveFrames'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
 import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
 import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
@@ -748,6 +749,18 @@ export const FrameView = memo(function FrameView({
      flipped or shifted it away from a viewport edge */
   const menuAt = useRef({ x: 0, y: 0 })
   const [runtimeReady, setRuntimeReady] = useState(false)
+  /* Viewport culling (liveFrames.ts): far from the camera, or zoomed out past
+     reading, the frame shows its preview image instead of a live document.
+     A dropped iframe takes its runtime with it, so the handshake starts over
+     when it comes back: ready, then the current HTML is posted again. */
+  const live = useFrameLive(frame.id)
+  useEffect(() => {
+    if (live) return
+    // eslint-disable-next-line react/set-state-in-effect -- the iframe is gone; its runtime state goes with it
+    setRuntimeReady(false)
+    setRuntimeDocument(null)
+    localHtml.current = null
+  }, [live])
   useEffect(() => {
     function onMsg(ev: MessageEvent) {
       if (ev.data?.type === 'doop:frame-ready' && ev.source === iframeRef.current?.contentWindow) {
@@ -1708,36 +1721,54 @@ export const FrameView = memo(function FrameView({
             }}
             onPointerLeave={leaveHover}
           >
-            <iframe
-              ref={iframeRef}
-              className={cn('block border-none', isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white')}
-              title={frame.name}
-              data-doop-frame=""
-              sandbox="allow-scripts"
-              srcDoc={FRAME_BOOTSTRAP}
-              /* The world is laid out at CSS zoom k (Stage), which an iframe
-                 passes into its document. Chromium takes it as pixel density:
-                 the document keeps its design-px viewport and rasterizes at
-                 k×, even out of process, where a transform on this element
-                 would only stretch a 1× raster. WebKit instead lays the
-                 document out at the zoomed width, so there the zoom is undone
-                 here (keeping viewport, vh/vw, media queries and runtime rects
-                 in design px) and the scale restores the box. */
-              style={{
-                width: frame.width,
-                height: frame.height,
-                ...(FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY
-                  ? null
-                  : { zoom: counterZoom(layoutZoom), transform: `scale(${layoutZoom})` }),
-                transformOrigin: '0 0',
-                /* Chromium paints an opaque backdrop behind an iframe whose
-                   colour scheme differs from its document's; the page's dark
-                   scheme reaches this element by inheritance while a
-                   standalone element's document is light, so a shape on the
-                   dark canvas sat on a white square */
-                ...(isCanvasElement(frame.html) ? { colorScheme: 'light' } : null),
-              }}
-            />
+            {live ? (
+              <iframe
+                ref={iframeRef}
+                className={cn('block border-none', isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white')}
+                title={frame.name}
+                data-doop-frame=""
+                sandbox="allow-scripts"
+                srcDoc={FRAME_BOOTSTRAP}
+                /* The world is laid out at CSS zoom k (Stage), which an iframe
+                   passes into its document. Chromium takes it as pixel density:
+                   the document keeps its design-px viewport and rasterizes at
+                   k×, even out of process, where a transform on this element
+                   would only stretch a 1× raster. WebKit instead lays the
+                   document out at the zoomed width, so there the zoom is undone
+                   here (keeping viewport, vh/vw, media queries and runtime rects
+                   in design px) and the scale restores the box. */
+                style={{
+                  width: frame.width,
+                  height: frame.height,
+                  ...(FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY
+                    ? null
+                    : { zoom: counterZoom(layoutZoom), transform: `scale(${layoutZoom})` }),
+                  transformOrigin: '0 0',
+                  /* Chromium paints an opaque backdrop behind an iframe whose
+                     colour scheme differs from its document's; the page's dark
+                     scheme reaches this element by inheritance while a
+                     standalone element's document is light, so a shape on the
+                     dark canvas sat on a white square */
+                  ...(isCanvasElement(frame.html) ? { colorScheme: 'light' } : null),
+                }}
+              />
+            ) : (
+              <div
+                className={cn('block overflow-hidden', isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white')}
+                style={{ width: frame.width, height: frame.height }}
+                data-doop-frame-preview=""
+              >
+                {frame.html && !isCanvasElement(frame.html) && (
+                  <img
+                    src={previewSrc(frame.id, frame.updatedAt)}
+                    alt=""
+                    draggable={false}
+                    decoding="async"
+                    className="pointer-events-none block w-full select-none"
+                  />
+                )}
+              </div>
+            )}
             {!frame.html && (
               <div className="absolute inset-0 grid place-items-center bg-[repeating-linear-gradient(45deg,transparent_0_10px,rgba(28,26,21,0.025)_10px_20px)] text-[13px] text-ink-faint">
                 empty frame — add HTML
