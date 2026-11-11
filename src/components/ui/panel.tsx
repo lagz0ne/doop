@@ -58,6 +58,17 @@ function Panel({
     drag.current = null
     setDragging(false)
   }
+  /* The mark goes on <body> itself, not on the panel for a `body:has(...)`
+     rule to find: a :has() anchored on body whose subject is every descendant
+     makes each node inserted or removed anywhere in the app restyle the whole
+     document (the engine cannot tell which insertions could flip the :has).
+     On a canvas that mounts and unmounts frames as the camera moves, that was
+     a full recalc, tens of ms, on every such commit and every click. */
+  React.useEffect(() => {
+    if (!dragging) return
+    document.body.setAttribute('data-panel-resizing', '')
+    return () => document.body.removeAttribute('data-panel-resizing')
+  }, [dragging])
   const resizing = surface !== 'inline' ? resize : undefined
   const setWidth = (width: number) => {
     if (resizing) resizing.onResize(Math.round(Math.max(resizing.min, Math.min(resizing.max, width))))

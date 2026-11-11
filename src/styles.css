@@ -449,8 +449,10 @@
 
 /* While a canvas panel's edge is dragged, the chrome positioned off its width
    (Inspector, side rail, tool rail, zoom pill) jumps with it rather than
-   easing after it, so a growing panel never slides over a neighbour. */
-body:has([data-panel-resizing]) * {
+   easing after it, so a growing panel never slides over a neighbour. The Panel
+   sets the attribute on <body> while it drags (ui/panel.tsx says why it is
+   not a :has() rule). */
+body[data-panel-resizing] * {
   transition-duration: 0s !important;
 }
 
