@@ -98,10 +98,40 @@ describe('thumbs', () => {
     mocks.getObject.mockResolvedValue(Buffer.from('stale'))
     const f = frame('stale-frame')
     const [a, b] = await Promise.all([thumbs.getStored(f), thumbs.getStored(f)])
-    expect(a?.toString()).toBe('stale')
-    expect(b?.toString()).toBe('stale')
+    expect(a?.buf.toString()).toBe('stale')
+    expect(b?.buf.toString()).toBe('stale')
+    expect(a?.fresh).toBe(false)
     await tick()
     /* one background refresh, not one per request (dedupe + throttle) */
+    expect(mocks.renderFrame).toHaveBeenCalledTimes(1)
+  })
+
+  it('stores the version beside the thumbnail', async () => {
+    mocks.renderFrame.mockResolvedValue(Buffer.from('jpg'))
+    await thumbs.create(frame('versioned'))
+    expect(mocks.putObject).toHaveBeenCalledWith('thumb/versioned.jpg', Buffer.from('jpg'), 'image/jpeg')
+    expect(mocks.putObject).toHaveBeenCalledWith('thumb/versioned.ver', Buffer.from('1'), 'text/plain')
+  })
+
+  it('knows a stored thumbnail is current after a restart, and does not render it again', async () => {
+    /* nothing in memory for this frame: only storage knows its version */
+    mocks.getObject.mockImplementation((key: string) =>
+      Promise.resolve(Buffer.from(key.endsWith('.ver') ? '1' : 'kept')),
+    )
+    const stored = await thumbs.getStored(frame('after-restart'))
+    expect(stored).toEqual({ buf: Buffer.from('kept'), fresh: true, known: true })
+    await tick()
+    expect(mocks.renderFrame).not.toHaveBeenCalled()
+  })
+
+  it('re-renders a stored thumbnail whose version is behind the frame', async () => {
+    deferredRenders()
+    mocks.getObject.mockImplementation((key: string) =>
+      Promise.resolve(Buffer.from(key.endsWith('.ver') ? '0' : 'old')),
+    )
+    const stored = await thumbs.getStored(frame('behind'))
+    expect(stored).toEqual({ buf: Buffer.from('old'), fresh: false, known: true })
+    await tick()
     expect(mocks.renderFrame).toHaveBeenCalledTimes(1)
   })
 })
