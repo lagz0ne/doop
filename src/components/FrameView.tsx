@@ -17,6 +17,7 @@ import { copyElementLink } from '../lib/elementLink'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
+import { previewSrc, useFrameLive } from '../lib/liveFrames'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
 import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
 import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
@@ -820,6 +821,21 @@ export const FrameView = memo(function FrameView({
   const keyPort = useRef<MessagePort | null>(null)
   /* saves a document the runtime serialized after a text edit (set below) */
   const saveEditedRef = useRef<(html: string, discrete: boolean) => void>(() => {})
+  /* Viewport culling (liveFrames.ts): far from the camera, or zoomed out past
+     reading, the frame shows its preview image instead of a live document.
+     A dropped iframe takes its runtime with it, so the handshake starts over
+     when it comes back: ready, then the current HTML is posted again. */
+  const live = useFrameLive(frame.id)
+  useEffect(() => {
+    if (live) return
+    // eslint-disable-next-line react/set-state-in-effect -- the iframe is gone; its runtime state goes with it
+    setRuntimeReady(false)
+    setRuntimeDocument(null)
+    localHtml.current = null
+    /* the next document gets a port of its own when it is ready */
+    keyPort.current?.close()
+    keyPort.current = null
+  }, [live])
   useEffect(() => {
     /* a key pressed while the focus sits in this frame's document: replay
        it on the iframe, where it bubbles to the canvas shortcuts as if the
@@ -1904,6 +1920,7 @@ export const FrameView = memo(function FrameView({
                  belong to the canvas, so neither this box nor the iframe takes them */
               style={{ left: -bleed, top: -bleed, ...(bleed ? { pointerEvents: 'none' } : null) }}
             >
+              {live ? (
               <iframe
                 ref={iframeRef}
                 className="relative block border-none bg-transparent"
@@ -1937,6 +1954,23 @@ export const FrameView = memo(function FrameView({
                   ...(isCanvasElement(frame.html) ? { colorScheme: 'light' } : null),
                 }}
               />
+              ) : (
+                <div
+                  className={cn('block overflow-hidden', isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white')}
+                  style={{ width: frame.width, height: frame.height, marginLeft: bleed, marginTop: bleed }}
+                  data-doop-frame-preview=""
+                >
+                  {frame.html && !isCanvasElement(frame.html) && (
+                    <img
+                      src={previewSrc(frame.id, frame.updatedAt)}
+                      alt=""
+                      draggable={false}
+                      decoding="async"
+                      className="pointer-events-none block w-full select-none"
+                    />
+                  )}
+                </div>
+              )}
             </div>
             {/* a standalone element is see-through: the paper's grid shows */}
             {!isCanvasElement(frame.html) && <PixelGrid layoutZoom={layoutZoom} />}
