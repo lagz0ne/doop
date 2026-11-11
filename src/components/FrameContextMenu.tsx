@@ -31,6 +31,11 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
   const [exportFrames, setExportFrames] = useState<Frame[] | null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [savingApproval, setSavingApproval] = useState(false)
+  /* The menu's facts are read only while this frame's menu is open. Each one
+     walks the canvas's frames, and every mounted FrameView carries a menu, so
+     read unconditionally they ran for every frame on every store update
+     (a camera move included). */
+  const open = useStore((s) => s.ctxMenu?.frameId === frame.id)
   /* a right-click inside a multi-selection acts on the whole group */
   const selectedIds = useStore((s) => s.selectedIds)
   /* a view or comment link keeps the items that only read the frame */
@@ -41,6 +46,7 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
   const streaming = useStore((s) => groupIds.some((id) => !!s.streams[id]))
   /* Hide/Show reads as one item: the group shows when every frame in it is hidden */
   const allHidden = useStore((s) => {
+    if (!open) return false
     const ids = s.selectedIds.includes(frame.id) ? s.selectedIds : [frame.id]
     return (s.canvas?.frames ?? []).filter((f) => ids.includes(f.id)).every((f) => !!f.hidden)
   })
@@ -52,6 +58,7 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
   /* Lock reads as one state for the group: it unlocks only once every frame
      in it is locked, otherwise it locks the rest (as ⌘⇧L does) */
   const allLocked = useStore((s) => {
+    if (!open) return false
     const ids = s.selectedIds.includes(frame.id) ? s.selectedIds : [frame.id]
     const group = s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame]
     return group.every((f) => f.locked)
@@ -61,6 +68,7 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
     deleteFramesTracked(groupFrames().filter((f) => !f.locked))
   }
   const allReady = useStore((s) => {
+    if (!open) return false
     const ids = s.selectedIds.includes(frame.id) ? s.selectedIds : [frame.id]
     const group = s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame]
     return group.every((f) => f.approval?.status === 'ready_for_dev')

@@ -14,7 +14,6 @@ import type { Canvas, Frame } from '../shared/types'
 declare global {
   interface Window {
     seedPages: (canvas: Canvas) => void
-    pageState: () => { viewport: { x: number; y: number; zoom: number }; selectedId: string }
   }
 }
 
@@ -114,6 +113,63 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
     await camera(page, { x: -11200 + 50, y: -26400 + 50, zoom: 1 })
     expect(await page.evaluate(() => !!document.querySelector('iframe[title="Frame 199"]'))).toBe(true)
     expect(await page.evaluate(() => !!document.querySelector('iframe[title="Frame 0"]'))).toBe(false)
+  }, 30_000)
+
+  /* Culled frames are FrameShells: no handlers of their own. A press wakes
+     the shell into a FrameView before it is delivered. */
+  const frameAt = (page: Page, id: string) =>
+    page.evaluate(
+      `import('/src/lib/store.ts').then(({ useStore }) => { const s = useStore.getState(); const f = s.canvas.frames.find((f) => f.id === '${id}'); return { x: f.x, y: f.y, selected: s.selectedIds.includes('${id}') } })`,
+    ) as Promise<{ x: number; y: number; selected: boolean }>
+  /** screen point at the middle of a frame, for the current camera */
+  async function middleOf(page: Page, id: string) {
+    const f = await frameAt(page, id)
+    const vp = (await page.evaluate(
+      `import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().viewport)`,
+    )) as { x: number; y: number; zoom: number }
+    const stage = await page.evaluate(() => {
+      const r = document.querySelector('.stage')!.getBoundingClientRect()
+      return { left: r.left, top: r.top }
+    })
+    return { x: stage.left + vp.x + (f.x + 720) * vp.zoom, y: stage.top + vp.y + (f.y + 450) * vp.zoom }
+  }
+
+  it('draws culled frames as shells and selects one on a click', async () => {
+    await store(page, 'select(null)')
+    await camera(page, { x: 20, y: 60, zoom: 0.08 })
+    expect(await page.evaluate(() => document.querySelectorAll('[data-frame-shell]').length)).toBe(FRAMES)
+    const at = await middleOf(page, 'f9')
+    await page.mouse.click(at.x, at.y)
+    await new Promise((r) => setTimeout(r, 200))
+    expect((await frameAt(page, 'f9')).selected).toBe(true)
+    /* it is a FrameView now: no shell, and (selected) its document is live */
+    expect(await page.evaluate(() => !!document.querySelector('[data-frame-shell="f9"]'))).toBe(false)
+    expect(await page.evaluate(() => !!document.querySelector('iframe[title="Frame 9"]'))).toBe(true)
+  }, 30_000)
+
+  it('moves a culled frame with one drag: the press that wakes it also starts the drag', async () => {
+    await store(page, 'select(null)')
+    await camera(page, { x: 20, y: 60, zoom: 0.08 })
+    const before = await frameAt(page, 'f17')
+    const at = await middleOf(page, 'f17')
+    await page.mouse.move(at.x, at.y)
+    await page.mouse.down()
+    await page.mouse.move(at.x + 20, at.y + 12, { steps: 4 })
+    await page.mouse.move(at.x + 40, at.y + 24, { steps: 4 })
+    await page.mouse.up()
+    await new Promise((r) => setTimeout(r, 200))
+    const after = await frameAt(page, 'f17')
+    expect(after.x).toBeGreaterThan(before.x + 300)
+    expect(after.y).toBeGreaterThan(before.y + 150)
+  }, 30_000)
+
+  it('keeps a large selection as previews: no document per selected frame', async () => {
+    await page.evaluate(
+      `import('/src/lib/store.ts').then(({ useStore }) => useStore.setState({ selectedIds: Array.from({ length: 60 }, (_, i) => 'f' + i), selectedId: 'f0' }))`,
+    )
+    await new Promise((r) => setTimeout(r, 400))
+    expect(await iframes(page)).toBe(0)
+    await store(page, 'select(null)')
   }, 30_000)
 
   it('measures a click with culling on and off (written to $LIVEFRAMES_BENCH, not asserted)', async () => {

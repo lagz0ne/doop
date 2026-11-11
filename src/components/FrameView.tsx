@@ -15,7 +15,7 @@ import { copyElementLink } from '../lib/elementLink'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
-import { previewSrc, useFrameLive } from '../lib/liveFrames'
+import { previewSrc, useFrameAwake, useFrameLive } from '../lib/liveFrames'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
 import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
 import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
@@ -311,10 +311,15 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
     // A new surface press supersedes the previous click, including an iframe
     // reply that is already in flight when the next layer starts moving.
     if (mode === 'move' && probeOnClick && !skipElement) cancelProbe()
+    /* A layer can only be picked or moved in a document that is there to
+       hit-test. A frame showing its preview (liveFrames.ts) has none, and the
+       layer path would wait on it and then drop the press: such a press is
+       the frame's, at once. */
     if (
       mode === 'move' &&
       probeOnClick &&
       !skipElement &&
+      live &&
       elementMove.start(
         e,
         (press, move, released) => {
@@ -1472,21 +1477,7 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
                 }}
               />
             ) : (
-              <div
-                className={cn('block overflow-hidden', isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white')}
-                style={{ width: frame.width, height: frame.height }}
-                data-doop-frame-preview=""
-              >
-                {frame.html && !isCanvasElement(frame.html) && (
-                  <img
-                    src={previewSrc(frame.id, frame.updatedAt)}
-                    alt=""
-                    draggable={false}
-                    decoding="async"
-                    className="pointer-events-none block w-full select-none"
-                  />
-                )}
-              </div>
+              <FramePreview frame={frame} />
             )}
             {!frame.html && (
               <div className="absolute inset-0 grid place-items-center bg-[repeating-linear-gradient(45deg,transparent_0_10px,rgba(28,26,21,0.025)_10px_20px)] text-[13px] text-ink-faint">
@@ -1800,4 +1791,108 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
       )}
     </ContextMenu>
   )
+})
+
+const PREVIEW_RETRIES = 4
+
+/** What a frame shows without its document: the persisted preview image.
+ *  Lazy and async, so a page of hundreds fetches and decodes the ones near
+ *  the view first and never blocks a frame on a decode. */
+function FramePreview({ frame }: { frame: Frame }) {
+  const element = isCanvasElement(frame.html)
+  /* A preview that fails to load (a render that failed, an anonymous viewer
+     past the render budget) is asked for again, a few times and less often
+     each time; a new version of the frame starts over. */
+  const [retry, setRetry] = useState({ version: frame.updatedAt, count: 0 })
+  const attempt = retry.version === frame.updatedAt ? retry.count : 0
+  const timer = useRef(0)
+  useEffect(() => () => window.clearTimeout(timer.current), [])
+  const src = previewSrc(frame.id, frame.updatedAt)
+  return (
+    <div
+      className={cn('block overflow-hidden', element ? 'bg-transparent' : 'bg-white')}
+      style={{ width: frame.width, height: frame.height }}
+      data-doop-frame-preview=""
+    >
+      {frame.html && !element && (
+        <img
+          src={attempt ? `${src}&retry=${attempt}` : src}
+          alt=""
+          draggable={false}
+          loading="lazy"
+          decoding="async"
+          className="pointer-events-none block w-full select-none"
+          onError={() => {
+            if (attempt >= PREVIEW_RETRIES) return
+            window.clearTimeout(timer.current)
+            timer.current = window.setTimeout(
+              () => setRetry({ version: frame.updatedAt, count: attempt + 1 }),
+              2000 * 2 ** attempt,
+            )
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * A frame far from the camera, or too small on screen to read (liveFrames.ts):
+ * its preview and its name, and nothing else. No document, no menu, no
+ * handlers and no store subscription, so a page of hundreds costs the editor
+ * what its few FrameViews cost. The Stage wakes a shell on the press that
+ * lands on it (it reads `data-frame-shell`), before the press is delivered,
+ * so selecting, dragging and the context menu behave as on any frame.
+ */
+const FrameShell = memo(function FrameShell({ frame }: { frame: Frame }) {
+  const element = isCanvasElement(frame.html)
+  return (
+    <div
+      data-frame-shell={frame.id}
+      data-frame-locked={frame.locked ? '' : undefined}
+      className="absolute"
+      style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}
+    >
+      {!element && (
+        <div
+          data-frame-title=""
+          className="pointer-events-auto absolute bottom-full left-0 flex origin-bottom-left cursor-default select-none items-center gap-2 overflow-hidden whitespace-nowrap text-[12px] font-semibold text-ink-soft"
+          style={{
+            width: 'calc(100% * var(--zoom, 1))',
+            transform: `scale(calc(1 / var(--zoom, 1))) translateY(-${LABEL_GAP}px)`,
+          }}
+        >
+          {frame.locked && (
+            <span className="flex shrink-0 items-center text-ink-faint">
+              <LockIcon width={11} height={11} />
+            </span>
+          )}
+          <span className="min-w-0 overflow-hidden text-ellipsis">{frame.name}</span>
+          <FrameApprovalBadge frame={frame} />
+        </div>
+      )}
+      <div
+        data-frame-surface=""
+        className={cn(
+          'absolute inset-0 cursor-default overflow-hidden',
+          element ? 'bg-transparent' : 'border border-line bg-white shadow-card',
+        )}
+      >
+        <FramePreview frame={frame} />
+        {!frame.html && (
+          <div className="absolute inset-0 grid place-items-center bg-[repeating-linear-gradient(45deg,transparent_0_10px,rgba(28,26,21,0.025)_10px_20px)] text-[13px] text-ink-faint">
+            empty frame — add HTML
+          </div>
+        )}
+      </div>
+    </div>
+  )
+})
+
+/** One frame on the Stage: a FrameView while it is live, woken, selected or
+ *  being designed into, a FrameShell the rest of the time. */
+export const FrameSlot = memo(function FrameSlot({ frame, layoutZoom }: { frame: Frame; layoutZoom: number }) {
+  const awake = useFrameAwake(frame.id)
+  const engaged = useStore((s) => s.selectedIds.includes(frame.id) || !!s.streams[frame.id])
+  return awake || engaged ? <FrameView frame={frame} layoutZoom={layoutZoom} /> : <FrameShell frame={frame} />
 })
