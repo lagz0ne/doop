@@ -62,7 +62,7 @@ it('primes the image cache so the preview card’s load is a free cached serve',
   mocks.renderFrame.mockResolvedValue(Buffer.from('first'))
   const result = await screenshot()
   expect(result.isError).toBeFalsy()
-  expect(await getImage(frame, request('ip-a'))).toEqual({ status: 'ok', buf: Buffer.from('first') })
+  expect(await getImage(frame, request('ip-a'))).toEqual({ status: 'ok', buf: Buffer.from('first'), fresh: true })
   expect(mocks.renderFrame).toHaveBeenCalledTimes(1)
 })
 
@@ -75,6 +75,6 @@ it('never files a screenshot under an edit that landed while it rendered', async
   })
   mocks.renderFrame.mockResolvedValue(Buffer.from('fresh'))
   await screenshot()
-  expect(await getImage(frame, request('ip-b'))).toEqual({ status: 'ok', buf: Buffer.from('fresh') })
+  expect(await getImage(frame, request('ip-b'))).toEqual({ status: 'ok', buf: Buffer.from('fresh'), fresh: true })
   expect(mocks.renderFrame).toHaveBeenCalledTimes(2)
 })
