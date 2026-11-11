@@ -9,8 +9,16 @@ import { create } from 'zustand'
    (/i/<id>.jpg?preview, the dashboard thumbnail) and get their iframe back
    when they come near the viewport again.
 
+   A frame that is not live is not a FrameView at all but a FrameShell: its
+   preview and its name, three elements and one subscription, where a
+   FrameView is some forty hooks, a context menu and forty-odd elements. On a
+   page of a few hundred frames that is the difference between the editor
+   paying for every frame on every store update and paying for the handful in
+   view. A press on a shell wakes it (it becomes a FrameView, synchronously,
+   before the press is delivered), so every gesture works as it always did.
+
    The Stage computes the live set when the camera settles and publishes it
-   here; each FrameView subscribes to its own membership only, so a pan or a
+   here; each frame subscribes to its own membership only, so a pan or a
    zoom re-renders nothing but the frames that flip. */
 
 export interface FrameBox {
@@ -53,6 +61,11 @@ export const ENTER_MARGIN = 0.5
 export const KEEP_MARGIN = 1
 /** At most this many live documents besides the pinned ones; the nearest win. */
 export const MAX_LIVE = 24
+/** A selection this large pins nothing: selecting a whole page must not boot
+ *  a document per frame. Each frame still follows the distance rules. */
+export const MAX_PINNED_SELECTION = 6
+/** Frames woken by a press stay FrameViews until this many newer ones exist. */
+const MAX_WOKEN = 8
 
 /** The world rectangle the camera shows, grown by `margin` viewports each side. */
 export function viewRect(camera: Camera, stage: Size, margin: number) {
@@ -93,12 +106,16 @@ export function computeLiveFrames(
   const cx = enter.x + enter.width / 2
   const cy = enter.y + enter.height / 2
   const readable = camera.zoom >= LIVE_MIN_ZOOM
-  const near = frames
-    .filter((f) => !live.has(f.id) && (readable || f.element))
-    .filter((f) => intersects(f, previous.has(f.id) ? keep : enter))
+  const near = frames.filter((f) => !live.has(f.id) && intersects(f, previous.has(f.id) ? keep : enter))
+  /* an element has no preview to stand in for it, so every one near the view
+     is live whatever the zoom, and none of them counts against the cap */
+  for (const f of near) if (f.element) live.add(f.id)
+  if (!readable) return live
+  const documents = near
+    .filter((f) => !f.element)
     .map((f) => ({ id: f.id, d: Math.hypot(f.x + f.width / 2 - cx, f.y + f.height / 2 - cy) }))
     .sort((a, b) => a.d - b.d)
-  for (const f of near.slice(0, MAX_LIVE)) live.add(f.id)
+  for (const f of documents.slice(0, MAX_LIVE)) live.add(f.id)
   return live
 }
 
@@ -112,17 +129,38 @@ interface LiveFramesState {
   /** null until the Stage has measured itself: every frame stays live, the
    *  behaviour before culling, so nothing depends on the first measurement */
   ids: ReadonlySet<string> | null
+  /** frames a press woke: FrameViews (not necessarily live), newest last */
+  woken: readonly string[]
   set(ids: ReadonlySet<string>): void
+  wake(frameId: string): void
 }
 
 export const useLiveFrames = create<LiveFramesState>((set, get) => ({
   ids: null,
+  woken: [],
   set(ids) {
     const prev = get().ids
     if (prev && sameSet(prev, ids)) return
     set({ ids })
   },
+  wake(frameId) {
+    const woken = get().woken
+    if (woken[woken.length - 1] === frameId) return
+    set({ woken: [...woken.filter((id) => id !== frameId), frameId].slice(-MAX_WOKEN) })
+  },
 }))
+
+/** True when the frame is drawn by a full FrameView rather than a FrameShell:
+ *  it is live, or a press woke it. (Selection and streaming are the caller's
+ *  to add: they live in the canvas store.) */
+export function useFrameAwake(frameId: string): boolean {
+  return useLiveFrames((s) => s.ids === null || s.ids.has(frameId) || s.woken.includes(frameId))
+}
+
+/** The frames a selection pins live: all of a small one, none of a large one. */
+export function pinnedBySelection(selectedIds: readonly string[]): readonly string[] {
+  return selectedIds.length <= MAX_PINNED_SELECTION ? selectedIds : []
+}
 
 /** True when the frame should render its live document. */
 export function useFrameLive(frameId: string): boolean {

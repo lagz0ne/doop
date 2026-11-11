@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { computeLiveFrames, LIVE_MIN_ZOOM, MAX_LIVE, viewRect, type FrameBox } from '../src/lib/liveFrames'
+import {
+  computeLiveFrames,
+  LIVE_MIN_ZOOM,
+  MAX_LIVE,
+  MAX_PINNED_SELECTION,
+  pinnedBySelection,
+  useLiveFrames,
+  viewRect,
+  type FrameBox,
+} from '../src/lib/liveFrames'
 
 const stage = { width: 1400, height: 900 }
 /** a grid of 1440×900 frames, 8 per row, 160/200 px apart (the layout of a large real canvas) */
@@ -63,6 +72,19 @@ describe('computeLiveFrames', () => {
     expect(kept.has('f2')).toBe(true)
   })
 
+  it('never counts canvas elements against the cap: they have no preview to stand in', () => {
+    const shapes: FrameBox[] = Array.from({ length: 60 }, (_, i) => ({
+      id: `s${i}`,
+      x: (i % 10) * 100,
+      y: Math.floor(i / 10) * 100,
+      width: 80,
+      height: 80,
+      element: true,
+    }))
+    const live = computeLiveFrames([...grid(40), ...shapes], { x: 0, y: 0, zoom: 1 }, stage, none, none)
+    expect(shapes.every((s) => live.has(s.id))).toBe(true)
+  })
+
   it('culls canvas elements by distance only, never by zoom', () => {
     const shape: FrameBox = { id: 'shape', x: 100, y: 100, width: 200, height: 200, element: true }
     const live = computeLiveFrames([shape], { x: 0, y: 0, zoom: 0.1 }, stage, none, none)
@@ -72,5 +94,24 @@ describe('computeLiveFrames', () => {
   it('keeps everything pinned and nothing else before the stage is measured', () => {
     const live = computeLiveFrames(grid(5), { x: 0, y: 0, zoom: 1 }, { width: 0, height: 0 }, new Set(['f3']), none)
     expect([...live]).toEqual(['f3'])
+  })
+})
+
+describe('pinnedBySelection', () => {
+  it('pins a small selection and nothing of a large one', () => {
+    expect(pinnedBySelection(['a', 'b'])).toEqual(['a', 'b'])
+    const many = Array.from({ length: MAX_PINNED_SELECTION + 1 }, (_, i) => `f${i}`)
+    expect(pinnedBySelection(many)).toEqual([])
+  })
+})
+
+describe('wake', () => {
+  it('keeps the most recently woken frames, newest last, without duplicates', () => {
+    const { wake } = useLiveFrames.getState()
+    for (const id of ['a', 'b', 'a', 'c']) wake(id)
+    expect(useLiveFrames.getState().woken).toEqual(['b', 'a', 'c'])
+    for (let i = 0; i < 20; i++) wake(`f${i}`)
+    expect(useLiveFrames.getState().woken).toHaveLength(8)
+    expect(useLiveFrames.getState().woken.at(-1)).toBe('f19')
   })
 })
