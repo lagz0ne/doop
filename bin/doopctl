@@ -50,7 +50,9 @@ canvases and sharing
   share add <canvas> <user>...       make them members (they must have an account)
   share remove <canvas> <user>                                          (confirms)
   share link <canvas> none|view|comment|edit
-                                     anyone signed in with the link     (confirms unless none)
+                                     anyone with the link; doop v0.14+ lets signed-out
+                                     visitors view too (comment/edit need an account)
+                                                                        (confirms unless none)
   share owner <canvas> <user> [--drop-previous]
                                      hand the canvas over; the previous owner stays
                                      a member unless --drop-previous   (confirms)
@@ -219,7 +221,7 @@ const day = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : '')
 function showAccess(a) {
   console.log(`${a.name}  (${a.id})`)
   console.log(`  owner  ${a.owner ? `${a.owner.email}` : '(none)'}`)
-  console.log(`  link   ${a.linkAccess}${a.linkAccess === 'none' ? '' : '  (anyone signed in who has the link)'}`)
+  console.log(`  link   ${a.linkAccess}${a.linkAccess === 'none' ? '' : '  (anyone with the link; from doop v0.14 that includes signed-out visitors, view only)'}`)
   if (a.workspaceId) console.log(`  workspace  ${a.workspaceId}`)
   console.log(`  members${a.members.length ? '' : '  (none)'}`)
   for (const m of a.members) console.log(`    ${m.email}`)
@@ -416,7 +418,7 @@ async function share() {
     case 'link': {
       const [access] = targets
       if (!['none', 'view', 'comment', 'edit'].includes(access)) fail('link access is none, view, comment or edit', 2)
-      if (access !== 'none') await confirm(`Let anyone signed in who has the link ${access} canvas ${id}.`)
+      if (access !== 'none') await confirm(`Let anyone with the link ${access} canvas ${id} (from doop v0.14, signed-out visitors can view it too).`)
       return out(await api(`/canvases/${enc(id)}/link`, { method: 'PUT', body: { access } }), showAccess)
     }
     case 'owner': {
