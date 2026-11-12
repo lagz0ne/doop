@@ -17,7 +17,7 @@ import { copyElementLink } from '../lib/elementLink'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
-import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel } from '../lib/liveFrames'
+import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
 import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
 import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
@@ -831,11 +831,21 @@ export const FrameView = memo(function FrameView({
      A dropped iframe takes its runtime with it, so the handshake starts over
      when it comes back: ready, then the current HTML is posted again. */
   const live = useFrameLive(frame.id)
+  /* A document that has just been given its iframe has nothing to show yet:
+     the iframe is blank until the runtime boots, takes the HTML and paints,
+     and then its stylesheets and fonts land. Shown bare, every frame going
+     live flashed white (47 ms and up, measured) and re-flowed once. So the
+     preview picture stays on top until the runtime reports the document
+     shown (doop:shown, frameRuntime.ts): the frame goes from picture to
+     document without a blank in between. */
+  const [documentShown, setDocumentShown] = useState(false)
+  const previews = usePreviews()
   useEffect(() => {
     if (live) return
     // eslint-disable-next-line react/set-state-in-effect -- the iframe is gone; its runtime state goes with it
     setRuntimeReady(false)
     setRuntimeDocument(null)
+    setDocumentShown(false)
     localHtml.current = null
     /* the next document gets a port of its own when it is ready */
     keyPort.current?.close()
@@ -889,6 +899,7 @@ export const FrameView = memo(function FrameView({
         }
         setRuntimeReady(true)
       }
+      if (ev.data?.type === 'doop:shown' && win && ev.source === win) setDocumentShown(true)
       if (ev.data?.type === 'doop:bleed-want' && win && ev.source === win) {
         const px = Number((ev.data as { px?: unknown }).px)
         setBleed(Number.isFinite(px) ? Math.min(1024, Math.max(0, px)) : 0)
@@ -1925,16 +1936,16 @@ export const FrameView = memo(function FrameView({
                  belong to the canvas, so neither this box nor the iframe takes them */
               style={{ left: -bleed, top: -bleed, ...(bleed ? { pointerEvents: 'none' } : null) }}
             >
-              {live ? (
-              <iframe
-                ref={iframeRef}
-                className="relative block border-none bg-transparent"
-                data-bleed={bleed || undefined}
-                title={frame.name}
-                data-doop-frame=""
-                sandbox="allow-scripts"
-                srcDoc={FRAME_BOOTSTRAP}
-                /* The world is laid out at CSS zoom k (Stage), which an iframe
+              {live && (
+                <iframe
+                  ref={iframeRef}
+                  className="relative block border-none bg-transparent"
+                  data-bleed={bleed || undefined}
+                  title={frame.name}
+                  data-doop-frame=""
+                  sandbox="allow-scripts"
+                  srcDoc={FRAME_BOOTSTRAP}
+                  /* The world is laid out at CSS zoom k (Stage), which an iframe
                  passes into its document. Chromium takes it as pixel density:
                  the document keeps its design-px viewport and rasterizes at
                  k×, even out of process, where a transform on this element
@@ -1942,30 +1953,36 @@ export const FrameView = memo(function FrameView({
                  document out at the zoomed width, so there the zoom is undone
                  here (keeping viewport, vh/vw, media queries and runtime rects
                  in design px) and the scale restores the box. */
-                style={{
-                  width: frame.width + 2 * bleed,
-                  height: frame.height + 2 * bleed,
-                  /* while editing, the document takes the pointer back */
-                  ...(bleed ? { pointerEvents: editing ? 'auto' : 'none' } : null),
-                  ...(FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY
-                    ? null
-                    : { zoom: counterZoom(layoutZoom), transform: `scale(${layoutZoom})` }),
-                  transformOrigin: '0 0',
-                  /* Chromium paints an opaque backdrop behind an iframe whose
+                  style={{
+                    width: frame.width + 2 * bleed,
+                    height: frame.height + 2 * bleed,
+                    /* while editing, the document takes the pointer back */
+                    ...(bleed ? { pointerEvents: editing ? 'auto' : 'none' } : null),
+                    ...(FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY
+                      ? null
+                      : { zoom: counterZoom(layoutZoom), transform: `scale(${layoutZoom})` }),
+                    transformOrigin: '0 0',
+                    /* Chromium paints an opaque backdrop behind an iframe whose
                    colour scheme differs from its document's; the page's dark
                    scheme reaches this element by inheritance while a
                    standalone element's document is light, so a shape on the
                    dark canvas sat on a white square */
-                  ...(isCanvasElement(frame.html) ? { colorScheme: 'light' } : null),
-                }}
-              />
-              ) : (
-                /* back at the frame's box: the wrapper sits out by the bleed */
-                <div style={bleed ? { marginLeft: bleed, marginTop: bleed } : undefined}>
-                  <FramePreview frame={frame} />
-                </div>
+                    ...(isCanvasElement(frame.html) ? { colorScheme: 'light' } : null),
+                  }}
+                />
               )}
             </div>
+            {/* The preview: all the frame shows without a document, and what
+            covers a booting one (see documentShown). One element in one place
+            for both, so the picture is never taken down and put back between
+            them. A frame being streamed into has no picture of what is
+            arriving, and shows its document as it comes. It sits at the
+            frame's box, not out by the bleed. */}
+            {(!live || (!documentShown && previews && !stream)) && (
+              <div className={live ? 'pointer-events-none absolute inset-0' : undefined}>
+                <FramePreview frame={frame} />
+              </div>
+            )}
             {/* a standalone element is see-through: the paper's grid shows */}
             {!isCanvasElement(frame.html) && <PixelGrid layoutZoom={layoutZoom} />}
             {!frame.html && (
