@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { authClient } from '../lib/auth'
+import { FULL_UI } from '../lib/fullUi'
 import { navigate } from '../App'
 import { posthog } from '../lib/posthog'
 import { useMe } from '../lib/me'
@@ -96,17 +97,19 @@ export function AccountMenu({
         </DropdownMenuLabel>
         {/* the plan is a workspace thing; this line says which side of it the
             account is on — a member of a live paid workspace is on Team */}
-        <div className="mx-2.5 mb-2 flex items-center gap-[7px] text-caption text-ink-soft">
-          {me?.plan === 'team' ? (
-            <>
-              <Badge tone="accent">team</Badge> {t('shell.teamPlan')}
-            </>
-          ) : (
-            <>
-              <Badge>free</Badge> {t('shell.personalPlan')}
-            </>
-          )}
-        </div>
+        {FULL_UI && (
+          <div className="mx-2.5 mb-2 flex items-center gap-[7px] text-caption text-ink-soft">
+            {me?.plan === 'team' ? (
+              <>
+                <Badge tone="accent">team</Badge> {t('shell.teamPlan')}
+              </>
+            ) : (
+              <>
+                <Badge>free</Badge> {t('shell.personalPlan')}
+              </>
+            )}
+          </div>
+        )}
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => navigate('/settings')}>
           <GearIcon size="rail" /> {t('shell.settings')}
@@ -123,18 +126,22 @@ export function AccountMenu({
         </DropdownMenuItem>
         {/* new tabs, which the desktop shell hands to the system browser
             (initDesktopShell); the desktop app has nothing to download */}
-        {!isDesktopShell() && (
-          <DropdownMenuItem asChild>
-            <a href={DOWNLOAD_URL} target="_blank" rel="noopener noreferrer">
-              <DesktopIcon size="rail" /> {t('shell.desktopApp')}
-            </a>
-          </DropdownMenuItem>
+        {FULL_UI && (
+          <>
+            {!isDesktopShell() && (
+              <DropdownMenuItem asChild>
+                <a href={DOWNLOAD_URL} target="_blank" rel="noopener noreferrer">
+                  <DesktopIcon size="rail" /> {t('shell.desktopApp')}
+                </a>
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuItem asChild>
+              <a href={WEBSITE_URL} target="_blank" rel="noopener noreferrer">
+                <ExportIcon size="rail" /> {t('shell.website')}
+              </a>
+            </DropdownMenuItem>
+          </>
         )}
-        <DropdownMenuItem asChild>
-          <a href={WEBSITE_URL} target="_blank" rel="noopener noreferrer">
-            <ExportIcon size="rail" /> {t('shell.website')}
-          </a>
-        </DropdownMenuItem>
         <DropdownMenuSeparator />
         {/* the theme is one click from every page; picking one keeps the menu
             open so the change can be seen, and judged, before it closes */}

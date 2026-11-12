@@ -85,6 +85,7 @@ import type { TextFormatCommand } from '../lib/richText'
 import { copyPicked, hasElementClip, pasteLayer } from '../lib/elementClipboard'
 import { isCanvasClipboard, writeCanvasClipboard } from '../lib/canvasClipboard'
 import { authClient } from '../lib/auth'
+import { FULL_UI } from '../lib/fullUi'
 import { avatarUrl } from '../../shared/avatar'
 import { posthog } from '../lib/posthog'
 import { useIsMobile } from '../hooks/use-mobile'
@@ -917,7 +918,7 @@ export function CanvasPage({
             </BarPill>
           )}
           <BarPill>
-            {!guest && (
+            {FULL_UI && !guest && (
               <Button variant="bare" className={barPillBtn} onClick={() => setShowShare(true)}>
                 <ShareUpIcon className="size-3.5" />
                 {t('canvas.share')}
@@ -1187,7 +1188,7 @@ export function CanvasPage({
                     <ImportIcon /> {t('canvas.importWebsite')}
                   </Button>
                 )}
-                {!guest && (
+                {FULL_UI && !guest && (
                   <Button
                     variant="ghost"
                     className="h-11 justify-start gap-2.5 border-line bg-surface px-4"

@@ -3,6 +3,7 @@ import type { Canvas, CanvasMeta, WorkspaceSummary } from '../../shared/types'
 import { colorFor } from '../../shared/types'
 import { api, errorMessage, paywalledWorkspace } from '../lib/api'
 import { authClient } from '../lib/auth'
+import { FULL_UI } from '../lib/fullUi'
 import { useUserEvents } from '../hooks/use-user-events'
 import { navigate } from '../App'
 import { timeAgo } from '../lib/time'
@@ -348,18 +349,20 @@ export function Home() {
         </DashHeader>
 
         <DashContent className="px-0 pt-0 md:px-0 md:pt-0">
-          <HomeHero
-            firstName={first}
-            busy={starting}
-            focusAt={composerFocusAt}
-            actions={{
-              onPrompt: promptCanvas,
-              onImport: () => setImporting(true),
-              onConnectAgents: () => setShowConnect(true),
-              onAutomations: () => navigate('/automations'),
-              onIntegrations: () => navigate('/integrations'),
-            }}
-          />
+          {FULL_UI && (
+            <HomeHero
+              firstName={first}
+              busy={starting}
+              focusAt={composerFocusAt}
+              actions={{
+                onPrompt: promptCanvas,
+                onImport: () => setImporting(true),
+                onConnectAgents: () => setShowConnect(true),
+                onAutomations: () => navigate('/automations'),
+                onIntegrations: () => navigate('/integrations'),
+              }}
+            />
+          )}
 
           <div className="px-4 pt-8 md:px-8 md:pt-10">
             {currentWorkspace && !currentWorkspace.active && (
@@ -454,7 +457,7 @@ export function Home() {
                             workspace={scopedWorkspace ? undefined : workspaceName(c.workspaceId)}
                           />
                         </div>
-                        <PeopleStack canvas={c} />
+                        {FULL_UI && <PeopleStack canvas={c} />}
                       </TileBody>
                     </Pressable>
                     <CanvasActions
@@ -496,9 +499,11 @@ export function Home() {
                       <span className="hidden w-[82px] flex-none text-caption text-ink-faint sm:block">
                         {t('home.frames', { count: c.frameCount })}
                       </span>
-                      <span className="hidden w-[72px] flex-none xs:flex">
-                        <PeopleStack canvas={c} />
-                      </span>
+                      {FULL_UI && (
+                        <span className="hidden w-[72px] flex-none xs:flex">
+                          <PeopleStack canvas={c} />
+                        </span>
+                      )}
                       <span className="hidden w-[62px] flex-none gap-[3px] xs:flex">
                         {(c.agents ?? []).slice(0, 3).map((a) => (
                           <AgentIcon key={a.name} name={a.name} size={11} color={colorFor(a.name)} />
@@ -726,9 +731,11 @@ function CanvasActions({
         </IconButton>
       </DropdownMenuTrigger>
       <DropdownMenuContent width="md">
-        <DropdownMenuItem onSelect={onShare}>
-          <ShareIcon className="size-4" /> {t('home.share')}
-        </DropdownMenuItem>
+        {FULL_UI && (
+          <DropdownMenuItem onSelect={onShare}>
+            <ShareIcon className="size-4" /> {t('home.share')}
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem disabled={duplicating} onSelect={onDuplicate}>
           <CopyIcon className="size-4" /> {duplicating ? t('home.duplicating') : t('home.duplicate')}
         </DropdownMenuItem>

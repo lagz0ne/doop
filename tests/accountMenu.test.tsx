@@ -3,11 +3,18 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 const shell = vi.hoisted(() => ({ desktop: false }))
+/* this build hides the product links unless the full UI is on (src/lib/fullUi.ts) */
+const ui = vi.hoisted(() => ({ full: false }))
 vi.mock('../src/lib/auth', () => ({
   authClient: { useSession: () => ({ data: { user: { id: 'alice', name: 'Alice Doe' } } }), signOut: vi.fn() },
 }))
 vi.mock('../src/lib/me', () => ({ useMe: () => null }))
 vi.mock('../src/lib/shell', () => ({ isDesktopShell: () => shell.desktop }))
+vi.mock('../src/lib/fullUi', () => ({
+  get FULL_UI() {
+    return ui.full
+  },
+}))
 import { AccountMenu } from '../src/components/DashShell'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -22,6 +29,7 @@ afterEach(() => {
   act(() => root.unmount())
   container.remove()
   shell.desktop = false
+  ui.full = false
 })
 
 /* render the menu and open it from the keyboard, as Radix expects */
@@ -37,14 +45,23 @@ async function openMenu(): Promise<Map<string, string | null>> {
 }
 
 it('links the desktop download and the website from the account menu', async () => {
+  ui.full = true
   const links = await openMenu()
   expect(links.get('Get desktop app')).toBe('https://doop.design/download')
   expect(links.get('Doop website')).toBe('https://doop.design/?site')
 })
 
 it('offers no download inside the desktop app', async () => {
+  ui.full = true
   shell.desktop = true
   const links = await openMenu()
   expect(links.has('Get desktop app')).toBe(false)
   expect(links.get('Doop website')).toBe('https://doop.design/?site')
+})
+
+it('keeps the download and the website out of the menu unless the full UI is on', async () => {
+  const links = await openMenu()
+  expect(links.has('Get desktop app')).toBe(false)
+  expect(links.has('Doop website')).toBe(false)
+  expect(links.get('Help & docs')).toBe('/docs')
 })

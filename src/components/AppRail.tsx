@@ -3,6 +3,7 @@ import type { CanvasMeta, WorkspaceSummary } from '../../shared/types'
 import { colorFor } from '../../shared/types'
 import { api } from '../lib/api'
 import { authClient } from '../lib/auth'
+import { FULL_UI } from '../lib/fullUi'
 import { navigate } from '../lib/navigate'
 import { useRailDrawer } from '../lib/railDrawer'
 import { timeAgo } from '../lib/time'
@@ -293,12 +294,16 @@ export function AppRail({
       <IconButton aria-label={t('rail.allCanvases')} on={active === 'all'} onClick={() => scope('all')}>
         <GridIcon size="rail" />
       </IconButton>
-      <IconButton aria-label={t('rail.ownedByMe')} on={active === 'mine'} onClick={() => scope('mine')}>
-        <UserIcon size="rail" />
-      </IconButton>
-      <IconButton aria-label={t('rail.sharedWithMe')} on={active === 'shared'} onClick={() => scope('shared')}>
-        <UsersIcon size="rail" />
-      </IconButton>
+      {FULL_UI && (
+        <>
+          <IconButton aria-label={t('rail.ownedByMe')} on={active === 'mine'} onClick={() => scope('mine')}>
+            <UserIcon size="rail" />
+          </IconButton>
+          <IconButton aria-label={t('rail.sharedWithMe')} on={active === 'shared'} onClick={() => scope('shared')}>
+            <UsersIcon size="rail" />
+          </IconButton>
+        </>
+      )}
       <Rule />
       {spaces.map((w) => (
         <div key={w.id} className="contents">
@@ -325,29 +330,37 @@ export function AppRail({
       <IconButton aria-label={t('rail.newWorkspace')} onClick={createWorkspace}>
         <FolderPlusIcon size="rail" />
       </IconButton>
-      <Rule />
-      <IconButton aria-label={t('rail.community')} on={active === 'community'} onClick={() => go('/community')}>
-        <WebIcon size="rail" />
-      </IconButton>
-      <IconButton aria-label={t('rail.automations')} on={active === 'automations'} onClick={() => go('/automations')}>
-        <WorkflowIcon size="rail" />
-      </IconButton>
-      <IconButton
-        aria-label={t('rail.integrations')}
-        on={active === 'integrations'}
-        onClick={() => go('/integrations')}
-      >
-        <BlocksIcon size="rail" />
-      </IconButton>
-      <Rule />
-      {agents.map((a) => (
-        <span key={a.name} className="grid size-8 place-items-center" title={a.name}>
-          <AgentIcon name={a.name} size={14} color={colorFor(a.name)} />
-        </span>
-      ))}
-      <IconButton aria-label={t('rail.connectAgent')} onClick={connect}>
-        <CirclePlusIcon size="rail" />
-      </IconButton>
+      {FULL_UI && (
+        <>
+          <Rule />
+          <IconButton aria-label={t('rail.community')} on={active === 'community'} onClick={() => go('/community')}>
+            <WebIcon size="rail" />
+          </IconButton>
+          <IconButton
+            aria-label={t('rail.automations')}
+            on={active === 'automations'}
+            onClick={() => go('/automations')}
+          >
+            <WorkflowIcon size="rail" />
+          </IconButton>
+          <IconButton
+            aria-label={t('rail.integrations')}
+            on={active === 'integrations'}
+            onClick={() => go('/integrations')}
+          >
+            <BlocksIcon size="rail" />
+          </IconButton>
+          <Rule />
+          {agents.map((a) => (
+            <span key={a.name} className="grid size-8 place-items-center" title={a.name}>
+              <AgentIcon name={a.name} size={14} color={colorFor(a.name)} />
+            </span>
+          ))}
+          <IconButton aria-label={t('rail.connectAgent')} onClick={connect}>
+            <CirclePlusIcon size="rail" />
+          </IconButton>
+        </>
+      )}
       {children ? (
         <>
           <Rule />
@@ -398,22 +411,26 @@ export function AppRail({
         >
           {t('rail.allCanvases')}
         </DashNavItem>
-        <DashNavItem
-          density="rail"
-          icon={<UserIcon size="rail" />}
-          active={active === 'mine'}
-          onClick={() => scope('mine')}
-        >
-          {t('rail.ownedByMe')}
-        </DashNavItem>
-        <DashNavItem
-          density="rail"
-          icon={<UsersIcon size="rail" />}
-          active={active === 'shared'}
-          onClick={() => scope('shared')}
-        >
-          {t('rail.sharedWithMe')}
-        </DashNavItem>
+        {FULL_UI && (
+          <>
+            <DashNavItem
+              density="rail"
+              icon={<UserIcon size="rail" />}
+              active={active === 'mine'}
+              onClick={() => scope('mine')}
+            >
+              {t('rail.ownedByMe')}
+            </DashNavItem>
+            <DashNavItem
+              density="rail"
+              icon={<UsersIcon size="rail" />}
+              active={active === 'shared'}
+              onClick={() => scope('shared')}
+            >
+              {t('rail.sharedWithMe')}
+            </DashNavItem>
+          </>
+        )}
       </nav>
 
       <DashSectionLabel density="rail">{t('rail.workspaces')}</DashSectionLabel>
@@ -467,37 +484,41 @@ export function AppRail({
         </DashNavItem>
       </nav>
 
-      <DashSectionLabel density="rail">{t('rail.explore')}</DashSectionLabel>
-      <nav className="flex flex-col gap-0.5">
-        <DashNavItem
-          density="rail"
-          icon={<WebIcon size="rail" />}
-          active={active === 'community'}
-          onClick={() => go('/community')}
-        >
-          {t('rail.community')}
-        </DashNavItem>
-      </nav>
+      {FULL_UI && (
+        <>
+          <DashSectionLabel density="rail">{t('rail.explore')}</DashSectionLabel>
+          <nav className="flex flex-col gap-0.5">
+            <DashNavItem
+              density="rail"
+              icon={<WebIcon size="rail" />}
+              active={active === 'community'}
+              onClick={() => go('/community')}
+            >
+              {t('rail.community')}
+            </DashNavItem>
+          </nav>
 
-      <DashSectionLabel density="rail">{t('rail.resources')}</DashSectionLabel>
-      <nav className="flex flex-col gap-0.5">
-        <DashNavItem
-          density="rail"
-          icon={<WorkflowIcon size="rail" />}
-          active={active === 'automations'}
-          onClick={() => go('/automations')}
-        >
-          {t('rail.automations')}
-        </DashNavItem>
-        <DashNavItem
-          density="rail"
-          icon={<BlocksIcon size="rail" />}
-          active={active === 'integrations'}
-          onClick={() => go('/integrations')}
-        >
-          {t('rail.integrations')}
-        </DashNavItem>
-      </nav>
+          <DashSectionLabel density="rail">{t('rail.resources')}</DashSectionLabel>
+          <nav className="flex flex-col gap-0.5">
+            <DashNavItem
+              density="rail"
+              icon={<WorkflowIcon size="rail" />}
+              active={active === 'automations'}
+              onClick={() => go('/automations')}
+            >
+              {t('rail.automations')}
+            </DashNavItem>
+            <DashNavItem
+              density="rail"
+              icon={<BlocksIcon size="rail" />}
+              active={active === 'integrations'}
+              onClick={() => go('/integrations')}
+            >
+              {t('rail.integrations')}
+            </DashNavItem>
+          </nav>
+        </>
+      )}
 
       {/* a page's own group keeps the drawer's contract: a pick puts it away */}
       <div
@@ -509,30 +530,34 @@ export function AppRail({
         {children}
       </div>
 
-      <DashSectionLabel density="rail">{t('rail.agents')}</DashSectionLabel>
-      <div className="flex flex-col gap-0.5">
-        {agents.map((a) => (
-          <DashNavItem
-            key={a.name}
-            as="div"
-            density="rail"
-            title={t('rail.agentCanvases', { count: a.canvases })}
-            icon={<AgentIcon name={a.name} size={14} color={colorFor(a.name)} />}
-            trailing={
-              a.lastAt > 0 && now - a.lastAt < LIVE_WINDOW ? (
-                <Dot size="sm" className="bg-success" title={t('rail.workingNow')} />
-              ) : (
-                <span className="text-caption text-ink-faint">{a.lastAt > 0 ? timeAgo(a.lastAt) : ''}</span>
-              )
-            }
-          >
-            {a.name}
-          </DashNavItem>
-        ))}
-        <DashNavItem density="rail" icon={<CirclePlusIcon size="rail" />} onClick={connect}>
-          {t('rail.connectAgent')}
-        </DashNavItem>
-      </div>
+      {FULL_UI && (
+        <>
+          <DashSectionLabel density="rail">{t('rail.agents')}</DashSectionLabel>
+          <div className="flex flex-col gap-0.5">
+            {agents.map((a) => (
+              <DashNavItem
+                key={a.name}
+                as="div"
+                density="rail"
+                title={t('rail.agentCanvases', { count: a.canvases })}
+                icon={<AgentIcon name={a.name} size={14} color={colorFor(a.name)} />}
+                trailing={
+                  a.lastAt > 0 && now - a.lastAt < LIVE_WINDOW ? (
+                    <Dot size="sm" className="bg-success" title={t('rail.workingNow')} />
+                  ) : (
+                    <span className="text-caption text-ink-faint">{a.lastAt > 0 ? timeAgo(a.lastAt) : ''}</span>
+                  )
+                }
+              >
+                {a.name}
+              </DashNavItem>
+            ))}
+            <DashNavItem density="rail" icon={<CirclePlusIcon size="rail" />} onClick={connect}>
+              {t('rail.connectAgent')}
+            </DashNavItem>
+          </div>
+        </>
+      )}
 
       <div className="mt-auto flex items-center gap-2.5 px-1 pt-4">
         <AccountMenu face side="top" align="start" />
