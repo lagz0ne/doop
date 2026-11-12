@@ -66,6 +66,10 @@ accounts, canvas sharing, canvas owners and agent keys. `bin/doopctl --help` lis
   server side is off until the hub sets the same `DOOP_ADMIN_TOKEN` (32+ chars) on the the deployer
   app. Whoever holds it controls every account and canvas.
 - **Target:** `https://doop.example.com`, or `--url` / `DOOP_URL` (e.g. a local `bin/doop serve`).
+  In production the operator API is **host-only** (the human's choice, 2026-11-12): Traefik allows
+  `/api/operator` from loopback alone, so doopctl connects to doop.example.com through
+  `127.0.0.1:443`, with TLS and Host still `doop.example.com`. So it works only on this machine.
+  `--connect` / `DOOP_CONNECT` overrides that (an address, or `dns`).
 - **Safety:** passwords never go in argv (`--password-stdin`, or the server generates one).
   Destructive commands ask for "yes", or need `--yes` when there is no terminal. `users delete`
   shows which canvases go with the account first. Every write is logged by the server as

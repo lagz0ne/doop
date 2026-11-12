@@ -6,17 +6,24 @@
 //
 //   token  $DOOP_ADMIN_TOKEN, else ~/.config/doop/doop-admin-token
 //   url    --url, else $DOOP_URL, else https://doop.example.com
+//   via    production's operator API answers only from this machine (Traefik
+//          allows /api/operator from loopback alone), so for doop.example.com the
+//          connection goes to 127.0.0.1:443; TLS and Host stay doop.example.com,
+//          so the certificate is still checked. --connect / $DOOP_CONNECT
+//          overrides (an address, or "dns").
 //
 // Safety: passwords never go on the command line (--password-stdin, or the
 // server generates one and it is printed once); destructive commands ask you
 // to type "yes" (or take --yes), and refuse without a terminal unless --yes.
 import { readFileSync, statSync } from 'node:fs'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { homedir } from 'node:os'
 import { createInterface } from 'node:readline/promises'
 
 const USAGE = `doopctl: users, sharing, canvas owners and agent keys on doop
 
-usage: doopctl [--url URL] [--json] [--yes] <command> ...
+usage: doopctl [--url URL] [--connect ADDR] [--json] [--yes] <command> ...
 
 users
   users                              list accounts
@@ -53,6 +60,9 @@ only one canvas has it.
 
 options
   --url URL     instance (default $DOOP_URL or https://doop.example.com)
+  --connect A   open the connection to address A instead of what DNS says,
+                keeping TLS and Host (default $DOOP_CONNECT; 127.0.0.1 for
+                doop.example.com, whose operator API is host-only; "dns" = DNS)
   --json        raw JSON out, for scripts
   --yes         skip confirmations (required when there is no terminal)
 `
@@ -60,10 +70,10 @@ options
 /* ------------------------------------------------------------- arguments */
 
 const argv = process.argv.slice(2)
-const flags = { json: false, yes: false, url: process.env.DOOP_URL || 'https://doop.example.com' }
+const flags = { json: false, yes: false, url: process.env.DOOP_URL || 'https://doop.example.com', connect: process.env.DOOP_CONNECT }
 const opts = {}
 const args = []
-const VALUED = new Set(['--url', '--name', '--reason'])
+const VALUED = new Set(['--url', '--connect', '--name', '--reason'])
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i]
   if (a === '-h' || a === '--help') {
@@ -75,6 +85,7 @@ for (let i = 0; i < argv.length; i++) {
     const v = argv[++i]
     if (v === undefined) fail(`${a} needs a value`, 2)
     if (a === '--url') flags.url = v
+    else if (a === '--connect') flags.connect = v
     else opts[a.slice(2)] = v
   } else if (a.startsWith('--')) opts[a.slice(2)] = true
   else args.push(a)
@@ -107,13 +118,56 @@ function token() {
 
 /* ------------------------------------------------------------------- api */
 
-async function api(path, { method, body } = {}) {
-  const res = await fetch(`${flags.url}/api/operator${path}`, {
-    method: method ?? (body === undefined ? 'GET' : 'POST'),
-    headers: { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  }).catch((err) => fail(`cannot reach ${flags.url}: ${err.cause?.code ?? err.message}`))
-  const text = await res.text()
+/** The address to open the connection to, or undefined for plain DNS. */
+function connectTo(url) {
+  const pick = flags.connect ?? (url.hostname === 'doop.example.com' ? '127.0.0.1' : undefined)
+  return pick === 'dns' ? undefined : pick
+}
+
+const target = () => {
+  const via = connectTo(new URL(flags.url))
+  return via ? `${flags.url} (via ${via})` : flags.url
+}
+
+/** One request with node's http(s), so the address can be pinned through
+ *  `lookup` while the URL's host stays the TLS name and the Host header. */
+function send(path, { method, body } = {}) {
+  const url = new URL(`${flags.url}/api/operator${path}`)
+  const via = connectTo(url)
+  const payload = body === undefined ? undefined : JSON.stringify(body)
+  const family = via?.includes(':') ? 6 : 4
+  const request = url.protocol === 'https:' ? httpsRequest : httpRequest
+  return new Promise((resolve, reject) => {
+    const req = request(
+      url,
+      {
+        method: method ?? (payload === undefined ? 'GET' : 'POST'),
+        headers: {
+          Authorization: `Bearer ${token()}`,
+          ...(payload !== undefined && { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }),
+        },
+        ...(via && {
+          lookup: (_host, opts, cb) => (opts?.all ? cb(null, [{ address: via, family }]) : cb(null, via, family)),
+        }),
+        timeout: 30_000,
+      },
+      (res) => {
+        let text = ''
+        res.setEncoding('utf8')
+        res.on('data', (chunk) => (text += chunk))
+        res.on('end', () => resolve({ status: res.statusCode, ok: res.statusCode >= 200 && res.statusCode < 300, text }))
+      },
+    )
+    req.on('timeout', () => req.destroy(new Error('timed out')))
+    req.on('error', reject)
+    if (payload !== undefined) req.write(payload)
+    req.end()
+  })
+}
+
+async function api(path, opts = {}) {
+  const res = await send(path, opts).catch((err) => fail(`cannot reach ${target()}: ${err.code ?? err.message}`))
+  const { text } = res
   let data
   try {
     data = text ? JSON.parse(text) : {}
@@ -121,8 +175,11 @@ async function api(path, { method, body } = {}) {
     data = { error: text.slice(0, 200) }
   }
   if (!res.ok) {
-    if (res.status === 404 && !text) fail(`${flags.url} has no operator API (DOOP_ADMIN_TOKEN unset there, or a doop build without the operator patch)`)
+    if (res.status === 404 && !text) fail(`${target()} has no operator API (DOOP_ADMIN_TOKEN unset there, or a doop build without the operator patch)`)
+    if (res.status === 401 && data.error === 'unauthorized') fail(`${target()} has no operator API (this doop build predates the operator patch)`)
     if (res.status === 401) fail('the operator token was refused')
+    if (res.status === 403 && !text.trimStart().startsWith('{'))
+      fail(`${target()} refused the request before it reached doop: the operator API is host-only; connect via 127.0.0.1 (--connect)`)
     fail(data.error ?? `HTTP ${res.status}`)
   }
   return data
@@ -132,9 +189,7 @@ const enc = encodeURIComponent
 
 /** id first; else an exact, unique (case-insensitive) name */
 async function canvasId(ref) {
-  const res = await fetch(`${flags.url}/api/operator/canvases/${enc(ref)}`, {
-    headers: { Authorization: `Bearer ${token()}` },
-  }).catch(() => null)
+  const res = await send(`/canvases/${enc(ref)}`).catch(() => null)
   if (res?.ok) return ref
   const all = await api('/canvases')
   const hits = all.filter((c) => c.name.toLowerCase() === ref.toLowerCase())
