@@ -403,7 +403,7 @@ export async function renderFrame(
   frame: Frame,
   /* output pixel density — fractional values downscale huge frames */
   scale: number = 1,
-  opts: { type?: 'png' | 'jpeg'; quality?: number; maxHeight?: number } = {},
+  opts: { type?: 'png' | 'jpeg' | 'webp'; quality?: number; maxHeight?: number } = {},
 ): Promise<Buffer> {
   const loaded = await loadFramePage(frame)
   const { page } = loaded
@@ -420,7 +420,7 @@ export async function renderFrame(
         : undefined
     const buf = await page.screenshot({
       type,
-      ...(type === 'jpeg' ? { quality: opts.quality ?? 90 } : {}),
+      ...(type === 'png' ? {} : { quality: opts.quality ?? 90 }),
       ...(clip ? { clip } : {}),
     })
     return Buffer.from(buf)

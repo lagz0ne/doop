@@ -134,4 +134,49 @@ describe('thumbs', () => {
     await tick()
     expect(mocks.renderFrame).toHaveBeenCalledTimes(1)
   })
+
+  /* the editor's preview pyramid: one stored picture per level, beside the
+     card thumbnail and independent of it */
+  it('renders a pyramid level as the whole frame at that scale, in webp, under its own key', async () => {
+    mocks.renderFrame.mockResolvedValue(Buffer.from('webp'))
+    await thumbs.create(frame('level'), 0.5)
+    expect(mocks.renderFrame).toHaveBeenCalledWith(expect.anything(), 0.5, { type: 'webp', quality: 90 })
+    expect(mocks.putObject).toHaveBeenCalledWith('thumb/level.p50', Buffer.from('webp'), 'image/webp')
+    expect(mocks.putObject).toHaveBeenCalledWith('thumb/level.p50ver', Buffer.from('1'), 'text/plain')
+  })
+
+  it('renders a huge frame below the level it was asked at, within the picture limits', async () => {
+    mocks.renderFrame.mockResolvedValue(Buffer.from('webp'))
+    await thumbs.create({ ...frame('strip'), width: 40_000, height: 400 }, 1)
+    const scale = mocks.renderFrame.mock.calls[0]![1] as number
+    expect(scale).toBeCloseTo(0.4) // 16000 px on the long side
+  })
+
+  it('keeps each level and the card thumbnail apart: one being current says nothing of another', async () => {
+    mocks.renderFrame.mockResolvedValue(Buffer.from('new'))
+    const f = frame('apart')
+    await thumbs.create(f, 0.25)
+    mocks.renderFrame.mockClear()
+    mocks.getObject.mockImplementation((key: string) => Promise.resolve(key.endsWith('ver') ? null : Buffer.from('b')))
+    expect((await thumbs.getStored(f, 0.25))?.fresh).toBe(true)
+    expect((await thumbs.getStored(f, 1))?.fresh).toBe(false)
+    expect((await thumbs.getStored(f))?.fresh).toBe(false)
+    await tick()
+    /* the two that were not current are refreshed, each as itself */
+    expect(mocks.renderFrame).toHaveBeenCalledTimes(2)
+    expect(mocks.renderFrame).toHaveBeenCalledWith(expect.anything(), 1, { type: 'webp', quality: 90 })
+    expect(mocks.renderFrame).toHaveBeenCalledWith(expect.anything(), 0.5, expect.objectContaining({ type: 'jpeg' }))
+  })
+
+  it('purges every level with the frame', () => {
+    thumbs.purge('gone')
+    const deleted = mocks.deleteObject.mock.calls.map((c) => c[0] as string).sort()
+    expect(deleted).toEqual(
+      [
+        'thumb/gone.jpg',
+        'thumb/gone.ver',
+        ...[25, 50, 100].flatMap((p) => [`thumb/gone.p${p}`, `thumb/gone.p${p}ver`]),
+      ].sort(),
+    )
+  })
 })

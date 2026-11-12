@@ -55,7 +55,14 @@ import { spaceWouldScroll } from '../lib/spaceScroll'
 import { viewOptionForKey } from '../lib/viewOptions'
 import { ZOOM_DRAG_MIN, ZOOM_TOOL_STEP, zoomAtPoint, zoomToBox } from '../lib/zoomTool'
 import { isCanvasElement } from '../lib/drawing'
-import { computeLiveFrames, cullingEnabled, pinnedBySelection, useLiveFrames, type FrameBox } from '../lib/liveFrames'
+import {
+  computeLiveFrames,
+  cullingEnabled,
+  pinnedBySelection,
+  sharpPreviews,
+  useLiveFrames,
+  type FrameBox,
+} from '../lib/liveFrames'
 
 const MIN_ZOOM = 0.08
 /* The settled world is laid out at up to this zoom too (layoutZoomFor), so
@@ -259,6 +266,8 @@ export function Stage({
     }
     setLabelLayer(el)
   }, [])
+  /* the page whose previews have a density (see the culling effect) */
+  const previewPage = useRef<string | null>(null)
   /* the zoom and grid period last written to the DOM (see apply) */
   const appliedZoom = useRef<number | null>(null)
   const appliedPeriod = useRef<number | null>(null)
@@ -404,6 +413,17 @@ export function Stage({
     const elements = new Set(frames.filter((f) => f.element).map((f) => f.id))
     let timer = 0
     let pump = 0
+    /* The previews' resolution follows the camera too (setPreviews), but
+       only a camera at rest. A page that has just opened is about to be
+       fitted or put back where it was, and its zoom until then is the last
+       page's: asking for pictures at that density would fetch (and render,
+       the first time) a whole page of them at the wrong size. So a new page
+       starts with no density, and gets one when its camera first rests. */
+    const page = canvas ? `${canvas.id}:${useStore.getState().activePageId ?? ''}` : null
+    let rested = previewPage.current === page
+    let restPending = !rested
+    previewPage.current = page
+    if (!rested) useLiveFrames.getState().setPreviews(null)
     /* Documents boot a few per animation frame, nearest the view first. A
        camera that comes to rest over twenty frames would otherwise create
        twenty documents in one task: a visible hitch, and input queued behind
@@ -432,15 +452,24 @@ export function Stage({
       for (const p of Object.values(s.presences)) if (p.activeFrameId) pinned.add(p.activeFrameId)
       for (const id of Object.keys(s.streams)) pinned.add(id)
       const live = useLiveFrames.getState()
-      admit(computeLiveFrames(frames, s.viewport, measuredStage(el), pinned, live.ids ?? new Set()), pinned)
+      const stage = measuredStage(el)
+      if (rested) live.setPreviews(s.viewport.zoom * window.devicePixelRatio, sharpPreviews(frames, s.viewport, stage))
+      admit(computeLiveFrames(frames, s.viewport, stage, pinned, live.ids ?? new Set()), pinned)
+    }
+    function atRest() {
+      rested = true
+      restPending = false
+      compute()
     }
     compute()
+    if (restPending) timer = window.setTimeout(atRest, 120)
     const unsub = useStore.subscribe((s, prev) => {
       const moved = s.viewport !== prev.viewport
       if (!moved && s.selectedIds === prev.selectedIds && s.presences === prev.presences && s.streams === prev.streams)
         return
+      if (moved) restPending = true
       window.clearTimeout(timer)
-      timer = window.setTimeout(compute, moved ? 120 : 0)
+      timer = window.setTimeout(restPending ? atRest : compute, moved ? 120 : 0)
     })
     const resize = new ResizeObserver(([entry]) => {
       if (entry) {

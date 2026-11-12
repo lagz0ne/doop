@@ -93,6 +93,46 @@ export interface CanvasMeta {
  *  image must assume this cap, not the frame's real height. */
 export const PREVIEW_MAX_HEIGHT = 1200
 
+/** The scales the editor's preview of a frame is rendered at
+ *  (`/i/<id>.webp?preview&s=<scale>`): output pixels per frame pixel. A frame
+ *  the canvas shows as a picture (src/lib/liveFrames.ts) is anything from a
+ *  few dozen to a couple of thousand device pixels across depending on the
+ *  zoom, and one fixed size is wrong for most of that range: too soft up
+ *  close, wasted bytes and decode from afar. So, like map tiles or mipmaps,
+ *  there is a short pyramid and the canvas asks for the level that covers
+ *  what is on screen. */
+export const PREVIEW_SCALES = [0.25, 0.5, 1] as const
+export type PreviewScale = (typeof PREVIEW_SCALES)[number]
+
+export function isPreviewScale(value: unknown): value is PreviewScale {
+  return (PREVIEW_SCALES as readonly unknown[]).includes(value)
+}
+
+/** A scaled preview is never larger than this many pixels… */
+const PREVIEW_MAX_PIXELS = 8_000_000
+/** …nor longer than this on a side (WebP's limit is 16383). */
+const PREVIEW_MAX_SIDE = 16_000
+
+/** The scale a frame's preview is actually rendered at for a level of the
+ *  pyramid: the level itself, unless the frame is so large that the picture
+ *  would pass the limits above (a 1440×9000 page, a 20000 px strip). */
+export function previewRenderScale(frame: { width: number; height: number }, level: PreviewScale): number {
+  const width = Math.max(1, frame.width)
+  const height = Math.max(1, frame.height)
+  return Math.min(level, PREVIEW_MAX_SIDE / Math.max(width, height), Math.sqrt(PREVIEW_MAX_PIXELS / (width * height)))
+}
+
+/** The pyramid level for a frame drawn at `density` device pixels per frame
+ *  pixel (camera zoom × devicePixelRatio): the smallest one that covers it,
+ *  so the picture is only ever scaled down, never stretched; and no level
+ *  above the one where the frame's size limit already bites (those would
+ *  all be the same picture). */
+export function previewLevelFor(frame: { width: number; height: number }, density: number): PreviewScale {
+  const top = PREVIEW_SCALES[PREVIEW_SCALES.length - 1] ?? 1
+  const wanted = Math.min(density, previewRenderScale(frame, top))
+  return PREVIEW_SCALES.find((level) => level >= wanted) ?? top
+}
+
 /* ---- community gallery ---- */
 
 export const COMMUNITY_CATEGORIES = ['website', 'app', 'dashboard', 'mobile', 'marketing', 'other'] as const

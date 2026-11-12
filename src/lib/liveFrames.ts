@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { PREVIEW_SCALES, previewLevelFor, type PreviewScale } from '../../shared/types'
 
 /* Viewport culling for frame iframes.
 
@@ -119,6 +120,21 @@ export function computeLiveFrames(
   return live
 }
 
+/** The frames whose previews are worth a sharper picture than the smallest:
+ *  the ones within the entry margin of the resting view (those the camera
+ *  shows, or will with a short pan). Everything farther keeps the smallest
+ *  level. Without that limit a zoom-in changed every preview on the page to
+ *  the large picture; the far ones only queued it (they load lazily), and a
+ *  jump back out to the whole page then fetched and decoded hundreds of
+ *  full-size pictures at once, each about to be replaced by the small one. */
+export function sharpPreviews(frames: readonly FrameBox[], camera: Camera, stage: Size): Set<string> {
+  const sharp = new Set<string>()
+  if (stage.width <= 0 || stage.height <= 0 || camera.zoom <= 0) return sharp
+  const near = viewRect(camera, stage, ENTER_MARGIN)
+  for (const f of frames) if (!f.element && intersects(f, near)) sharp.add(f.id)
+  return sharp
+}
+
 function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   if (a.size !== b.size) return false
   for (const id of a) if (!b.has(id)) return false
@@ -131,17 +147,31 @@ interface LiveFramesState {
   ids: ReadonlySet<string> | null
   /** frames a press woke: FrameViews (not necessarily live), newest last */
   woken: readonly string[]
+  /** device pixels per frame pixel where the camera last came to rest
+   *  (zoom × devicePixelRatio); null until it has rested on this page. The
+   *  previews of the frames near that view (`sharp`) are fetched at the
+   *  pyramid level that covers it, the others at the smallest. */
+  previewDensity: number | null
+  sharp: ReadonlySet<string>
   set(ids: ReadonlySet<string>): void
+  setPreviews(density: number | null, sharp?: ReadonlySet<string>): void
   wake(frameId: string): void
 }
 
 export const useLiveFrames = create<LiveFramesState>((set, get) => ({
   ids: null,
   woken: [],
+  previewDensity: null,
+  sharp: new Set(),
   set(ids) {
     const prev = get().ids
     if (prev && sameSet(prev, ids)) return
     set({ ids })
+  },
+  setPreviews(density, sharp = new Set()) {
+    const prev = get()
+    if (prev.previewDensity === density && sameSet(prev.sharp, sharp)) return
+    set({ previewDensity: density, sharp: sameSet(prev.sharp, sharp) ? prev.sharp : sharp })
   },
   wake(frameId) {
     const woken = get().woken
@@ -167,8 +197,21 @@ export function useFrameLive(frameId: string): boolean {
   return useLiveFrames((s) => s.ids === null || s.ids.has(frameId))
 }
 
-/** Where a culled frame's stand-in image comes from: the persisted preview,
- *  re-requested whenever the frame changes. */
-export function previewSrc(frameId: string, updatedAt: number): string {
-  return `/i/${frameId}.jpg?preview&v=${updatedAt}`
+/** The level of the preview pyramid (shared/types.ts) a frame's picture is
+ *  shown at. Near the resting view it is the one that covers the frame as
+ *  the camera draws it, so the picture is as sharp as the screen and no
+ *  larger; farther away it is the smallest. null while the camera has not
+ *  rested on the page yet. Changes only when the level does, so a zoom
+ *  re-renders a preview a couple of times across its whole range. */
+export function usePreviewLevel(frame: { id: string; width: number; height: number }): PreviewScale | null {
+  return useLiveFrames((s) => {
+    if (s.previewDensity === null) return null
+    return s.sharp.has(frame.id) ? previewLevelFor(frame, s.previewDensity) : (PREVIEW_SCALES[0] ?? null)
+  })
+}
+
+/** Where a culled frame's stand-in image comes from: the persisted preview
+ *  at one level of the pyramid, re-requested whenever the frame changes. */
+export function previewSrc(frameId: string, updatedAt: number, level: PreviewScale): string {
+  return `/i/${frameId}.webp?preview&s=${level}&v=${updatedAt}`
 }

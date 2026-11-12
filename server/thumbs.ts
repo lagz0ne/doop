@@ -1,4 +1,10 @@
-import { PREVIEW_MAX_HEIGHT, type Frame } from '../shared/types.ts'
+import {
+  PREVIEW_MAX_HEIGHT,
+  PREVIEW_SCALES,
+  previewRenderScale,
+  type Frame,
+  type PreviewScale,
+} from '../shared/types.ts'
 import * as storage from './storage.ts'
 
 /**
@@ -16,7 +22,18 @@ import * as storage from './storage.ts'
  * showed (the editor's culled frames show these previews, hundreds a page).
  * A thumbnail stored before the sidecar existed still degrades to one
  * background re-render — never to a blank tile.
+ *
+ * Beside the card thumbnail a frame has one stored picture per level of the
+ * editor's preview pyramid (PREVIEW_SCALES in shared/types.ts): the whole
+ * frame at that scale, as WebP, for the canvas to show in place of the live
+ * document. Each is rendered when first asked for and kept the same way,
+ * with its own version; every function here takes the level, and none means
+ * the card thumbnail.
  */
+
+/** What all the bookkeeping below is keyed by: a frame's card thumbnail, or
+ *  one level of its preview pyramid. */
+const slot = (frameId: string, level?: PreviewScale) => (level === undefined ? frameId : `${frameId}@${level}`)
 
 /** frame.updatedAt the stored thumb was rendered from; absent = unknown */
 const written = new Map<string, number>()
@@ -29,8 +46,13 @@ const MIN_REVALIDATE_MS = 30_000
 /** frames purged mid-render — a pending create must not re-persist them */
 const dead = new Set<string>()
 
-const keyFor = (frameId: string) => `thumb/${frameId}.jpg`
-const versionKeyFor = (frameId: string) => `thumb/${frameId}.ver`
+/* storage keys are `<name>.<ext>` with no further dots (storage.ts), so a
+   level goes into the extension: thumb/<id>.p25 is the 0.25 picture */
+const keyFor = (frameId: string, level?: PreviewScale) =>
+  level === undefined ? `thumb/${frameId}.jpg` : `thumb/${frameId}.p${level * 100}`
+const versionKeyFor = (frameId: string, level?: PreviewScale) =>
+  level === undefined ? `thumb/${frameId}.ver` : `thumb/${frameId}.p${level * 100}ver`
+const mimeFor = (level?: PreviewScale) => (level === undefined ? 'image/jpeg' : 'image/webp')
 
 /* Global bound on concurrent preview renders. Per-frame dedupe caps repeat
    requests but not breadth: a post-restart dashboard of 50 stale canvases
@@ -47,11 +69,17 @@ const loadScreenshot = () => (screenshot ??= import('./screenshot.ts'))
 
 /** The preview render: card-sized, clipped, cheap — matches what /i/?preview
  *  serves, because this IS what /i/?preview serves. */
-async function render(frame: Frame): Promise<Buffer> {
+async function render(frame: Frame, level?: PreviewScale): Promise<Buffer> {
   if (active >= MAX_CONCURRENT_RENDERS) await new Promise<void>((r) => waiting.push(r))
   active++
   try {
     const { renderFrame } = await loadScreenshot()
+    /* A level of the pyramid is the whole frame, unclipped, at that scale.
+       WebP at 90 because the picture stands in for the live document right
+       beside live ones: JPEG at 70 rings around every glyph and hairline,
+       and WebP at 90 is clean at half the bytes of JPEG at 90 or PNG. */
+    if (level !== undefined)
+      return await renderFrame(frame, previewRenderScale(frame, level), { type: 'webp', quality: 90 })
     return await renderFrame(frame, Math.min(1, 640 / frame.width), {
       type: 'jpeg',
       quality: 70,
@@ -65,29 +93,30 @@ async function render(frame: Frame): Promise<Buffer> {
 
 /** Render now, persist, and return the bytes. Deduped per frame; rejects on
  *  render failure (the caller decides what a failed render means). */
-export function create(frame: Frame): Promise<Buffer> {
-  const inflight = pending.get(frame.id)
+export function create(frame: Frame, level?: PreviewScale): Promise<Buffer> {
+  const id = slot(frame.id, level)
+  const inflight = pending.get(id)
   if (inflight) return inflight
-  lastAttempt.set(frame.id, Date.now())
-  const p = render(frame).then(async (buf) => {
+  lastAttempt.set(id, Date.now())
+  const p = render(frame, level).then(async (buf) => {
     /* persist is best-effort: a bucket hiccup must not fail the response
        that only needed the bytes */
     try {
       if (!dead.has(frame.id)) {
-        await storage.putObject(keyFor(frame.id), buf, 'image/jpeg')
-        written.set(frame.id, frame.updatedAt)
+        await storage.putObject(keyFor(frame.id, level), buf, mimeFor(level))
+        written.set(id, frame.updatedAt)
         /* purge may have run during the put — its delete can land before
            our write finishes, so re-check and clean up our own orphan */
-        if (dead.has(frame.id)) await storage.deleteObject(keyFor(frame.id))
-        else await storage.putObject(versionKeyFor(frame.id), Buffer.from(String(frame.updatedAt)), 'text/plain')
+        if (dead.has(frame.id)) await storage.deleteObject(keyFor(frame.id, level))
+        else await storage.putObject(versionKeyFor(frame.id, level), Buffer.from(String(frame.updatedAt)), 'text/plain')
       }
     } catch (e) {
-      console.error(`thumb persist failed for ${frame.id}:`, e)
+      console.error(`thumb persist failed for ${id}:`, e)
     }
     return buf
   })
-  pending.set(frame.id, p)
-  p.catch(() => {}).finally(() => pending.delete(frame.id))
+  pending.set(id, p)
+  p.catch(() => {}).finally(() => pending.delete(id))
   return p
 }
 
@@ -96,40 +125,46 @@ export function create(frame: Frame): Promise<Buffer> {
  *  off (throttled, deduped, errors logged and swallowed) and the stored
  *  bytes are returned anyway: stale beats blank. Returns null when nothing
  *  is stored yet. */
-export async function getStored(frame: Frame): Promise<{ buf: Buffer; fresh: boolean; known: boolean } | null> {
+export async function getStored(
+  frame: Frame,
+  level?: PreviewScale,
+): Promise<{ buf: Buffer; fresh: boolean; known: boolean } | null> {
+  const id = slot(frame.id, level)
   let buf: Buffer | null
   try {
-    buf = await storage.getObject(keyFor(frame.id))
+    buf = await storage.getObject(keyFor(frame.id, level))
   } catch (e) {
-    console.error(`thumb read failed for ${frame.id}:`, e)
+    console.error(`thumb read failed for ${id}:`, e)
     return null
   }
   if (!buf) {
     /* the map claimed fresh but the object is gone (manual purge, new
        bucket) — forget, so the caller falls through to a live render */
-    written.delete(frame.id)
+    written.delete(id)
     return null
   }
   /* after a restart the version is on storage, not in memory: read it once */
-  if (!written.has(frame.id)) {
-    const version = Number((await storage.getObject(versionKeyFor(frame.id)).catch(() => null))?.toString())
-    if (Number.isFinite(version) && !written.has(frame.id)) written.set(frame.id, version)
+  if (!written.has(id)) {
+    const version = Number((await storage.getObject(versionKeyFor(frame.id, level)).catch(() => null))?.toString())
+    if (Number.isFinite(version) && !written.has(id)) written.set(id, version)
   }
-  const fresh = written.get(frame.id) === frame.updatedAt
-  const throttled = Date.now() - (lastAttempt.get(frame.id) ?? 0) < MIN_REVALIDATE_MS
-  if (!fresh && !throttled && !pending.has(frame.id))
-    create(frame).catch((e) => console.error(`thumb revalidate failed for ${frame.id}:`, e))
+  const fresh = written.get(id) === frame.updatedAt
+  const throttled = Date.now() - (lastAttempt.get(id) ?? 0) < MIN_REVALIDATE_MS
+  if (!fresh && !throttled && !pending.has(id))
+    create(frame, level).catch((e) => console.error(`thumb revalidate failed for ${id}:`, e))
   /* `known`: the version it was rendered from is on record (a thumbnail from
      before versions were stored is of unknown age, not known to be old) */
-  return { buf, fresh, known: written.has(frame.id) }
+  return { buf, fresh, known: written.has(id) }
 }
 
 /** Frame (or its whole canvas) is gone — drop the derived object too, so the
  *  thumb folder holds only live frames. Best-effort fire-and-forget. */
 export function purge(frameId: string): void {
   dead.add(frameId)
-  written.delete(frameId)
-  lastAttempt.delete(frameId)
-  storage.deleteObject(keyFor(frameId)).catch(() => {})
-  storage.deleteObject(versionKeyFor(frameId)).catch(() => {})
+  for (const level of [undefined, ...PREVIEW_SCALES]) {
+    written.delete(slot(frameId, level))
+    lastAttempt.delete(slot(frameId, level))
+    storage.deleteObject(keyFor(frameId, level)).catch(() => {})
+    storage.deleteObject(versionKeyFor(frameId, level)).catch(() => {})
+  }
 }

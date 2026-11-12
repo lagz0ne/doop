@@ -64,6 +64,23 @@ describe('getImage', () => {
     expect(mocks.putObject).not.toHaveBeenCalled()
   })
 
+  it('webp?preview&s= renders that level of the pyramid and persists it', async () => {
+    const f = frame()
+    const r = await getImage(f, req({ ext: 'webp', preview: true, level: 0.5 }))
+    expect(r).toEqual({ status: 'ok', buf: Buffer.from('rendered'), fresh: true })
+    expect(mocks.renderFrame).toHaveBeenCalledWith(expect.anything(), 0.5, { type: 'webp', quality: 90 })
+    expect(mocks.putObject).toHaveBeenCalledWith(`thumb/${f.id}.p50`, expect.anything(), 'image/webp')
+    /* a second request for the level is the cached render; another level is its own */
+    await getImage(f, req({ ext: 'webp', preview: true, level: 0.5 }))
+    expect(mocks.renderFrame).toHaveBeenCalledTimes(1)
+    await getImage(f, req({ ext: 'webp', preview: true, level: 1 }))
+    expect(mocks.renderFrame).toHaveBeenCalledTimes(2)
+  })
+
+  it('refuses a webp that names no level', async () => {
+    await expect(getImage(frame(), req({ ext: 'webp', preview: true }))).rejects.toThrow()
+  })
+
   it('jpg?preview renders card-size and persists the thumb', async () => {
     const f = frame()
     const r = await getImage(f, req({ preview: true }))

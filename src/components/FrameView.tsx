@@ -16,7 +16,7 @@ import { copyElementLink } from '../lib/elementLink'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
-import { previewSrc, useFrameAwake, useFrameLive } from '../lib/liveFrames'
+import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel } from '../lib/liveFrames'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
 import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
 import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
@@ -2163,21 +2163,26 @@ function FramePreview({ frame }: { frame: Frame }) {
   const attempt = retry.version === frame.updatedAt ? retry.count : 0
   const timer = useRef(0)
   useEffect(() => () => window.clearTimeout(timer.current), [])
-  const src = previewSrc(frame.id, frame.updatedAt)
+  /* The picture is fetched at the scale it is on screen (liveFrames.ts). When
+     the level changes, or the frame does, the <img> keeps painting what it
+     has until the new picture has loaded: a zoom sharpens the previews in
+     place, it never blanks them. */
+  const level = usePreviewLevel(frame)
+  const src = level === null ? null : previewSrc(frame.id, frame.updatedAt, level)
   return (
     <div
       className={cn('block overflow-hidden', element ? 'bg-transparent' : 'bg-white')}
       style={{ width: frame.width, height: frame.height }}
       data-doop-frame-preview=""
     >
-      {frame.html && !element && (
+      {frame.html && !element && src && (
         <img
           src={attempt ? `${src}&retry=${attempt}` : src}
           alt=""
           draggable={false}
           loading="lazy"
           decoding="async"
-          className="pointer-events-none block w-full select-none"
+          className="pointer-events-none block h-full w-full select-none"
           onError={() => {
             if (attempt >= PREVIEW_RETRIES) return
             window.clearTimeout(timer.current)

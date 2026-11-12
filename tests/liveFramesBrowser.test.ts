@@ -172,6 +172,45 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
     await store(page, 'select(null)')
   }, 30_000)
 
+  /* Previews are fetched at the scale they are on screen (shared/types.ts,
+     PREVIEW_SCALES); this browser's devicePixelRatio is 1. */
+  const previewLevels = (page: Page) =>
+    page.evaluate(() => [
+      ...new Set(
+        [...document.querySelectorAll<HTMLImageElement>('[data-doop-frame-preview] img')].map(
+          (img) => new URL(img.src).searchParams.get('s') ?? 'none',
+        ),
+      ),
+    ])
+
+  it('asks for the previews at the level that covers them on screen, and again when the zoom changes it', async () => {
+    await store(page, 'select(null)')
+    /* the whole page in view */
+    await camera(page, { x: 20, y: 60, zoom: 0.08 })
+    expect(await previewLevels(page)).toEqual(['0.25'])
+    /* closer: the frames near the view sharpen, the rest of the page keeps the small picture */
+    await camera(page, { x: 20, y: 60, zoom: 0.29 })
+    const levels = (await page.evaluate(() =>
+      Object.fromEntries(
+        ['Frame 0', 'Frame 199'].map((name) => [
+          name,
+          new URL(
+            [...document.querySelectorAll('[data-frame-shell]')]
+              .find((shell) => shell.querySelector('[data-frame-title]')?.textContent === name)!
+              .querySelector('img')!.src,
+          ).searchParams.get('s'),
+        ]),
+      ),
+    )) as Record<string, string>
+    expect(levels).toEqual({ 'Frame 0': '0.5', 'Frame 199': '0.25' })
+    /* every one is the whole frame as webp, named by version */
+    const src = await page.evaluate(
+      () => document.querySelector<HTMLImageElement>('[data-doop-frame-preview] img')!.src,
+    )
+    expect(new URL(src).pathname).toMatch(/^\/i\/f\d+\.webp$/)
+    expect(new URL(src).searchParams.get('v')).toBe('1')
+  }, 30_000)
+
   it('measures a click with culling on and off (written to $LIVEFRAMES_BENCH, not asserted)', async () => {
     async function measure(cull: boolean) {
       const p = await browser.newPage()

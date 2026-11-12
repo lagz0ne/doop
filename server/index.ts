@@ -87,7 +87,7 @@ import { isRunnerProvider } from '../shared/agentRunner.ts'
 import { modelCatalogFor } from './modelCatalog.ts'
 import { mentionedRole } from '../shared/agents.ts'
 import { activeAgentTasks } from '../shared/agentActivity.ts'
-import { colorFor } from '../shared/types.ts'
+import { colorFor, isPreviewScale } from '../shared/types.ts'
 import { isPeerViewport } from '../shared/viewport.ts'
 import { exportScaleSuffix, fitExportScale, parseExportScale } from '../shared/exportScale.ts'
 import { emailShare } from './canvasShares.ts'
@@ -427,7 +427,11 @@ app.use('/relay', async (req, res) => {
 
 app.get('/i/:id.:ext', async (req, res) => {
   const { id, ext } = req.params as { id: string; ext: string }
-  if (ext !== 'png' && ext !== 'jpg') return res.status(404).end()
+  if (ext !== 'png' && ext !== 'jpg' && ext !== 'webp') return res.status(404).end()
+  /* a webp is one level of the editor's preview pyramid and nothing else:
+     /i/<id>.webp?preview&s=<scale> (previews.ts) */
+  const level = ext === 'webp' && req.query.preview !== undefined ? Number(req.query.s) : undefined
+  if (ext === 'webp' && !isPreviewScale(level)) return res.status(404).end()
   const frame = store.getFrame(id)
   if (!frame) return res.status(404).end()
 
@@ -442,6 +446,7 @@ app.get('/i/:id.:ext', async (req, res) => {
       quality: Math.min(100, Math.max(1, Number(req.query.quality) || 90)),
       /* ?preview — the dashboard-card variant; see previews.ts */
       preview: req.query.preview !== undefined,
+      ...(isPreviewScale(level) ? { level } : null),
       ...(typeof req.query.v === 'string' && /^\d+$/.test(req.query.v) ? { version: Number(req.query.v) } : null),
       ip: req.ip ?? 'unknown',
       /* the render limit targets anonymous hotlink abuse — a logged-in user
@@ -460,7 +465,7 @@ app.get('/i/:id.:ext', async (req, res) => {
   }
   const { buf } = result
 
-  res.set('Content-Type', ext === 'jpg' ? 'image/jpeg' : 'image/png')
+  res.set('Content-Type', ext === 'jpg' ? 'image/jpeg' : ext === 'webp' ? 'image/webp' : 'image/png')
   /* A URL that names the frame's current version (?v=<updatedAt>, as the
      editor's culled frames ask for it) can never show anything else: the
      browser keeps it for good and a page of hundreds of previews costs no
