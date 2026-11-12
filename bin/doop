@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+# doop: build our doop from pristine upstream (vendor/doop) + patches/ + transforms/.
+#
+# The one rule: never edit vendor/doop. Every change to doop is a patch
+# (patches/NNNN-*.patch, made with `edit` + `export`) or a transform
+# (transforms/NN-*, a script that rewrites the tree). build/doop is generated
+# and disposable; anything not exported from it is lost on the next apply.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+V=$ROOT/vendor/doop        # pristine upstream, pinned by the superproject (submodule)
+B=$ROOT/build/doop         # generated tree: pin + patches (+ transforms)
+BASE=$ROOT/build/base      # pristine pin, for A/B perf runs
+P=$ROOT/patches
+T=$ROOT/transforms
+SUFFIX=patched               # release tags: <upstream-tag>-patched.<n>
+FORK=fork                  # remote in vendor/doop that the deployer builds from (github.com/the fork/doop)
+BRANCH=patched               # fork branch that carries the latest release
+APP_ID=<app-id>   # the deployer app <app>
+# Commits made here use a fixed committer and the author's date, so the same
+# pin + patches always give the same commit hashes (a release is reproducible).
+export GIT_COMMITTER_NAME=${DOOP_COMMITTER_NAME:-lagz0ne}
+export GIT_COMMITTER_EMAIL=${DOOP_COMMITTER_EMAIL:-15101444+lagz0ne@users.noreply.github.com}
+
+# bun (and a bunx shim) for doop's own git hooks (lint-staged, commitlint) and scripts.
+export PATH="$ROOT/bin/shims:$HOME/.bun/bin:$PATH"
+
+die() { echo "doop: $*" >&2; exit 1; }
+say() { echo "doop: $*" >&2; }
+shopt -s nullglob
+
+pin() { git -C "$ROOT" ls-files -s vendor/doop | awk '{print $2}'; }
+upstream() { git -C "$V" describe --tags --exact-match "$(pin)" 2>/dev/null || pin | cut -c1-12; }
+patches() { local f=("$P"/*.patch); printf '%s\n' "${f[@]}"; }
+transforms() { local f=("$T"/[0-9]*); printf '%s\n' "${f[@]}"; }
+is_transform() { [[ $(git -C "$B" log -1 --format=%s "$1") == "chore(transform): "* ]]; }
+
+vendor_check() {
+  [ -e "$V/.git" ] || die "vendor/doop is missing: git submodule update --init"
+  local head; head=$(git -C "$V" rev-parse HEAD)
+  [ "$head" = "$(pin)" ] || die "vendor/doop is at ${head:0:12} but the pin is $(pin | cut -c1-12).
+  Restore it: git -C vendor/doop checkout --detach $(pin)"
+  [ -z "$(git -C "$V" status --porcelain)" ] || die "vendor/doop has local changes. Never edit vendor.
+  Move the change into a patch (bin/doop edit), then: git -C vendor/doop checkout -- . && git -C vendor/doop clean -fd"
+}
+
+# Commits in build/doop that are not in patches/ yet (by patch-id).
+unexported() {
+  [ -e "$B/.git" ] || return 0
+  local have want
+  have=$(git -C "$B" rev-list --reverse "$(pin)..HEAD" 2>/dev/null | while read -r c; do
+    is_transform "$c" || git -C "$B" show "$c" | git patch-id --stable | cut -d' ' -f1; done)
+  want=$(patches | while read -r f; do [ -n "$f" ] && git patch-id --stable < "$f" | cut -d' ' -f1; done)
+  comm -23 <(sort <<<"$have" | sed '/^$/d') <(sort <<<"$want" | sed '/^$/d')
+}
+
+guard_build() {
+  [ "${FORCE:-}" = 1 ] && return 0
+  [ -e "$B/.git" ] || return 0
+  if [ -d "$(git -C "$B" rev-parse --git-path rebase-apply)" ]; then
+    die "build/doop is in the middle of 'git am'. Finish it (git -C build/doop am --continue) and run bin/doop export, or pass --force to throw it away."
+  fi
+  [ -z "$(git -C "$B" status --porcelain)" ] || die "build/doop has uncommitted changes. Commit them and run bin/doop export, or pass --force to throw them away."
+  [ -z "$(unexported)" ] || die "build/doop has commits that are not in patches/. Run bin/doop export first, or pass --force to throw them away."
+}
+
+# build/doop := pin. Ignored files (node_modules, dist, data) survive.
+build_reset() {
+  if [ ! -e "$B/.git" ]; then
+    mkdir -p "$(dirname "$B")"
+    git -C "$V" worktree prune
+    git -C "$V" worktree add -q --detach "$B" "$(pin)"
+  fi
+  git -C "$B" am --abort >/dev/null 2>&1 || true
+  git -C "$B" checkout -q -f --detach "$(pin)"
+  git -C "$B" clean -q -fd
+  git -C "$B" branch -q -D work >/dev/null 2>&1 || true
+}
+
+apply_patches() {
+  local f; mapfile -t f < <(patches | sed '/^$/d')
+  [ ${#f[@]} -eq 0 ] && return 0
+  git -C "$B" am -q -3 --committer-date-is-author-date "${f[@]}" || die "a patch did not apply. Resolve it in build/doop (git -C build/doop status),
+  then: git -C build/doop am --continue   (repeat until done)
+  then: bin/doop export && bin/doop check"
+}
+
+run_transforms() {
+  local t name d
+  while read -r t; do
+    [ -n "$t" ] || continue
+    name=$(basename "$t")
+    [ -x "$t" ] || die "transform is not executable: transforms/$name"
+    ( cd "$B" && DOOP_ROOT="$ROOT" DOOP_UPSTREAM="$(upstream)" "$t" ) \
+      || die "transform $name failed. Its target probably changed upstream; update transforms/$name."
+    [ -n "$(git -C "$B" status --porcelain)" ] \
+      || die "transform $name changed nothing. Its target is gone or already fixed upstream; update or delete transforms/$name."
+    git -C "$B" add -A
+    d=$(git -C "$B" log -1 --format=%aD)
+    GIT_AUTHOR_NAME=$GIT_COMMITTER_NAME GIT_AUTHOR_EMAIL=$GIT_COMMITTER_EMAIL \
+      GIT_AUTHOR_DATE=$d GIT_COMMITTER_DATE=$d git -C "$B" commit -q --no-verify -m "chore(transform): $name"
+  done < <(transforms)
+}
+
+cmd_status() {
+  echo "upstream   $(upstream) ($(pin | cut -c1-12)), $(git -C "$ROOT" config -f .gitmodules submodule.vendor/doop.url)"
+  if (vendor_check) 2>/dev/null; then echo "vendor     pristine"; else echo "vendor     NOT PRISTINE (bin/doop check says why)"; fi
+  echo "patches    $(patches | sed '/^$/d' | wc -l)"; patches | sed '/^$/d' | sed "s|$P/|             |"
+  echo "transforms $(transforms | sed '/^$/d' | wc -l)"; transforms | sed '/^$/d' | sed "s|$T/|             |"
+  if [ -e "$B/.git" ]; then
+    local br; br=$(git -C "$B" branch --show-current); br=${br:-detached}
+    local dirty=""; [ -n "$(git -C "$B" status --porcelain)" ] && dirty=", uncommitted changes"
+    local un; un=$(unexported | sed '/^$/d' | wc -l); [ "$un" -gt 0 ] && dirty="$dirty, $un unexported commit(s)"
+    echo "build      $(git -C "$B" rev-parse --short=12 HEAD) [$br]$dirty"
+  else
+    echo "build      (none; bin/doop apply)"
+  fi
+  local last; last=$(git -C "$V" tag -l "$(upstream)-$SUFFIX.*" --sort=-v:refname | head -1)
+  echo "released   ${last:-none for $(upstream)}"
+  command -v deploys >/dev/null && { echo -n "deployed   "; deploys doop 2>/dev/null | head -1 || echo "?"; }
+  return 0
+}
+
+cmd_apply() {
+  local tr=1; [ "${1:-}" = --no-transforms ] && tr=0
+  vendor_check; guard_build; build_reset; apply_patches
+  [ $tr = 1 ] && run_transforms
+  say "build/doop = $(upstream) + $(patches | sed '/^$/d' | wc -l) patch(es)$([ $tr = 1 ] && echo " + $(transforms | sed '/^$/d' | wc -l) transform(s)") -> $(git -C "$B" rev-parse --short=12 HEAD)"
+}
+
+cmd_edit() {
+  cmd_apply --no-transforms
+  git -C "$B" switch -q -c work
+  say "edit in build/doop on branch 'work'. One commit per patch (its message becomes the patch).
+  Reword or split old patches with git rebase -i $(pin | cut -c1-12) there.
+  Then: bin/doop export && bin/doop check && git add patches && git commit"
+}
+
+# git commit inside build/doop, with doop's hooks able to run.
+cmd_commit() { [ -e "$B/.git" ] || die "no build/doop; run bin/doop edit"; git -C "$B" commit "$@"; }
+
+cmd_export() {
+  [ -e "$B/.git" ] || die "no build/doop; run bin/doop edit"
+  [ -d "$(git -C "$B" rev-parse --git-path rebase-apply)" ] && die "build/doop is still in 'git am'; finish it first"
+  [ -z "$(git -C "$B" status --porcelain)" ] || die "build/doop has uncommitted changes; commit them first"
+  local top="" seen_t=0 c
+  while read -r c; do
+    if is_transform "$c"; then seen_t=1
+    else [ $seen_t = 1 ] && die "commit ${c:0:12} sits after a transform commit. Patches go below transforms; run bin/doop edit and redo it there."; top=$c; fi
+  done < <(git -C "$B" rev-list --reverse "$(pin)..HEAD")
+  rm -f "$P"/*.patch; mkdir -p "$P"
+  [ -n "$top" ] && git -C "$B" format-patch -q --zero-commit --no-signature -o "$P" "$(pin)..$top"
+  say "patches/ now holds $(patches | sed '/^$/d' | wc -l) patch(es):"
+  git -C "$ROOT" status --short -- patches
+}
+
+cmd_check() {
+  local test=0; [ "${1:-}" = --test ] && test=1
+  vendor_check
+  cmd_apply
+  if [ $test = 1 ]; then
+    [ -d "$B/node_modules" ] || (cd "$B" && bun install --frozen-lockfile)
+    (cd "$B" && bun run typecheck && bun run test)
+  fi
+  say "ok: vendor pristine, every patch and transform applies"
+}
+
+# A/B perf runs need the pristine pin too: build/base, sharing build/doop's node_modules.
+cmd_base() {
+  vendor_check
+  if [ ! -e "$BASE/.git" ]; then git -C "$V" worktree prune; git -C "$V" worktree add -q --detach "$BASE" "$(pin)"; fi
+  git -C "$BASE" checkout -q -f --detach "$(pin)"; git -C "$BASE" clean -q -fd
+  [ -e "$BASE/node_modules" ] || ln -s ../doop/node_modules "$BASE/node_modules"
+  say "build/base = $(upstream), pristine"
+}
+
+# Run a local doop (production build) for perf work. Not for real data.
+cmd_serve() {
+  local dir=$B port=4477
+  [ "${1:-}" = --base ] && { dir=$BASE; port=4478; shift; }
+  port=${1:-$port}
+  [ -e "$dir/.git" ] || die "no $(basename "$dir") tree; run bin/doop $([ "$dir" = "$B" ] && echo apply || echo base)"
+  [ -d "$B/node_modules" ] || (cd "$B" && bun install --frozen-lockfile)
+  local chrome; chrome=$(ls -d ~/.cache/ms-playwright/chromium_headless_shell-*/*/chrome-headless-shell 2>/dev/null | tail -1)
+  cd "$dir"
+  ./node_modules/.bin/vite build --sourcemap
+  say "serving $(basename "$dir") on http://localhost:$port (data in $dir/data)"
+  NODE_ENV=production PORT=$port BETTER_AUTH_URL=http://localhost:$port \
+    BETTER_AUTH_SECRET=local-profiling-only-not-a-real-secret-000000 \
+    CHROME_PATH=$chrome CHROME_NO_SANDBOX=true exec ./node_modules/.bin/tsx server/index.ts
+}
+
+cmd_release() {
+  local push=0; [ "${1:-}" = --push ] && push=1
+  [ -z "$(git -C "$ROOT" status --porcelain)" ] || die "commit the project first (patches, transforms, pin): a release must be reproducible from a commit"
+  cmd_check
+  git -C "$V" fetch -q "$FORK" --tags || say "could not fetch $FORK tags; numbering from local tags"
+  local up head last n tag
+  up=$(upstream); head=$(git -C "$B" rev-parse HEAD)
+  last=$(git -C "$V" tag -l "$up-$SUFFIX.*" --sort=-v:refname | head -1)
+  if [ -n "$last" ] && [ "$(git -C "$V" rev-parse "$last^{tree}")" = "$(git -C "$B" rev-parse HEAD^{tree})" ]; then
+    say "nothing new: $last already has this exact tree"; tag=$last
+  else
+    n=$(( ${last##*.} + 0 + 1 )); [ -z "$last" ] && n=1
+    tag="$up-$SUFFIX.$n"
+    git -C "$V" tag -a "$tag" "$head" -m "doop $up + $(patches | sed '/^$/d' | wc -l) patch(es), $(transforms | sed '/^$/d' | wc -l) transform(s)
+
+built by ~/dev/doop at $(git -C "$ROOT" rev-parse --short=12 HEAD) (bin/doop release)"
+    say "tagged $tag -> ${head:0:12}"
+  fi
+  git -C "$V" branch -q -f "$BRANCH" "$tag^{commit}"
+  if [ $push = 1 ]; then
+    git -C "$V" push "$FORK" "+refs/heads/$BRANCH:refs/heads/$BRANCH" "refs/tags/$tag"
+    say "pushed $BRANCH and $tag to $FORK"
+  else
+    say "not pushed. To publish: bin/doop release --push"
+  fi
+  cat >&2 <<EOF
+doop: to deploy, ask the hub (it owns the deployer):
+  hubq send "doop: deploy $tag" -d "Point app <app> ($APP_ID) at the fork/doop tag $tag (application.saveGitProvider customGitBranch=$tag), application.deploy, check https://doop.example.com" --from doop
+EOF
+}
+
+cmd_upgrade() {
+  local to=${1:-}; [ -n "$to" ] || die "usage: bin/doop upgrade <upstream-tag>"
+  vendor_check; guard_build
+  git -C "$V" fetch -q origin --tags
+  git -C "$V" rev-parse -q --verify "$to^{commit}" >/dev/null || die "no such upstream tag: $to"
+  git -C "$V" checkout -q --detach "$to"
+  git -C "$ROOT" add vendor/doop
+  say "pin moved to $to (staged). Re-applying patches..."
+  FORCE=1 cmd_apply --no-transforms
+  run_transforms
+  cmd_export_quiet
+  say "upgraded to $to. Review, then: bin/doop check --test && git add -A vendor/doop patches && git commit -m 'upstream: $to'"
+}
+cmd_export_quiet() {
+  # refresh patch context against the new pin (only patch commits, transforms stay scripts)
+  local top="" c
+  while read -r c; do is_transform "$c" || top=$c; done < <(git -C "$B" rev-list --reverse "$(pin)..HEAD")
+  rm -f "$P"/*.patch
+  [ -n "$top" ] && git -C "$B" format-patch -q --zero-commit --no-signature -o "$P" "$(pin)..$top"
+  return 0
+}
+
+usage() {
+  cat <<EOF
+bin/doop: our doop = upstream (vendor/doop, pinned, never edited) + patches/ + transforms/
+
+  status              pin, patches, transforms, build state, last release
+  apply               regenerate build/doop = pin + patches + transforms
+  edit                build/doop = pin + patches on branch 'work'; commit changes there
+  commit [args]       git commit in build/doop (runs doop's lint/commitlint hooks)
+  export              write build/doop's commits back to patches/ (one file per commit)
+  check [--test]      vendor pristine + everything applies (--test: typecheck + vitest)
+  base                build/base = pristine pin (A/B perf)
+  serve [--base] [port]  local production doop from build/doop (4477) or build/base (4478)
+  release [--push]    tag <upstream>-$SUFFIX.<n> on the build, move '$BRANCH', push to the fork
+  upgrade <tag>       move the pin to a new upstream tag and re-apply everything
+
+  --force (before the command) throws away unexported work in build/doop.
+EOF
+}
+
+[ "${1:-}" = --force ] && { FORCE=1; shift; }
+c=${1:-status}; shift || true
+case "$c" in
+  status|apply|edit|commit|export|check|base|serve|release|upgrade) "cmd_$c" "$@" ;;
+  help|-h|--help) usage ;;
+  *) usage; exit 2 ;;
+esac

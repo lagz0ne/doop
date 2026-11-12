@@ -1,0 +1,337 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 06:23:06 +0000
+Subject: [PATCH 3/4] perf(previews): versioned previews are immutable and
+ their versions outlive a restart
+
+The editor's culled frames show /i/<id>.jpg?preview&v=<updatedAt>, hundreds
+a page.
+
+- A response for the frame's current version is 'immutable' for a year, so
+  a page of previews costs no request on the next visit (was max-age=60,
+  no validator).
+- The version a thumbnail was rendered from is stored beside it
+  (thumb/<id>.ver) and read back once per frame after a restart. Without
+  it a restart forgot every version and re-rendered each previewed frame.
+- A request for the current version, when the stored thumbnail is on
+  record as older, waits for the render (deduped, capped, metered) instead
+  of pinning the old picture on a frame that shows it until its next edit.
+  A thumbnail of unknown age (stored before versions were) is still served
+  at once and refreshed in the background.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ server/index.ts                  | 10 ++++-
+ server/previews.ts               | 32 ++++++++++++++--
+ server/thumbs.ts                 | 25 +++++++++---
+ tests/mcpScreenshotCache.test.ts |  4 +-
+ tests/previewVersion.test.ts     | 65 ++++++++++++++++++++++++++++++++
+ tests/thumbs.test.ts             | 34 ++++++++++++++++-
+ 6 files changed, 155 insertions(+), 15 deletions(-)
+ create mode 100644 tests/previewVersion.test.ts
+
+diff --git a/server/index.ts b/server/index.ts
+index 055f471..b044dcd 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -379,6 +379,7 @@ app.get('/i/:id.:ext', async (req, res) => {
+       quality: Math.min(100, Math.max(1, Number(req.query.quality) || 90)),
+       /* ?preview — the dashboard-card variant; see previews.ts */
+       preview: req.query.preview !== undefined,
++      ...(typeof req.query.v === 'string' && /^\d+$/.test(req.query.v) ? { version: Number(req.query.v) } : null),
+       ip: req.ip ?? 'unknown',
+       /* the render limit targets anonymous hotlink abuse — a logged-in user
+          loading a dashboard of many canvases shouldn't hit it (and behind
+@@ -397,7 +398,14 @@ app.get('/i/:id.:ext', async (req, res) => {
+   const { buf } = result
+ 
+   res.set('Content-Type', ext === 'jpg' ? 'image/jpeg' : 'image/png')
+-  res.set('Cache-Control', 'public, max-age=60')
++  /* A URL that names the frame's current version (?v=<updatedAt>, as the
++     editor's culled frames ask for it) can never show anything else: the
++     browser keeps it for good and a page of hundreds of previews costs no
++     request on the next visit. A stale thumbnail served while its
++     re-render runs must not be pinned that way, so only bytes known to be
++     of this version qualify; everything else keeps the short lifetime. */
++  const versioned = req.query.v === String(frame.updatedAt) && result.fresh
++  res.set('Cache-Control', versioned ? 'public, max-age=31536000, immutable' : 'public, max-age=60')
+   if (req.query.download !== undefined) {
+     const safe = frame.name.replace(/[^\w\- ]+/g, '').trim() || 'frame'
+     res.set('Content-Disposition', `attachment; filename="${safe}.${ext}"`)
+diff --git a/server/previews.ts b/server/previews.ts
+index 384e538..a7110db 100644
+--- a/server/previews.ts
++++ b/server/previews.ts
+@@ -39,12 +39,18 @@ export interface ImageRequest {
+    *  meaningful for jpg — a png?preview would serve jpeg bytes under an
+    *  image/png content-type, so the flag is ignored there. */
+   preview: boolean
++  /** the frame version the URL names (?v=), if any. The editor's culled
++   *  frames ask for the current one and show nothing else until the next
++   *  edit, so a thumbnail known to be older is not an answer to them. */
++  version?: number
+   ip: string
+   /** consulted only when the render budget is exhausted */
+   isAuthenticated: () => Promise<boolean>
+ }
+ 
+-export type ImageResult = { status: 'ok'; buf: Buffer } | { status: 'rate-limited' }
++/** `fresh`: the bytes were rendered from the frame as it is now (a stored
++ *  thumbnail may be served stale while its re-render runs). */
++export type ImageResult = { status: 'ok'; buf: Buffer; fresh: boolean } | { status: 'rate-limited' }
+ 
+ /** May reject when the render itself fails — the caller owns the 500. */
+ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageResult> {
+@@ -57,11 +63,29 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
+   /* previews first try the persisted thumbnail: survives redeploys, serves
+      instantly even when stale (thumbs revalidates in the background), and
+      costs no Chromium boot — so it isn't metered either */
++  let fresh = true
+   if (!pending && preview) {
+     const stored = await thumbs.getStored(frame)
+-    if (stored) {
+-      pending = Promise.resolve(stored)
++    /* A request for exactly this version, answered from a thumbnail on record
++       as older, would pin the old picture on a frame that shows it until its
++       next edit: that one waits for the render instead (deduped and capped in
++       thumbs.ts; metered like any render, and served stale when over budget).
++       Everything else gets the stored bytes at once, stale or not. */
++    const mustRender =
++      !!stored &&
++      !stored.fresh &&
++      stored.known &&
++      req.version === frame.updatedAt &&
++      (await consumeRenderBudget(req.ip, req.isAuthenticated))
++    if (mustRender) {
++      pending = thumbs.create(frame)
+       remember(key, pending, frame.updatedAt)
++    } else if (stored) {
++      pending = Promise.resolve(stored.buf)
++      fresh = stored.fresh
++      /* stale bytes are not remembered: the next request should find the
++         re-render, not five more minutes of the old picture */
++      if (fresh) remember(key, pending, frame.updatedAt)
+     }
+   }
+ 
+@@ -76,7 +100,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
+     remember(key, pending, frame.updatedAt)
+   }
+ 
+-  return { status: 'ok', buf: await pending }
++  return { status: 'ok', buf: await pending, fresh }
+ }
+ 
+ function imageKey(id: string, ext: 'png' | 'jpg', scale: 1 | 2, quality: number | '', preview: boolean): string {
+diff --git a/server/thumbs.ts b/server/thumbs.ts
+index d805ec9..d52324c 100644
+--- a/server/thumbs.ts
++++ b/server/thumbs.ts
+@@ -9,10 +9,13 @@ import * as storage from './storage.ts'
+  * cache — so a dashboard never shows blank tiles waiting on Chromium: a
+  * possibly-stale thumbnail is served instantly and refreshed in the
+  * background. The key is deliberately unversioned; freshness lives in the
+- * in-memory `written` map (frameId → the frame.updatedAt the stored thumb
+- * was rendered from). After a restart freshness is simply unknown, which
+- * degrades to one background re-render per previewed frame — never to a
+- * blank tile.
++ * `written` map (frameId → the frame.updatedAt the stored thumb was rendered
++ * from), and beside each thumbnail in `thumb/<frameId>.ver`, read back once
++ * per frame after a restart. Without that sidecar a restart forgot every
++ * version, and the first visit to a big canvas re-rendered each frame it
++ * showed (the editor's culled frames show these previews, hundreds a page).
++ * A thumbnail stored before the sidecar existed still degrades to one
++ * background re-render — never to a blank tile.
+  */
+ 
+ /** frame.updatedAt the stored thumb was rendered from; absent = unknown */
+@@ -27,6 +30,7 @@ const MIN_REVALIDATE_MS = 30_000
+ const dead = new Set<string>()
+ 
+ const keyFor = (frameId: string) => `thumb/${frameId}.jpg`
++const versionKeyFor = (frameId: string) => `thumb/${frameId}.ver`
+ 
+ /* Global bound on concurrent preview renders. Per-frame dedupe caps repeat
+    requests but not breadth: a post-restart dashboard of 50 stale canvases
+@@ -75,6 +79,7 @@ export function create(frame: Frame): Promise<Buffer> {
+         /* purge may have run during the put — its delete can land before
+            our write finishes, so re-check and clean up our own orphan */
+         if (dead.has(frame.id)) await storage.deleteObject(keyFor(frame.id))
++        else await storage.putObject(versionKeyFor(frame.id), Buffer.from(String(frame.updatedAt)), 'text/plain')
+       }
+     } catch (e) {
+       console.error(`thumb persist failed for ${frame.id}:`, e)
+@@ -91,7 +96,7 @@ export function create(frame: Frame): Promise<Buffer> {
+  *  off (throttled, deduped, errors logged and swallowed) and the stored
+  *  bytes are returned anyway: stale beats blank. Returns null when nothing
+  *  is stored yet. */
+-export async function getStored(frame: Frame): Promise<Buffer | null> {
++export async function getStored(frame: Frame): Promise<{ buf: Buffer; fresh: boolean; known: boolean } | null> {
+   let buf: Buffer | null
+   try {
+     buf = await storage.getObject(keyFor(frame.id))
+@@ -105,11 +110,18 @@ export async function getStored(frame: Frame): Promise<Buffer | null> {
+     written.delete(frame.id)
+     return null
+   }
++  /* after a restart the version is on storage, not in memory: read it once */
++  if (!written.has(frame.id)) {
++    const version = Number((await storage.getObject(versionKeyFor(frame.id)).catch(() => null))?.toString())
++    if (Number.isFinite(version) && !written.has(frame.id)) written.set(frame.id, version)
++  }
+   const fresh = written.get(frame.id) === frame.updatedAt
+   const throttled = Date.now() - (lastAttempt.get(frame.id) ?? 0) < MIN_REVALIDATE_MS
+   if (!fresh && !throttled && !pending.has(frame.id))
+     create(frame).catch((e) => console.error(`thumb revalidate failed for ${frame.id}:`, e))
+-  return buf
++  /* `known`: the version it was rendered from is on record (a thumbnail from
++     before versions were stored is of unknown age, not known to be old) */
++  return { buf, fresh, known: written.has(frame.id) }
+ }
+ 
+ /** Frame (or its whole canvas) is gone — drop the derived object too, so the
+@@ -119,4 +131,5 @@ export function purge(frameId: string): void {
+   written.delete(frameId)
+   lastAttempt.delete(frameId)
+   storage.deleteObject(keyFor(frameId)).catch(() => {})
++  storage.deleteObject(versionKeyFor(frameId)).catch(() => {})
+ }
+diff --git a/tests/mcpScreenshotCache.test.ts b/tests/mcpScreenshotCache.test.ts
+index 189a4e5..7952d5a 100644
+--- a/tests/mcpScreenshotCache.test.ts
++++ b/tests/mcpScreenshotCache.test.ts
+@@ -62,7 +62,7 @@ it('primes the image cache so the preview card’s load is a free cached serve',
+   mocks.renderFrame.mockResolvedValue(Buffer.from('first'))
+   const result = await screenshot()
+   expect(result.isError).toBeFalsy()
+-  expect(await getImage(frame, request('ip-a'))).toEqual({ status: 'ok', buf: Buffer.from('first') })
++  expect(await getImage(frame, request('ip-a'))).toEqual({ status: 'ok', buf: Buffer.from('first'), fresh: true })
+   expect(mocks.renderFrame).toHaveBeenCalledTimes(1)
+ })
+ 
+@@ -75,6 +75,6 @@ it('never files a screenshot under an edit that landed while it rendered', async
+   })
+   mocks.renderFrame.mockResolvedValue(Buffer.from('fresh'))
+   await screenshot()
+-  expect(await getImage(frame, request('ip-b'))).toEqual({ status: 'ok', buf: Buffer.from('fresh') })
++  expect(await getImage(frame, request('ip-b'))).toEqual({ status: 'ok', buf: Buffer.from('fresh'), fresh: true })
+   expect(mocks.renderFrame).toHaveBeenCalledTimes(2)
+ })
+diff --git a/tests/previewVersion.test.ts b/tests/previewVersion.test.ts
+new file mode 100644
+index 0000000..3c16464
+--- /dev/null
++++ b/tests/previewVersion.test.ts
+@@ -0,0 +1,65 @@
++import { beforeEach, expect, it, vi } from 'vitest'
++import type { Frame } from '../shared/types.ts'
++
++/* What GET /i/<id>.jpg?preview&v=<version> answers with: the editor's culled
++   frames ask for the frame's current version and keep showing it until the
++   next edit, so a thumbnail on record as older must not be that answer. */
++
++const mocks = vi.hoisted(() => ({ getStored: vi.fn(), create: vi.fn() }))
++vi.mock('../server/thumbs.ts', () => ({ getStored: mocks.getStored, create: mocks.create }))
++vi.mock('../server/screenshot.ts', () => ({ renderFrame: vi.fn() }))
++
++import { getImage, type ImageRequest } from '../server/previews.ts'
++
++let n = 0
++const frame = (updatedAt: number): Frame =>
++  ({
++    id: `pv-${++n}`,
++    canvasId: 'c',
++    name: 'f',
++    x: 0,
++    y: 0,
++    width: 1280,
++    height: 900,
++    html: '<p>x</p>',
++    updatedAt,
++  }) as Frame
++const request = (version?: number): ImageRequest => ({
++  ext: 'jpg',
++  scale: 1,
++  quality: 90,
++  preview: true,
++  ...(version === undefined ? null : { version }),
++  ip: `ip-${n}`,
++  isAuthenticated: () => Promise.resolve(false),
++})
++
++beforeEach(() => {
++  mocks.getStored.mockReset()
++  mocks.create.mockReset().mockResolvedValue(Buffer.from('rendered'))
++})
++
++it('serves a current thumbnail as it is', async () => {
++  mocks.getStored.mockResolvedValue({ buf: Buffer.from('stored'), fresh: true, known: true })
++  expect(await getImage(frame(7), request(7))).toEqual({ status: 'ok', buf: Buffer.from('stored'), fresh: true })
++  expect(mocks.create).not.toHaveBeenCalled()
++})
++
++it('renders before answering a request for the current version when the thumbnail is known to be older', async () => {
++  mocks.getStored.mockResolvedValue({ buf: Buffer.from('old'), fresh: false, known: true })
++  expect(await getImage(frame(7), request(7))).toEqual({ status: 'ok', buf: Buffer.from('rendered'), fresh: true })
++  expect(mocks.create).toHaveBeenCalledTimes(1)
++})
++
++it('serves the old thumbnail to a request that names no version, or another one', async () => {
++  mocks.getStored.mockResolvedValue({ buf: Buffer.from('old'), fresh: false, known: true })
++  expect(await getImage(frame(7), request())).toEqual({ status: 'ok', buf: Buffer.from('old'), fresh: false })
++  expect(await getImage(frame(7), request(6))).toEqual({ status: 'ok', buf: Buffer.from('old'), fresh: false })
++  expect(mocks.create).not.toHaveBeenCalled()
++})
++
++it('serves a thumbnail of unknown age at once (stored before versions were recorded)', async () => {
++  mocks.getStored.mockResolvedValue({ buf: Buffer.from('legacy'), fresh: false, known: false })
++  expect(await getImage(frame(7), request(7))).toEqual({ status: 'ok', buf: Buffer.from('legacy'), fresh: false })
++  expect(mocks.create).not.toHaveBeenCalled()
++})
+diff --git a/tests/thumbs.test.ts b/tests/thumbs.test.ts
+index cdc55ec..3f5e413 100644
+--- a/tests/thumbs.test.ts
++++ b/tests/thumbs.test.ts
+@@ -98,10 +98,40 @@ describe('thumbs', () => {
+     mocks.getObject.mockResolvedValue(Buffer.from('stale'))
+     const f = frame('stale-frame')
+     const [a, b] = await Promise.all([thumbs.getStored(f), thumbs.getStored(f)])
+-    expect(a?.toString()).toBe('stale')
+-    expect(b?.toString()).toBe('stale')
++    expect(a?.buf.toString()).toBe('stale')
++    expect(b?.buf.toString()).toBe('stale')
++    expect(a?.fresh).toBe(false)
+     await tick()
+     /* one background refresh, not one per request (dedupe + throttle) */
+     expect(mocks.renderFrame).toHaveBeenCalledTimes(1)
+   })
++
++  it('stores the version beside the thumbnail', async () => {
++    mocks.renderFrame.mockResolvedValue(Buffer.from('jpg'))
++    await thumbs.create(frame('versioned'))
++    expect(mocks.putObject).toHaveBeenCalledWith('thumb/versioned.jpg', Buffer.from('jpg'), 'image/jpeg')
++    expect(mocks.putObject).toHaveBeenCalledWith('thumb/versioned.ver', Buffer.from('1'), 'text/plain')
++  })
++
++  it('knows a stored thumbnail is current after a restart, and does not render it again', async () => {
++    /* nothing in memory for this frame: only storage knows its version */
++    mocks.getObject.mockImplementation((key: string) =>
++      Promise.resolve(Buffer.from(key.endsWith('.ver') ? '1' : 'kept')),
++    )
++    const stored = await thumbs.getStored(frame('after-restart'))
++    expect(stored).toEqual({ buf: Buffer.from('kept'), fresh: true, known: true })
++    await tick()
++    expect(mocks.renderFrame).not.toHaveBeenCalled()
++  })
++
++  it('re-renders a stored thumbnail whose version is behind the frame', async () => {
++    deferredRenders()
++    mocks.getObject.mockImplementation((key: string) =>
++      Promise.resolve(Buffer.from(key.endsWith('.ver') ? '0' : 'old')),
++    )
++    const stored = await thumbs.getStored(frame('behind'))
++    expect(stored).toEqual({ buf: Buffer.from('old'), fresh: false, known: true })
++    await tick()
++    expect(mocks.renderFrame).toHaveBeenCalledTimes(1)
++  })
+ })

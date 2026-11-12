@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# doop's husky hooks call bunx; this machine's bun has no bunx link.
+exec bun x "$@"

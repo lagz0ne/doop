@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 06:23:06 +0000
+Subject: [PATCH 2/4] perf(ui): drop the body:has() rule that restyled the
+ document on every insertion
+
+body:has([data-panel-resizing]) * made each node inserted or removed
+anywhere in the app invalidate the whole document's style: the engine
+cannot tell which insertions could flip a :has() anchored on body whose
+subject is every descendant. Chrome's invalidation tracking shows it as
+'BODY: invalidation set invalidates subtree' before every full recalc:
+40-70 ms for ~7000 elements on each click and each mounted frame of a
+188-frame page. The Panel now sets the attribute on body itself while its
+edge is dragged; the rule is a plain attribute selector.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/components/ui/panel.tsx | 11 +++++++++++
+ src/styles.css              |  6 ++++--
+ 2 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/src/components/ui/panel.tsx b/src/components/ui/panel.tsx
+index a8da005..c638191 100644
+--- a/src/components/ui/panel.tsx
++++ b/src/components/ui/panel.tsx
+@@ -49,6 +49,17 @@ function Panel({
+     drag.current = null
+     setDragging(false)
+   }
++  /* The mark goes on <body> itself, not on the panel for a `body:has(...)`
++     rule to find: a :has() anchored on body whose subject is every descendant
++     makes each node inserted or removed anywhere in the app restyle the whole
++     document (the engine cannot tell which insertions could flip the :has).
++     On a canvas that mounts and unmounts frames as the camera moves, that was
++     a full recalc, tens of ms, on every such commit and every click. */
++  React.useEffect(() => {
++    if (!dragging) return
++    document.body.setAttribute('data-panel-resizing', '')
++    return () => document.body.removeAttribute('data-panel-resizing')
++  }, [dragging])
+   const resizing = surface !== 'inline' ? resize : undefined
+   const setWidth = (width: number) => {
+     if (resizing) resizing.onResize(Math.round(Math.max(resizing.min, Math.min(resizing.max, width))))
+diff --git a/src/styles.css b/src/styles.css
+index ef5108f..2baff8c 100644
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -398,8 +398,10 @@
+ 
+ /* While a canvas panel's edge is dragged, the chrome positioned off its width
+    (Inspector, side rail, tool rail, zoom pill) jumps with it rather than
+-   easing after it, so a growing panel never slides over a neighbour. */
+-body:has([data-panel-resizing]) * {
++   easing after it, so a growing panel never slides over a neighbour. The Panel
++   sets the attribute on <body> while it drags (ui/panel.tsx says why it is
++   not a :has() rule). */
++body[data-panel-resizing] * {
+   transition-duration: 0s !important;
+ }
+ 

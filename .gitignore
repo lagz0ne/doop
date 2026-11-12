@@ -1,0 +1,5 @@
+# generated trees (bin/doop apply / base): disposable, rebuilt from vendor + patches + transforms
+/build/
+# perf outputs (Chrome traces are 60-320 MB each) and local perf-account logins
+/perf/out/
+/perf/**/local*.json

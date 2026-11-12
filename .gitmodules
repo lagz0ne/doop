@@ -1,0 +1,3 @@
+[submodule "vendor/doop"]
+	path = vendor/doop
+	url = https://github.com/kgoedecke/doop.git

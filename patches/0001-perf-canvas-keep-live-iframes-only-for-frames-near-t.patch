@@ -1,0 +1,608 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 05:02:39 +0000
+Subject: [PATCH 1/4] perf(canvas): keep live iframes only for frames near the
+ camera
+
+A page of a few hundred frames kept a few hundred live documents: every
+frame laid out, rasterized and held in memory at once, so the editor
+slowed down for every click (203 frames: ~590 ms click to paint in our
+deployment). Frames far from the camera, or on screen while zoomed out
+past reading (< 30%), now show their persisted preview image
+(/i/<id>.jpg?preview) and get their iframe back when the camera comes
+near. Selected frames and frames a peer or agent is editing always stay
+live. The live set is computed by the Stage when the camera rests and
+published per frame, so a pan re-renders only the frames that flip.
+
+localStorage['doop:cull'] = 'off' restores the old behaviour.
+
+Bench (tests/liveFramesBrowser.test.ts, 200 frames at 35%): live
+iframes 200 -> 20, seed and settle 3.7 s -> 1.0 s, page heap
+225 -> 86 MB, click to paint 40 -> 31 ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/components/FrameView.tsx    |  91 +++++++++++------
+ src/components/Stage.tsx        |  43 ++++++++
+ src/lib/liveFrames.ts           | 136 ++++++++++++++++++++++++++
+ tests/liveFrames.test.ts        |  76 +++++++++++++++
+ tests/liveFramesBrowser.test.ts | 167 ++++++++++++++++++++++++++++++++
+ 5 files changed, 483 insertions(+), 30 deletions(-)
+ create mode 100644 src/lib/liveFrames.ts
+ create mode 100644 tests/liveFrames.test.ts
+ create mode 100644 tests/liveFramesBrowser.test.ts
+
+diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
+index a7b7b1b..cf10704 100644
+--- a/src/components/FrameView.tsx
++++ b/src/components/FrameView.tsx
+@@ -15,6 +15,7 @@ import { copyElementLink } from '../lib/elementLink'
+ import { sendWs } from '../lib/ws'
+ import { throttle } from '../lib/throttle'
+ import { getIdentity } from '../lib/identity'
++import { previewSrc, useFrameLive } from '../lib/liveFrames'
+ import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
+ import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
+ import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
+@@ -610,6 +611,18 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+      flipped or shifted it away from a viewport edge */
+   const menuAt = useRef({ x: 0, y: 0 })
+   const [runtimeReady, setRuntimeReady] = useState(false)
++  /* Viewport culling (liveFrames.ts): far from the camera, or zoomed out past
++     reading, the frame shows its preview image instead of a live document.
++     A dropped iframe takes its runtime with it, so the handshake starts over
++     when it comes back: ready, then the current HTML is posted again. */
++  const live = useFrameLive(frame.id)
++  useEffect(() => {
++    if (live) return
++    // eslint-disable-next-line react/set-state-in-effect -- the iframe is gone; its runtime state goes with it
++    setRuntimeReady(false)
++    setRuntimeDocument(null)
++    localHtml.current = null
++  }, [live])
+   useEffect(() => {
+     function onMsg(ev: MessageEvent) {
+       if (ev.data?.type === 'doop:frame-ready' && ev.source === iframeRef.current?.contentWindow) {
+@@ -1427,36 +1440,54 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+             }}
+             onPointerLeave={clearHover}
+           >
+-            <iframe
+-              ref={iframeRef}
+-              className={cn('block border-none', isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white')}
+-              title={frame.name}
+-              data-doop-frame=""
+-              sandbox="allow-scripts"
+-              srcDoc={FRAME_BOOTSTRAP}
+-              /* The world is laid out at CSS zoom k (Stage), which an iframe
+-                 passes into its document. Chromium takes it as pixel density:
+-                 the document keeps its design-px viewport and rasterizes at
+-                 k×, even out of process, where a transform on this element
+-                 would only stretch a 1× raster. WebKit instead lays the
+-                 document out at the zoomed width, so there the zoom is undone
+-                 here (keeping viewport, vh/vw, media queries and runtime rects
+-                 in design px) and the scale restores the box. */
+-              style={{
+-                width: frame.width,
+-                height: frame.height,
+-                ...(FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY
+-                  ? null
+-                  : { zoom: counterZoom(layoutZoom), transform: `scale(${layoutZoom})` }),
+-                transformOrigin: '0 0',
+-                /* Chromium paints an opaque backdrop behind an iframe whose
+-                   colour scheme differs from its document's; the page's dark
+-                   scheme reaches this element by inheritance while a
+-                   standalone element's document is light, so a shape on the
+-                   dark canvas sat on a white square */
+-                ...(isCanvasElement(frame.html) ? { colorScheme: 'light' } : null),
+-              }}
+-            />
++            {live ? (
++              <iframe
++                ref={iframeRef}
++                className={cn('block border-none', isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white')}
++                title={frame.name}
++                data-doop-frame=""
++                sandbox="allow-scripts"
++                srcDoc={FRAME_BOOTSTRAP}
++                /* The world is laid out at CSS zoom k (Stage), which an iframe
++                   passes into its document. Chromium takes it as pixel density:
++                   the document keeps its design-px viewport and rasterizes at
++                   k×, even out of process, where a transform on this element
++                   would only stretch a 1× raster. WebKit instead lays the
++                   document out at the zoomed width, so there the zoom is undone
++                   here (keeping viewport, vh/vw, media queries and runtime rects
++                   in design px) and the scale restores the box. */
++                style={{
++                  width: frame.width,
++                  height: frame.height,
++                  ...(FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY
++                    ? null
++                    : { zoom: counterZoom(layoutZoom), transform: `scale(${layoutZoom})` }),
++                  transformOrigin: '0 0',
++                  /* Chromium paints an opaque backdrop behind an iframe whose
++                     colour scheme differs from its document's; the page's dark
++                     scheme reaches this element by inheritance while a
++                     standalone element's document is light, so a shape on the
++                     dark canvas sat on a white square */
++                  ...(isCanvasElement(frame.html) ? { colorScheme: 'light' } : null),
++                }}
++              />
++            ) : (
++              <div
++                className={cn('block overflow-hidden', isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white')}
++                style={{ width: frame.width, height: frame.height }}
++                data-doop-frame-preview=""
++              >
++                {frame.html && !isCanvasElement(frame.html) && (
++                  <img
++                    src={previewSrc(frame.id, frame.updatedAt)}
++                    alt=""
++                    draggable={false}
++                    decoding="async"
++                    className="pointer-events-none block w-full select-none"
++                  />
++                )}
++              </div>
++            )}
+             {!frame.html && (
+               <div className="absolute inset-0 grid place-items-center bg-[repeating-linear-gradient(45deg,transparent_0_10px,rgba(28,26,21,0.025)_10px_20px)] text-[13px] text-ink-faint">
+                 empty frame — add HTML
+diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
+index c4422b5..d8eb20e 100644
+--- a/src/components/Stage.tsx
++++ b/src/components/Stage.tsx
+@@ -46,6 +46,8 @@ import { TOOLS, isDrawingTool, resolvePointerAction, toolForKey, type Tool } fro
+ import { useCanvasDrawing } from './CanvasDrawing'
+ import { FrameLabelLayer } from './FrameLabelLayer'
+ import { layoutZoomFor } from '../lib/layoutZoom'
++import { isCanvasElement } from '../lib/drawing'
++import { computeLiveFrames, cullingEnabled, useLiveFrames, type FrameBox } from '../lib/liveFrames'
+ 
+ const MIN_ZOOM = 0.08
+ /* The settled world is laid out at up to this zoom too (layoutZoomFor), so
+@@ -243,6 +245,47 @@ export function Stage({
+     }
+   }, [])
+ 
++  /* Viewport culling (liveFrames.ts): which frames keep a live document.
++     Selection and editors pin frames at once; a moving camera is followed
++     once it rests, so a pan never mounts documents it is only passing. */
++  useEffect(() => {
++    if (!cullingEnabled()) return
++    const frames: FrameBox[] = (canvas?.frames ?? [])
++      .filter((f) => !f.hidden)
++      .map((f) => ({ id: f.id, x: f.x, y: f.y, width: f.width, height: f.height, element: isCanvasElement(f.html) }))
++    let timer = 0
++    function compute() {
++      const el = ref.current
++      if (!el) return
++      const s = useStore.getState()
++      const pinned = new Set<string>(s.selectedIds)
++      for (const p of Object.values(s.presences)) if (p.activeFrameId) pinned.add(p.activeFrameId)
++      const live = useLiveFrames.getState()
++      live.set(
++        computeLiveFrames(
++          frames,
++          s.viewport,
++          { width: el.clientWidth, height: el.clientHeight },
++          pinned,
++          live.ids ?? new Set(),
++        ),
++      )
++    }
++    compute()
++    const unsub = useStore.subscribe((s, prev) => {
++      if (s.viewport === prev.viewport && s.selectedIds === prev.selectedIds && s.presences === prev.presences) return
++      window.clearTimeout(timer)
++      timer = window.setTimeout(compute, s.viewport === prev.viewport ? 0 : 120)
++    })
++    const resize = new ResizeObserver(compute)
++    if (ref.current) resize.observe(ref.current)
++    return () => {
++      unsub()
++      window.clearTimeout(timer)
++      resize.disconnect()
++    }
++  }, [canvas])
++
+   /* a new layout zoom lands in the same commit as the frames' counter-zoom
+      (FrameView), so no paint sees one without the other */
+   useLayoutEffect(() => {
+diff --git a/src/lib/liveFrames.ts b/src/lib/liveFrames.ts
+new file mode 100644
+index 0000000..452e175
+--- /dev/null
++++ b/src/lib/liveFrames.ts
+@@ -0,0 +1,136 @@
++import { create } from 'zustand'
++
++/* Viewport culling for frame iframes.
++
++   Every frame renders real HTML in its own iframe, and a page of a few hundred
++   frames is a few hundred documents laid out, rasterized and kept in memory at
++   once: the editor slows down for every click. Only frames the camera can see
++   need a live document. The others show their persisted preview image
++   (/i/<id>.jpg?preview, the dashboard thumbnail) and get their iframe back
++   when they come near the viewport again.
++
++   The Stage computes the live set when the camera settles and publishes it
++   here; each FrameView subscribes to its own membership only, so a pan or a
++   zoom re-renders nothing but the frames that flip. */
++
++export interface FrameBox {
++  id: string
++  x: number
++  y: number
++  width: number
++  height: number
++  /** canvas elements (shapes, text) have no opaque preview: never imaged */
++  element?: boolean
++}
++
++export interface Camera {
++  x: number
++  y: number
++  zoom: number
++}
++
++export interface Size {
++  width: number
++  height: number
++}
++
++/** Culling is on unless `localStorage['doop:cull'] === 'off'`: the escape
++ *  hatch for debugging, and the A side of a before/after measurement. */
++export function cullingEnabled(): boolean {
++  try {
++    return localStorage.getItem('doop:cull') !== 'off'
++  } catch {
++    return true
++  }
++}
++
++/** Below this zoom a frame is too small on screen for its live document to
++ *  matter: it shows its preview image even in view. */
++export const LIVE_MIN_ZOOM = 0.3
++/** A frame comes alive when it is within this many viewports of the view… */
++export const ENTER_MARGIN = 0.5
++/** …and stays alive until it is farther than this (no flicker at the edge). */
++export const KEEP_MARGIN = 1
++/** At most this many live documents besides the pinned ones; the nearest win. */
++export const MAX_LIVE = 24
++
++/** The world rectangle the camera shows, grown by `margin` viewports each side. */
++export function viewRect(camera: Camera, stage: Size, margin: number) {
++  const width = stage.width / camera.zoom
++  const height = stage.height / camera.zoom
++  const x = -camera.x / camera.zoom
++  const y = -camera.y / camera.zoom
++  return {
++    x: x - width * margin,
++    y: y - height * margin,
++    width: width * (1 + 2 * margin),
++    height: height * (1 + 2 * margin),
++  }
++}
++
++function intersects(a: FrameBox, r: ReturnType<typeof viewRect>): boolean {
++  return a.x < r.x + r.width && a.x + a.width > r.x && a.y < r.y + r.height && a.y + a.height > r.y
++}
++
++/**
++ * The frames that get a live iframe: every pinned frame (selected, being
++ * edited, streamed into), plus the frames near the view (nearest first, up to
++ * MAX_LIVE) when the zoom is high enough to read them. Canvas elements are
++ * culled by distance only, since they have no preview image to stand in.
++ */
++export function computeLiveFrames(
++  frames: readonly FrameBox[],
++  camera: Camera,
++  stage: Size,
++  pinned: ReadonlySet<string>,
++  previous: ReadonlySet<string>,
++): Set<string> {
++  const live = new Set<string>()
++  for (const f of frames) if (pinned.has(f.id)) live.add(f.id)
++  if (stage.width <= 0 || stage.height <= 0 || camera.zoom <= 0) return live
++  const enter = viewRect(camera, stage, ENTER_MARGIN)
++  const keep = viewRect(camera, stage, KEEP_MARGIN)
++  const cx = enter.x + enter.width / 2
++  const cy = enter.y + enter.height / 2
++  const readable = camera.zoom >= LIVE_MIN_ZOOM
++  const near = frames
++    .filter((f) => !live.has(f.id) && (readable || f.element))
++    .filter((f) => intersects(f, previous.has(f.id) ? keep : enter))
++    .map((f) => ({ id: f.id, d: Math.hypot(f.x + f.width / 2 - cx, f.y + f.height / 2 - cy) }))
++    .sort((a, b) => a.d - b.d)
++  for (const f of near.slice(0, MAX_LIVE)) live.add(f.id)
++  return live
++}
++
++function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
++  if (a.size !== b.size) return false
++  for (const id of a) if (!b.has(id)) return false
++  return true
++}
++
++interface LiveFramesState {
++  /** null until the Stage has measured itself: every frame stays live, the
++   *  behaviour before culling, so nothing depends on the first measurement */
++  ids: ReadonlySet<string> | null
++  set(ids: ReadonlySet<string>): void
++}
++
++export const useLiveFrames = create<LiveFramesState>((set, get) => ({
++  ids: null,
++  set(ids) {
++    const prev = get().ids
++    if (prev && sameSet(prev, ids)) return
++    set({ ids })
++  },
++}))
++
++/** True when the frame should render its live document. */
++export function useFrameLive(frameId: string): boolean {
++  return useLiveFrames((s) => s.ids === null || s.ids.has(frameId))
++}
++
++/** Where a culled frame's stand-in image comes from: the persisted preview,
++ *  re-requested whenever the frame changes. */
++export function previewSrc(frameId: string, updatedAt: number): string {
++  return `/i/${frameId}.jpg?preview&v=${updatedAt}`
++}
+diff --git a/tests/liveFrames.test.ts b/tests/liveFrames.test.ts
+new file mode 100644
+index 0000000..bdbb88c
+--- /dev/null
++++ b/tests/liveFrames.test.ts
+@@ -0,0 +1,76 @@
++import { describe, expect, it } from 'vitest'
++import { computeLiveFrames, LIVE_MIN_ZOOM, MAX_LIVE, viewRect, type FrameBox } from '../src/lib/liveFrames'
++
++const stage = { width: 1400, height: 900 }
++/** a grid of 1440×900 frames, 8 per row, 160/200 px apart (the Big canvas canvas layout) */
++function grid(n: number): FrameBox[] {
++  return Array.from({ length: n }, (_, i) => ({
++    id: `f${i}`,
++    x: (i % 8) * 1600,
++    y: Math.floor(i / 8) * 1100,
++    width: 1440,
++    height: 900,
++  }))
++}
++const none = new Set<string>()
++
++describe('viewRect', () => {
++  it('maps the camera to the world rectangle it shows', () => {
++    expect(viewRect({ x: -200, y: -100, zoom: 0.5 }, stage, 0)).toEqual({ x: 400, y: 200, width: 2800, height: 1800 })
++  })
++})
++
++describe('computeLiveFrames', () => {
++  it('keeps only the frames near the view alive', () => {
++    const live = computeLiveFrames(grid(200), { x: 0, y: 0, zoom: 1 }, stage, none, none)
++    expect(live.has('f0')).toBe(true)
++    expect(live.has('f199')).toBe(false)
++    expect(live.size).toBeLessThan(10)
++  })
++
++  it('images every frame when zoomed out below the readable zoom', () => {
++    const live = computeLiveFrames(grid(200), { x: 0, y: 0, zoom: LIVE_MIN_ZOOM - 0.05 }, stage, none, none)
++    expect(live.size).toBe(0)
++  })
++
++  it('always keeps pinned frames (selected, being edited) alive', () => {
++    const live = computeLiveFrames(grid(200), { x: 0, y: 0, zoom: 0.1 }, stage, new Set(['f150']), none)
++    expect([...live]).toEqual(['f150'])
++  })
++
++  it('caps the live documents at MAX_LIVE, nearest to the view first', () => {
++    const live = computeLiveFrames(
++      grid(400),
++      { x: 0, y: 0, zoom: LIVE_MIN_ZOOM },
++      { width: 4000, height: 3000 },
++      none,
++      none,
++    )
++    expect(live.size).toBe(MAX_LIVE)
++    // the view centre is world (6667, 5000): frame f36 (column 4, row 4) holds it
++    expect(live.has('f36')).toBe(true)
++    expect(live.has('f399')).toBe(false)
++  })
++
++  it('keeps a live frame alive a little past the edge it entered at (no flicker)', () => {
++    const frames = grid(16)
++    // the view shows world x 900..2300; f2 starts at x=3200: outside the 0.5-viewport entry
++    // margin (200..3000), inside the 1-viewport keep margin (-500..3700)
++    const camera = { x: -900, y: 0, zoom: 1 }
++    const entered = computeLiveFrames(frames, camera, stage, none, none)
++    expect(entered.has('f2')).toBe(false)
++    const kept = computeLiveFrames(frames, camera, stage, none, new Set(['f2']))
++    expect(kept.has('f2')).toBe(true)
++  })
++
++  it('culls canvas elements by distance only, never by zoom', () => {
++    const shape: FrameBox = { id: 'shape', x: 100, y: 100, width: 200, height: 200, element: true }
++    const live = computeLiveFrames([shape], { x: 0, y: 0, zoom: 0.1 }, stage, none, none)
++    expect(live.has('shape')).toBe(true)
++  })
++
++  it('keeps everything pinned and nothing else before the stage is measured', () => {
++    const live = computeLiveFrames(grid(5), { x: 0, y: 0, zoom: 1 }, { width: 0, height: 0 }, new Set(['f3']), none)
++    expect([...live]).toEqual(['f3'])
++  })
++})
+diff --git a/tests/liveFramesBrowser.test.ts b/tests/liveFramesBrowser.test.ts
+new file mode 100644
+index 0000000..deddfe0
+--- /dev/null
++++ b/tests/liveFramesBrowser.test.ts
+@@ -0,0 +1,167 @@
++import { writeFileSync } from 'node:fs'
++import { afterAll, beforeAll, describe, expect, it } from 'vitest'
++import type { Page } from 'puppeteer-core'
++import { findBrowserPath } from '../server/screenshot'
++import { fixtureUrl, openBrowser, type TestBrowser } from './browser'
++import { MAX_LIVE } from '../src/lib/liveFrames'
++import type { Canvas, Frame } from '../shared/types'
++
++/* Viewport culling on a big page: 200 desktop frames laid out 8 per row, the
++   shape of a real product canvas. Only frames near the camera get a live
++   iframe; the rest show their preview image. The last test logs a before /
++   after measurement (culling off via localStorage['doop:cull']). */
++
++declare global {
++  interface Window {
++    seedPages: (canvas: Canvas) => void
++    pageState: () => { viewport: { x: number; y: number; zoom: number }; selectedId: string }
++  }
++}
++
++/** a screen-like document: header, side nav, a grid of cards, a table */
++function screenHtml(i: number): string {
++  const cards = Array.from(
++    { length: 12 },
++    (_, c) =>
++      `<div class="card"><b>Card ${c + 1}</b><p>Frame ${i}: a realistic paragraph of copy that wraps over a few lines so layout has work to do.</p><button>Open</button></div>`,
++  ).join('')
++  const rows = Array.from(
++    { length: 10 },
++    (_, r) => `<tr><td>Row ${r + 1}</td><td>${(r * 37) % 100}%</td><td>Status</td><td><button>Edit</button></td></tr>`,
++  ).join('')
++  return `<!doctype html><html><head><style>
++    body{margin:0;font:14px/1.4 sans-serif;width:1440px;height:900px;display:grid;grid-template-columns:220px 1fr}
++    nav{background:#f3f3f1;padding:16px}nav a{display:block;padding:8px;border-radius:4px}
++    main{padding:24px;overflow:hidden}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
++    .card{border:1px solid #ddd;border-radius:6px;padding:12px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
++    table{width:100%;border-collapse:collapse;margin-top:16px}td{border-bottom:1px solid #eee;padding:6px}
++  </style></head><body><nav>${'<a>Item</a>'.repeat(8)}</nav><main><h1>Screen ${i}</h1><div class="grid">${cards}</div><table>${rows}</table></main></body></html>`
++}
++
++const FRAMES = 200
++const canvas: Canvas = {
++  id: 'c',
++  name: 'Big page',
++  pages: [{ id: 'p', name: 'Main' }],
++  frames: Array.from({ length: FRAMES }, (_, i): Frame => ({
++    id: `f${i}`,
++    canvasId: 'c',
++    pageId: 'p',
++    name: `Frame ${i}`,
++    x: (i % 8) * 1600,
++    y: Math.floor(i / 8) * 1100,
++    width: 1440,
++    height: 900,
++    html: screenHtml(i),
++    createdAt: 0,
++    updatedAt: 1,
++    updatedBy: 'User',
++  })),
++  createdAt: 0,
++  updatedAt: 0,
++}
++
++const iframes = (page: Page) => page.evaluate(() => document.querySelectorAll('iframe[data-doop-frame]').length)
++/** call a store action in the page (a string, so the test transform leaves the import alone) */
++const store = (page: Page, call: string) =>
++  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
++/** pan/zoom the camera the way the zoom controls do, then let culling settle */
++async function camera(page: Page, viewport: { x: number; y: number; zoom: number }) {
++  await store(page, `setViewport(${JSON.stringify(viewport)})`)
++  await new Promise((r) => setTimeout(r, 400))
++}
++
++describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () => {
++  let browser: TestBrowser
++  let page: Page
++  beforeAll(async () => {
++    browser = await openBrowser()
++    page = await browser.newPage()
++    await page.setViewport({ width: 1600, height: 1000 })
++    await page.goto(fixtureUrl('pages.html'))
++    await page.waitForFunction(() => typeof window.seedPages === 'function')
++    await page.evaluate((c) => window.seedPages(c), canvas)
++    await new Promise((r) => setTimeout(r, 600))
++  }, 120_000)
++  afterAll(async () => {
++    await page?.close()
++    await browser?.close()
++  })
++
++  it('keeps only the frames near a 100% camera live', async () => {
++    await camera(page, { x: 0, y: 0, zoom: 1 })
++    const n = await iframes(page)
++    expect(n).toBeGreaterThan(0)
++    expect(n).toBeLessThanOrEqual(MAX_LIVE)
++  }, 30_000)
++
++  it('shows previews, not documents, when zoomed out past reading', async () => {
++    await camera(page, { x: 0, y: 0, zoom: 0.08 })
++    expect(await iframes(page)).toBe(0)
++    expect(await page.evaluate(() => document.querySelectorAll('[data-doop-frame-preview]').length)).toBe(FRAMES)
++  }, 30_000)
++
++  it('gives a selected frame its document at any zoom', async () => {
++    await store(page, "select('f42')")
++    await new Promise((r) => setTimeout(r, 200))
++    expect(await iframes(page)).toBe(1)
++    expect(await page.evaluate(() => !!document.querySelector('iframe[title="Frame 42"]'))).toBe(true)
++  }, 30_000)
++
++  it('brings frames back to life where the camera goes', async () => {
++    await store(page, 'select(null)')
++    // frame 199 sits at (11200, 26400)
++    await camera(page, { x: -11200 + 50, y: -26400 + 50, zoom: 1 })
++    expect(await page.evaluate(() => !!document.querySelector('iframe[title="Frame 199"]'))).toBe(true)
++    expect(await page.evaluate(() => !!document.querySelector('iframe[title="Frame 0"]'))).toBe(false)
++  }, 30_000)
++
++  it('measures a click with culling on and off (written to $LIVEFRAMES_BENCH, not asserted)', async () => {
++    async function measure(cull: boolean) {
++      const p = await browser.newPage()
++      await p.setViewport({ width: 1600, height: 1000 })
++      await p.goto(fixtureUrl('pages.html'))
++      await p.evaluate((on) => localStorage.setItem('doop:cull', on ? 'on' : 'off'), cull)
++      await p.reload()
++      await p.waitForFunction(() => typeof window.seedPages === 'function')
++      const t0 = Date.now()
++      await p.evaluate((c) => window.seedPages(c), canvas)
++      await camera(p, { x: 0, y: 0, zoom: 0.35 })
++      const settled = Date.now() - t0
++      const clicks: number[] = []
++      await p.evaluate(() => {
++        const w = window as unknown as { clickTimes: number[] }
++        w.clickTimes = []
++        window.addEventListener(
++          'pointerdown',
++          (e) => {
++            const at = e.timeStamp
++            requestAnimationFrame(() => requestAnimationFrame(() => w.clickTimes.push(performance.now() - at)))
++          },
++          true,
++        )
++      })
++      for (let i = 0; i < 7; i++) {
++        await p.mouse.click(30 + i * 40, 980)
++        await new Promise((r) => setTimeout(r, 250))
++      }
++      clicks.push(...(await p.evaluate(() => (window as unknown as { clickTimes: number[] }).clickTimes)))
++      const live = await iframes(p)
++      const heap = await p.evaluate(
++        () => (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? 0,
++      )
++      await p.close()
++      return {
++        live,
++        settledMs: settled,
++        clickMs: Math.round(clicks.sort((a, b) => a - b)[Math.floor(clicks.length / 2)] ?? -1),
++        heapMB: Math.round(heap / 1e6),
++      }
++    }
++    const off = await measure(false)
++    const on = await measure(true)
++    if (process.env.LIVEFRAMES_BENCH)
++      writeFileSync(process.env.LIVEFRAMES_BENCH, JSON.stringify({ frames: FRAMES, zoom: 0.35, off, on }, null, 1))
++    expect(on.live).toBeLessThan(off.live)
++  }, 180_000)
++})

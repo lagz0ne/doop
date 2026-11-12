@@ -1,0 +1,776 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 06:23:06 +0000
+Subject: [PATCH 4/4] perf(canvas): culled frames are shells, a pan is one
+ transform, documents boot in turn
+
+Profiled with Chrome traces on a 188-frame page of real screens
+(frames out of process, as in desktop Chrome). Editor main thread,
+v0.12.0 -> this: pan at fit 2260 -> 245 ms (37 slow frames -> 0), zoom
+8% -> 60% 1700 -> 480-540 ms, pan at 60% 1780 -> 715 ms, fit jump
+390 -> 125 ms; opening the page 10.4 -> 2.2 s of renderer CPU and
+116 -> 27 MB of editor heap.
+
+- FrameShell: a frame without a live document is its preview and its
+  name (5 elements, no handlers, 2 subscriptions) instead of a FrameView
+  (~40 hooks, a context menu, ~45 elements). A press on a shell wakes it
+  from a window capture listener and is re-delivered to the FrameView, so
+  select, drag and the context menu work in the same gesture.
+- fix: a press on a frame showing its preview went down the layer path,
+  waited for a document that is not there and was dropped; it is the
+  frame's at once.
+- The camera's offset (--vx/--vy) is set on the label layer, its only
+  reader, not on the stage where it restyled every element per pan frame;
+  zoom-only DOM writes are skipped while the zoom is unchanged; the stage's
+  size comes from its ResizeObserver, not a layout read after style writes.
+- FrameContextMenu reads its group facts only while its menu is open: they
+  walked every frame, for every mounted frame, on every store update.
+- Documents boot two per animation frame, nearest first; a large selection
+  pins no documents; canvas elements never count against the live cap.
+- Previews load lazily and retry on error.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/components/FrameContextMenu.tsx |   8 ++
+ src/components/FrameView.tsx        | 127 ++++++++++++++---
+ src/components/Stage.tsx            | 206 +++++++++++++++++++++-------
+ src/lib/liveFrames.ts               |  48 ++++++-
+ tests/liveFrames.test.ts            |  43 +++++-
+ tests/liveFramesBrowser.test.ts     |  58 +++++++-
+ 6 files changed, 421 insertions(+), 69 deletions(-)
+
+diff --git a/src/components/FrameContextMenu.tsx b/src/components/FrameContextMenu.tsx
+index 3d709db..83947c7 100644
+--- a/src/components/FrameContextMenu.tsx
++++ b/src/components/FrameContextMenu.tsx
+@@ -31,6 +31,11 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
+   const [exportFrames, setExportFrames] = useState<Frame[] | null>(null)
+   const [historyOpen, setHistoryOpen] = useState(false)
+   const [savingApproval, setSavingApproval] = useState(false)
++  /* The menu's facts are read only while this frame's menu is open. Each one
++     walks the canvas's frames, and every mounted FrameView carries a menu, so
++     read unconditionally they ran for every frame on every store update
++     (a camera move included). */
++  const open = useStore((s) => s.ctxMenu?.frameId === frame.id)
+   /* a right-click inside a multi-selection acts on the whole group */
+   const selectedIds = useStore((s) => s.selectedIds)
+   /* a view or comment link keeps the items that only read the frame */
+@@ -41,6 +46,7 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
+   const streaming = useStore((s) => groupIds.some((id) => !!s.streams[id]))
+   /* Hide/Show reads as one item: the group shows when every frame in it is hidden */
+   const allHidden = useStore((s) => {
++    if (!open) return false
+     const ids = s.selectedIds.includes(frame.id) ? s.selectedIds : [frame.id]
+     return (s.canvas?.frames ?? []).filter((f) => ids.includes(f.id)).every((f) => !!f.hidden)
+   })
+@@ -52,6 +58,7 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
+   /* Lock reads as one state for the group: it unlocks only once every frame
+      in it is locked, otherwise it locks the rest (as ⌘⇧L does) */
+   const allLocked = useStore((s) => {
++    if (!open) return false
+     const ids = s.selectedIds.includes(frame.id) ? s.selectedIds : [frame.id]
+     const group = s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame]
+     return group.every((f) => f.locked)
+@@ -61,6 +68,7 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
+     deleteFramesTracked(groupFrames().filter((f) => !f.locked))
+   }
+   const allReady = useStore((s) => {
++    if (!open) return false
+     const ids = s.selectedIds.includes(frame.id) ? s.selectedIds : [frame.id]
+     const group = s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame]
+     return group.every((f) => f.approval?.status === 'ready_for_dev')
+diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
+index cf10704..7c2cf62 100644
+--- a/src/components/FrameView.tsx
++++ b/src/components/FrameView.tsx
+@@ -15,7 +15,7 @@ import { copyElementLink } from '../lib/elementLink'
+ import { sendWs } from '../lib/ws'
+ import { throttle } from '../lib/throttle'
+ import { getIdentity } from '../lib/identity'
+-import { previewSrc, useFrameLive } from '../lib/liveFrames'
++import { previewSrc, useFrameAwake, useFrameLive } from '../lib/liveFrames'
+ import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
+ import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
+ import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
+@@ -311,10 +311,15 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+     // A new surface press supersedes the previous click, including an iframe
+     // reply that is already in flight when the next layer starts moving.
+     if (mode === 'move' && probeOnClick && !skipElement) cancelProbe()
++    /* A layer can only be picked or moved in a document that is there to
++       hit-test. A frame showing its preview (liveFrames.ts) has none, and the
++       layer path would wait on it and then drop the press: such a press is
++       the frame's, at once. */
+     if (
+       mode === 'move' &&
+       probeOnClick &&
+       !skipElement &&
++      live &&
+       elementMove.start(
+         e,
+         (press, move, released) => {
+@@ -1472,21 +1477,7 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+                 }}
+               />
+             ) : (
+-              <div
+-                className={cn('block overflow-hidden', isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white')}
+-                style={{ width: frame.width, height: frame.height }}
+-                data-doop-frame-preview=""
+-              >
+-                {frame.html && !isCanvasElement(frame.html) && (
+-                  <img
+-                    src={previewSrc(frame.id, frame.updatedAt)}
+-                    alt=""
+-                    draggable={false}
+-                    decoding="async"
+-                    className="pointer-events-none block w-full select-none"
+-                  />
+-                )}
+-              </div>
++              <FramePreview frame={frame} />
+             )}
+             {!frame.html && (
+               <div className="absolute inset-0 grid place-items-center bg-[repeating-linear-gradient(45deg,transparent_0_10px,rgba(28,26,21,0.025)_10px_20px)] text-[13px] text-ink-faint">
+@@ -1801,3 +1792,107 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+     </ContextMenu>
+   )
+ })
++
++const PREVIEW_RETRIES = 4
++
++/** What a frame shows without its document: the persisted preview image.
++ *  Lazy and async, so a page of hundreds fetches and decodes the ones near
++ *  the view first and never blocks a frame on a decode. */
++function FramePreview({ frame }: { frame: Frame }) {
++  const element = isCanvasElement(frame.html)
++  /* A preview that fails to load (a render that failed, an anonymous viewer
++     past the render budget) is asked for again, a few times and less often
++     each time; a new version of the frame starts over. */
++  const [retry, setRetry] = useState({ version: frame.updatedAt, count: 0 })
++  const attempt = retry.version === frame.updatedAt ? retry.count : 0
++  const timer = useRef(0)
++  useEffect(() => () => window.clearTimeout(timer.current), [])
++  const src = previewSrc(frame.id, frame.updatedAt)
++  return (
++    <div
++      className={cn('block overflow-hidden', element ? 'bg-transparent' : 'bg-white')}
++      style={{ width: frame.width, height: frame.height }}
++      data-doop-frame-preview=""
++    >
++      {frame.html && !element && (
++        <img
++          src={attempt ? `${src}&retry=${attempt}` : src}
++          alt=""
++          draggable={false}
++          loading="lazy"
++          decoding="async"
++          className="pointer-events-none block w-full select-none"
++          onError={() => {
++            if (attempt >= PREVIEW_RETRIES) return
++            window.clearTimeout(timer.current)
++            timer.current = window.setTimeout(
++              () => setRetry({ version: frame.updatedAt, count: attempt + 1 }),
++              2000 * 2 ** attempt,
++            )
++          }}
++        />
++      )}
++    </div>
++  )
++}
++
++/**
++ * A frame far from the camera, or too small on screen to read (liveFrames.ts):
++ * its preview and its name, and nothing else. No document, no menu, no
++ * handlers and no store subscription, so a page of hundreds costs the editor
++ * what its few FrameViews cost. The Stage wakes a shell on the press that
++ * lands on it (it reads `data-frame-shell`), before the press is delivered,
++ * so selecting, dragging and the context menu behave as on any frame.
++ */
++const FrameShell = memo(function FrameShell({ frame }: { frame: Frame }) {
++  const element = isCanvasElement(frame.html)
++  return (
++    <div
++      data-frame-shell={frame.id}
++      data-frame-locked={frame.locked ? '' : undefined}
++      className="absolute"
++      style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}
++    >
++      {!element && (
++        <div
++          data-frame-title=""
++          className="pointer-events-auto absolute bottom-full left-0 flex origin-bottom-left cursor-default select-none items-center gap-2 overflow-hidden whitespace-nowrap text-[12px] font-semibold text-ink-soft"
++          style={{
++            width: 'calc(100% * var(--zoom, 1))',
++            transform: `scale(calc(1 / var(--zoom, 1))) translateY(-${LABEL_GAP}px)`,
++          }}
++        >
++          {frame.locked && (
++            <span className="flex shrink-0 items-center text-ink-faint">
++              <LockIcon width={11} height={11} />
++            </span>
++          )}
++          <span className="min-w-0 overflow-hidden text-ellipsis">{frame.name}</span>
++          <FrameApprovalBadge frame={frame} />
++        </div>
++      )}
++      <div
++        data-frame-surface=""
++        className={cn(
++          'absolute inset-0 cursor-default overflow-hidden',
++          element ? 'bg-transparent' : 'border border-line bg-white shadow-card',
++        )}
++      >
++        <FramePreview frame={frame} />
++        {!frame.html && (
++          <div className="absolute inset-0 grid place-items-center bg-[repeating-linear-gradient(45deg,transparent_0_10px,rgba(28,26,21,0.025)_10px_20px)] text-[13px] text-ink-faint">
++            empty frame — add HTML
++          </div>
++        )}
++      </div>
++    </div>
++  )
++})
++
++/** One frame on the Stage: a FrameView while it is live, woken, selected or
++ *  being designed into, a FrameShell the rest of the time. */
++export const FrameSlot = memo(function FrameSlot({ frame, layoutZoom }: { frame: Frame; layoutZoom: number }) {
++  const awake = useFrameAwake(frame.id)
++  const engaged = useStore((s) => s.selectedIds.includes(frame.id) || !!s.streams[frame.id])
++  return awake || engaged ? <FrameView frame={frame} layoutZoom={layoutZoom} /> : <FrameShell frame={frame} />
++})
+diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
+index d8eb20e..4b2faa4 100644
+--- a/src/components/Stage.tsx
++++ b/src/components/Stage.tsx
+@@ -6,7 +6,8 @@ import type { Frame } from '../../shared/types'
+ import { usePageCanvas, currentPageCanvas } from '../lib/pages'
+ import { sendWs } from '../lib/ws'
+ import { throttle } from '../lib/throttle'
+-import { FrameView, HiddenFrameView } from './FrameView'
++import { flushSync } from 'react-dom'
++import { FrameSlot, HiddenFrameView } from './FrameView'
+ import { CanvasComments, type CanvasComposeAt } from './CanvasComments'
+ import { placeComposer } from '../lib/composerPlacement'
+ import { isCanvasComment, type CanvasComment } from '../../shared/comments'
+@@ -47,7 +48,7 @@ import { useCanvasDrawing } from './CanvasDrawing'
+ import { FrameLabelLayer } from './FrameLabelLayer'
+ import { layoutZoomFor } from '../lib/layoutZoom'
+ import { isCanvasElement } from '../lib/drawing'
+-import { computeLiveFrames, cullingEnabled, useLiveFrames, type FrameBox } from '../lib/liveFrames'
++import { computeLiveFrames, cullingEnabled, pinnedBySelection, useLiveFrames, type FrameBox } from '../lib/liveFrames'
+ 
+ const MIN_ZOOM = 0.08
+ /* The settled world is laid out at up to this zoom too (layoutZoomFor), so
+@@ -114,21 +115,32 @@ const TOOL_ICONS: Record<Tool, React.ReactNode> = {
+   frame: <FrameIcon />,
+ }
+ 
++/** How many frame documents may start booting in one animation frame (see the
++ *  culling effect in Stage). */
++const BOOTS_PER_FRAME = 2
++
+ const sendCursor = throttle((x: number, y: number) => sendWs({ type: 'cursor', x, y }), 50)
+ /* the camera is shared so others can follow it — same cadence as the cursor */
+-const sendViewport = throttle(
+-  (vp: { x: number; y: number; zoom: number }, el: HTMLElement) =>
+-    sendWs({
+-      type: 'viewport',
+-      viewport: {
+-        ...vp,
+-        pageId: useStore.getState().activePageId ?? undefined,
+-        width: el.clientWidth,
+-        height: el.clientHeight,
+-      },
+-    }),
+-  50,
+-)
++/* The stage's size as its ResizeObserver last reported it. The camera path
++   must not read clientWidth: it runs right after the camera's style writes,
++   where a layout read forces the whole canvas through style and layout
++   synchronously, once per wheel event instead of once per frame. */
++const stageSize = { width: 0, height: 0 }
++function measuredStage(el: HTMLElement): { width: number; height: number } {
++  if (stageSize.width === 0 && stageSize.height === 0) {
++    stageSize.width = el.clientWidth
++    stageSize.height = el.clientHeight
++  }
++  return stageSize
++}
++
++const sendViewport = throttle((vp: { x: number; y: number; zoom: number }, el: HTMLElement) => {
++  const { width, height } = measuredStage(el)
++  sendWs({
++    type: 'viewport',
++    viewport: { ...vp, pageId: useStore.getState().activePageId ?? undefined, width, height },
++  })
++}, 50)
+ 
+ export function Stage({
+   onAddFrame,
+@@ -145,6 +157,19 @@ export function Stage({
+   const gridRef = useRef<HTMLDivElement>(null)
+   const pixelGridRef = useRef<HTMLDivElement>(null)
+   const [labelLayer, setLabelLayer] = useState<HTMLDivElement | null>(null)
++  const labelLayerRef = useRef<HTMLDivElement | null>(null)
++  const attachLabelLayer = useCallback((el: HTMLDivElement | null) => {
++    labelLayerRef.current = el
++    if (el) {
++      const vp = useStore.getState().viewport
++      el.style.setProperty('--vx', `${vp.x}px`)
++      el.style.setProperty('--vy', `${vp.y}px`)
++    }
++    setLabelLayer(el)
++  }, [])
++  /* the zoom and grid period last written to the DOM (see apply) */
++  const appliedZoom = useRef<number | null>(null)
++  const appliedPeriod = useRef<number | null>(null)
+   const zoomLabelRef = useRef<HTMLSpanElement>(null)
+   const setViewport = useStore((s) => s.setViewport)
+   const canvas = usePageCanvas()
+@@ -202,28 +227,48 @@ export function Stage({
+       const stage = ref.current
+       if (!world || !grid || !stage) return
+       world.style.transform = worldTransform(vp, layoutZoomRef.current)
+-      stage.style.setProperty('--zoom', String(vp.zoom))
+-      /* the camera's offset, for chrome drawn in screen px (FrameLabelLayer) */
+-      stage.style.setProperty('--vx', `${vp.x}px`)
+-      stage.style.setProperty('--vy', `${vp.y}px`)
++      /* The camera's offset, for chrome drawn in screen px, goes on the label
++         layer alone: it is the only reader (FrameLabelLayer), and a custom
++         property set on the stage restyles every element under it, so a pan
++         that should be one transform restyled the whole canvas per frame. */
++      const labels = labelLayerRef.current
++      if (labels) {
++        labels.style.setProperty('--vx', `${vp.x}px`)
++        labels.style.setProperty('--vy', `${vp.y}px`)
++      }
++      /* everything below follows the zoom alone: a pan leaves it untouched */
++      if (appliedZoom.current !== vp.zoom) {
++        appliedZoom.current = vp.zoom
++        stage.style.setProperty('--zoom', String(vp.zoom))
++      }
+       const period = 26 * vp.zoom
+-      grid.style.backgroundSize = `${period}px ${period}px`
+-      /* one period of overhang: the layer slides back by up to a period */
+-      grid.style.width = grid.style.height = `calc(100% + ${period}px)`
++      if (appliedPeriod.current !== period) {
++        appliedPeriod.current = period
++        grid.style.backgroundSize = `${period}px ${period}px`
++        /* one period of overhang: the layer slides back by up to a period */
++        grid.style.width = grid.style.height = `calc(100% + ${period}px)`
++      }
+       const gx = (((vp.x % period) + period) % period) - period
+       const gy = (((vp.y % period) + period) % period) - period
+       grid.style.transform = `translate(${gx}px, ${gy}px)`
+       const pixels = pixelGridRef.current
+       if (pixels) {
+         const opacity = pixelGridOpacity(vp.zoom)
+-        pixels.hidden = opacity === 0
+-        pixels.style.opacity = String(opacity)
+-        pixels.style.backgroundSize = `${vp.zoom}px ${vp.zoom}px`
+-        const px = (((vp.x % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
+-        const py = (((vp.y % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
+-        pixels.style.transform = `translate(${px}px, ${py}px)`
++        /* hidden below the zoom where pixels show: then a pan writes nothing
++           here, and the frame stays a compositor-only transform */
++        if (pixels.hidden !== (opacity === 0)) pixels.hidden = opacity === 0
++        if (opacity !== 0) {
++          pixels.style.opacity = String(opacity)
++          pixels.style.backgroundSize = `${vp.zoom}px ${vp.zoom}px`
++          const px = (((vp.x % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
++          const py = (((vp.y % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
++          pixels.style.transform = `translate(${px}px, ${py}px)`
++        }
+       }
+-      if (zoomLabelRef.current) zoomLabelRef.current.textContent = `${Math.round(vp.zoom * 100)}%`
++      /* replacing a text node repaints the pill even when it reads the same */
++      const percent = `${Math.round(vp.zoom * 100)}%`
++      if (zoomLabelRef.current && zoomLabelRef.current.textContent !== percent)
++        zoomLabelRef.current.textContent = percent
+     }
+     apply(useStore.getState().viewport)
+     let settle = 0
+@@ -246,46 +291,115 @@ export function Stage({
+   }, [])
+ 
+   /* Viewport culling (liveFrames.ts): which frames keep a live document.
+-     Selection and editors pin frames at once; a moving camera is followed
+-     once it rests, so a pan never mounts documents it is only passing. */
++     Selection, peers and streams pin frames at once; a moving camera is
++     followed once it rests, so a pan never mounts documents it only passes. */
+   useEffect(() => {
+     if (!cullingEnabled()) return
+     const frames: FrameBox[] = (canvas?.frames ?? [])
+       .filter((f) => !f.hidden)
+       .map((f) => ({ id: f.id, x: f.x, y: f.y, width: f.width, height: f.height, element: isCanvasElement(f.html) }))
++    const elements = new Set(frames.filter((f) => f.element).map((f) => f.id))
+     let timer = 0
++    let pump = 0
++    /* Documents boot a few per animation frame, nearest the view first. A
++       camera that comes to rest over twenty frames would otherwise create
++       twenty documents in one task: a visible hitch, and input queued behind
++       it. Pins and canvas elements (no preview to wait behind) are admitted
++       at once; what is already live and still wanted stays. (Tearing the
++       departed ones down a few per frame was measured too: no gain.) */
++    function admit(wanted: ReadonlySet<string>, pinned: ReadonlySet<string>) {
++      window.cancelAnimationFrame(pump)
++      const live = useLiveFrames.getState()
++      const next = new Set<string>()
++      let booting = 0
++      for (const id of wanted) {
++        const settled = live.ids?.has(id) || pinned.has(id) || elements.has(id)
++        if (!settled && booting >= BOOTS_PER_FRAME) continue
++        if (!settled) booting++
++        next.add(id)
++      }
++      live.set(next)
++      if (next.size < wanted.size) pump = window.requestAnimationFrame(() => admit(wanted, pinned))
++    }
+     function compute() {
+       const el = ref.current
+       if (!el) return
+       const s = useStore.getState()
+-      const pinned = new Set<string>(s.selectedIds)
++      const pinned = new Set<string>(pinnedBySelection(s.selectedIds))
+       for (const p of Object.values(s.presences)) if (p.activeFrameId) pinned.add(p.activeFrameId)
++      for (const id of Object.keys(s.streams)) pinned.add(id)
+       const live = useLiveFrames.getState()
+-      live.set(
+-        computeLiveFrames(
+-          frames,
+-          s.viewport,
+-          { width: el.clientWidth, height: el.clientHeight },
+-          pinned,
+-          live.ids ?? new Set(),
+-        ),
+-      )
++      admit(computeLiveFrames(frames, s.viewport, measuredStage(el), pinned, live.ids ?? new Set()), pinned)
+     }
+     compute()
+     const unsub = useStore.subscribe((s, prev) => {
+-      if (s.viewport === prev.viewport && s.selectedIds === prev.selectedIds && s.presences === prev.presences) return
++      const moved = s.viewport !== prev.viewport
++      if (!moved && s.selectedIds === prev.selectedIds && s.presences === prev.presences && s.streams === prev.streams)
++        return
+       window.clearTimeout(timer)
+-      timer = window.setTimeout(compute, s.viewport === prev.viewport ? 0 : 120)
++      timer = window.setTimeout(compute, moved ? 120 : 0)
++    })
++    const resize = new ResizeObserver(([entry]) => {
++      if (entry) {
++        stageSize.width = entry.contentRect.width
++        stageSize.height = entry.contentRect.height
++      }
++      compute()
+     })
+-    const resize = new ResizeObserver(compute)
+     if (ref.current) resize.observe(ref.current)
+     return () => {
+       unsub()
+       window.clearTimeout(timer)
++      window.cancelAnimationFrame(pump)
+       resize.disconnect()
+     }
+   }, [canvas])
+ 
++  /* A press on a FrameShell wakes it first. The listener sits on the window's
++     capture phase, ahead of React's root: the shell becomes a FrameView
++     synchronously, the original press is withheld, and the same press is
++     delivered to whatever now lies under the pointer, so the FrameView's own
++     handlers (select, drag, context menu) and the Stage's see one ordinary
++     press on a frame. The pointer is really down, so capture works. */
++  useEffect(() => {
++    function onDown(e: PointerEvent) {
++      const shell = e.target instanceof Element ? e.target.closest('[data-frame-shell]') : null
++      const id = shell?.getAttribute('data-frame-shell')
++      if (!id) return
++      flushSync(() => useLiveFrames.getState().wake(id))
++      const target = document.elementFromPoint(e.clientX, e.clientY)
++      if (!target || target.closest('[data-frame-shell]')) return
++      e.stopImmediatePropagation()
++      target.dispatchEvent(
++        new PointerEvent('pointerdown', {
++          bubbles: true,
++          cancelable: true,
++          composed: true,
++          view: window,
++          detail: e.detail,
++          pointerId: e.pointerId,
++          pointerType: e.pointerType,
++          isPrimary: e.isPrimary,
++          width: e.width,
++          height: e.height,
++          pressure: e.pressure,
++          button: e.button,
++          buttons: e.buttons,
++          clientX: e.clientX,
++          clientY: e.clientY,
++          screenX: e.screenX,
++          screenY: e.screenY,
++          ctrlKey: e.ctrlKey,
++          shiftKey: e.shiftKey,
++          altKey: e.altKey,
++          metaKey: e.metaKey,
++        }),
++      )
++    }
++    window.addEventListener('pointerdown', onDown, true)
++    return () => window.removeEventListener('pointerdown', onDown, true)
++  }, [])
++
+   /* a new layout zoom lands in the same commit as the frames' counter-zoom
+      (FrameView), so no paint sees one without the other */
+   useLayoutEffect(() => {
+@@ -965,7 +1079,7 @@ export function Stage({
+               ref={gridRef}
+             />
+             {/* the selected frame's size badge, in screen px (FrameLabelLayer) */}
+-            <div className="pointer-events-none absolute inset-0" ref={setLabelLayer} />
++            <div className="pointer-events-none absolute inset-0" ref={attachLabelLayer} />
+             {/* `world` is likewise a behaviour hook: pan hit-testing checks
+             classList.contains('world') to tell background from frame */}
+             <div
+@@ -977,7 +1091,7 @@ export function Stage({
+                   f.hidden ? (
+                     <HiddenFrameView key={f.id} frame={f} />
+                   ) : (
+-                    <FrameView key={f.id} frame={f} layoutZoom={layoutZoom} />
++                    <FrameSlot key={f.id} frame={f} layoutZoom={layoutZoom} />
+                   ),
+                 )}
+               </FrameLabelLayer.Provider>
+diff --git a/src/lib/liveFrames.ts b/src/lib/liveFrames.ts
+index 452e175..56913a9 100644
+--- a/src/lib/liveFrames.ts
++++ b/src/lib/liveFrames.ts
+@@ -9,8 +9,16 @@ import { create } from 'zustand'
+    (/i/<id>.jpg?preview, the dashboard thumbnail) and get their iframe back
+    when they come near the viewport again.
+ 
++   A frame that is not live is not a FrameView at all but a FrameShell: its
++   preview and its name, three elements and one subscription, where a
++   FrameView is some forty hooks, a context menu and forty-odd elements. On a
++   page of a few hundred frames that is the difference between the editor
++   paying for every frame on every store update and paying for the handful in
++   view. A press on a shell wakes it (it becomes a FrameView, synchronously,
++   before the press is delivered), so every gesture works as it always did.
++
+    The Stage computes the live set when the camera settles and publishes it
+-   here; each FrameView subscribes to its own membership only, so a pan or a
++   here; each frame subscribes to its own membership only, so a pan or a
+    zoom re-renders nothing but the frames that flip. */
+ 
+ export interface FrameBox {
+@@ -53,6 +61,11 @@ export const ENTER_MARGIN = 0.5
+ export const KEEP_MARGIN = 1
+ /** At most this many live documents besides the pinned ones; the nearest win. */
+ export const MAX_LIVE = 24
++/** A selection this large pins nothing: selecting a whole page must not boot
++ *  a document per frame. Each frame still follows the distance rules. */
++export const MAX_PINNED_SELECTION = 6
++/** Frames woken by a press stay FrameViews until this many newer ones exist. */
++const MAX_WOKEN = 8
+ 
+ /** The world rectangle the camera shows, grown by `margin` viewports each side. */
+ export function viewRect(camera: Camera, stage: Size, margin: number) {
+@@ -93,12 +106,16 @@ export function computeLiveFrames(
+   const cx = enter.x + enter.width / 2
+   const cy = enter.y + enter.height / 2
+   const readable = camera.zoom >= LIVE_MIN_ZOOM
+-  const near = frames
+-    .filter((f) => !live.has(f.id) && (readable || f.element))
+-    .filter((f) => intersects(f, previous.has(f.id) ? keep : enter))
++  const near = frames.filter((f) => !live.has(f.id) && intersects(f, previous.has(f.id) ? keep : enter))
++  /* an element has no preview to stand in for it, so every one near the view
++     is live whatever the zoom, and none of them counts against the cap */
++  for (const f of near) if (f.element) live.add(f.id)
++  if (!readable) return live
++  const documents = near
++    .filter((f) => !f.element)
+     .map((f) => ({ id: f.id, d: Math.hypot(f.x + f.width / 2 - cx, f.y + f.height / 2 - cy) }))
+     .sort((a, b) => a.d - b.d)
+-  for (const f of near.slice(0, MAX_LIVE)) live.add(f.id)
++  for (const f of documents.slice(0, MAX_LIVE)) live.add(f.id)
+   return live
+ }
+ 
+@@ -112,18 +129,39 @@ interface LiveFramesState {
+   /** null until the Stage has measured itself: every frame stays live, the
+    *  behaviour before culling, so nothing depends on the first measurement */
+   ids: ReadonlySet<string> | null
++  /** frames a press woke: FrameViews (not necessarily live), newest last */
++  woken: readonly string[]
+   set(ids: ReadonlySet<string>): void
++  wake(frameId: string): void
+ }
+ 
+ export const useLiveFrames = create<LiveFramesState>((set, get) => ({
+   ids: null,
++  woken: [],
+   set(ids) {
+     const prev = get().ids
+     if (prev && sameSet(prev, ids)) return
+     set({ ids })
+   },
++  wake(frameId) {
++    const woken = get().woken
++    if (woken[woken.length - 1] === frameId) return
++    set({ woken: [...woken.filter((id) => id !== frameId), frameId].slice(-MAX_WOKEN) })
++  },
+ }))
+ 
++/** True when the frame is drawn by a full FrameView rather than a FrameShell:
++ *  it is live, or a press woke it. (Selection and streaming are the caller's
++ *  to add: they live in the canvas store.) */
++export function useFrameAwake(frameId: string): boolean {
++  return useLiveFrames((s) => s.ids === null || s.ids.has(frameId) || s.woken.includes(frameId))
++}
++
++/** The frames a selection pins live: all of a small one, none of a large one. */
++export function pinnedBySelection(selectedIds: readonly string[]): readonly string[] {
++  return selectedIds.length <= MAX_PINNED_SELECTION ? selectedIds : []
++}
++
+ /** True when the frame should render its live document. */
+ export function useFrameLive(frameId: string): boolean {
+   return useLiveFrames((s) => s.ids === null || s.ids.has(frameId))
+diff --git a/tests/liveFrames.test.ts b/tests/liveFrames.test.ts
+index bdbb88c..5be0291 100644
+--- a/tests/liveFrames.test.ts
++++ b/tests/liveFrames.test.ts
+@@ -1,5 +1,14 @@
+ import { describe, expect, it } from 'vitest'
+-import { computeLiveFrames, LIVE_MIN_ZOOM, MAX_LIVE, viewRect, type FrameBox } from '../src/lib/liveFrames'
++import {
++  computeLiveFrames,
++  LIVE_MIN_ZOOM,
++  MAX_LIVE,
++  MAX_PINNED_SELECTION,
++  pinnedBySelection,
++  useLiveFrames,
++  viewRect,
++  type FrameBox,
++} from '../src/lib/liveFrames'
+ 
+ const stage = { width: 1400, height: 900 }
+ /** a grid of 1440×900 frames, 8 per row, 160/200 px apart (the Big canvas canvas layout) */
+@@ -63,6 +72,19 @@ describe('computeLiveFrames', () => {
+     expect(kept.has('f2')).toBe(true)
+   })
+ 
++  it('never counts canvas elements against the cap: they have no preview to stand in', () => {
++    const shapes: FrameBox[] = Array.from({ length: 60 }, (_, i) => ({
++      id: `s${i}`,
++      x: (i % 10) * 100,
++      y: Math.floor(i / 10) * 100,
++      width: 80,
++      height: 80,
++      element: true,
++    }))
++    const live = computeLiveFrames([...grid(40), ...shapes], { x: 0, y: 0, zoom: 1 }, stage, none, none)
++    expect(shapes.every((s) => live.has(s.id))).toBe(true)
++  })
++
+   it('culls canvas elements by distance only, never by zoom', () => {
+     const shape: FrameBox = { id: 'shape', x: 100, y: 100, width: 200, height: 200, element: true }
+     const live = computeLiveFrames([shape], { x: 0, y: 0, zoom: 0.1 }, stage, none, none)
+@@ -74,3 +96,22 @@ describe('computeLiveFrames', () => {
+     expect([...live]).toEqual(['f3'])
+   })
+ })
++
++describe('pinnedBySelection', () => {
++  it('pins a small selection and nothing of a large one', () => {
++    expect(pinnedBySelection(['a', 'b'])).toEqual(['a', 'b'])
++    const many = Array.from({ length: MAX_PINNED_SELECTION + 1 }, (_, i) => `f${i}`)
++    expect(pinnedBySelection(many)).toEqual([])
++  })
++})
++
++describe('wake', () => {
++  it('keeps the most recently woken frames, newest last, without duplicates', () => {
++    const { wake } = useLiveFrames.getState()
++    for (const id of ['a', 'b', 'a', 'c']) wake(id)
++    expect(useLiveFrames.getState().woken).toEqual(['b', 'a', 'c'])
++    for (let i = 0; i < 20; i++) wake(`f${i}`)
++    expect(useLiveFrames.getState().woken).toHaveLength(8)
++    expect(useLiveFrames.getState().woken.at(-1)).toBe('f19')
++  })
++})
+diff --git a/tests/liveFramesBrowser.test.ts b/tests/liveFramesBrowser.test.ts
+index deddfe0..a25a255 100644
+--- a/tests/liveFramesBrowser.test.ts
++++ b/tests/liveFramesBrowser.test.ts
+@@ -14,7 +14,6 @@ import type { Canvas, Frame } from '../shared/types'
+ declare global {
+   interface Window {
+     seedPages: (canvas: Canvas) => void
+-    pageState: () => { viewport: { x: number; y: number; zoom: number }; selectedId: string }
+   }
+ }
+ 
+@@ -116,6 +115,63 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
+     expect(await page.evaluate(() => !!document.querySelector('iframe[title="Frame 0"]'))).toBe(false)
+   }, 30_000)
+ 
++  /* Culled frames are FrameShells: no handlers of their own. A press wakes
++     the shell into a FrameView before it is delivered. */
++  const frameAt = (page: Page, id: string) =>
++    page.evaluate(
++      `import('/src/lib/store.ts').then(({ useStore }) => { const s = useStore.getState(); const f = s.canvas.frames.find((f) => f.id === '${id}'); return { x: f.x, y: f.y, selected: s.selectedIds.includes('${id}') } })`,
++    ) as Promise<{ x: number; y: number; selected: boolean }>
++  /** screen point at the middle of a frame, for the current camera */
++  async function middleOf(page: Page, id: string) {
++    const f = await frameAt(page, id)
++    const vp = (await page.evaluate(
++      `import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().viewport)`,
++    )) as { x: number; y: number; zoom: number }
++    const stage = await page.evaluate(() => {
++      const r = document.querySelector('.stage')!.getBoundingClientRect()
++      return { left: r.left, top: r.top }
++    })
++    return { x: stage.left + vp.x + (f.x + 720) * vp.zoom, y: stage.top + vp.y + (f.y + 450) * vp.zoom }
++  }
++
++  it('draws culled frames as shells and selects one on a click', async () => {
++    await store(page, 'select(null)')
++    await camera(page, { x: 20, y: 60, zoom: 0.08 })
++    expect(await page.evaluate(() => document.querySelectorAll('[data-frame-shell]').length)).toBe(FRAMES)
++    const at = await middleOf(page, 'f9')
++    await page.mouse.click(at.x, at.y)
++    await new Promise((r) => setTimeout(r, 200))
++    expect((await frameAt(page, 'f9')).selected).toBe(true)
++    /* it is a FrameView now: no shell, and (selected) its document is live */
++    expect(await page.evaluate(() => !!document.querySelector('[data-frame-shell="f9"]'))).toBe(false)
++    expect(await page.evaluate(() => !!document.querySelector('iframe[title="Frame 9"]'))).toBe(true)
++  }, 30_000)
++
++  it('moves a culled frame with one drag: the press that wakes it also starts the drag', async () => {
++    await store(page, 'select(null)')
++    await camera(page, { x: 20, y: 60, zoom: 0.08 })
++    const before = await frameAt(page, 'f17')
++    const at = await middleOf(page, 'f17')
++    await page.mouse.move(at.x, at.y)
++    await page.mouse.down()
++    await page.mouse.move(at.x + 20, at.y + 12, { steps: 4 })
++    await page.mouse.move(at.x + 40, at.y + 24, { steps: 4 })
++    await page.mouse.up()
++    await new Promise((r) => setTimeout(r, 200))
++    const after = await frameAt(page, 'f17')
++    expect(after.x).toBeGreaterThan(before.x + 300)
++    expect(after.y).toBeGreaterThan(before.y + 150)
++  }, 30_000)
++
++  it('keeps a large selection as previews: no document per selected frame', async () => {
++    await page.evaluate(
++      `import('/src/lib/store.ts').then(({ useStore }) => useStore.setState({ selectedIds: Array.from({ length: 60 }, (_, i) => 'f' + i), selectedId: 'f0' }))`,
++    )
++    await new Promise((r) => setTimeout(r, 400))
++    expect(await iframes(page)).toBe(0)
++    await store(page, 'select(null)')
++  }, 30_000)
++
+   it('measures a click with culling on and off (written to $LIVEFRAMES_BENCH, not asserted)', async () => {
+     async function measure(cull: boolean) {
+       const p = await browser.newPage()

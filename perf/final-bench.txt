@@ -1,0 +1,24 @@
+== NEW (patched.2 candidate)
+   open page          main thread 0 ms in the first 5 s (script 0, style 0, layout 0) · 0 live documents · 5474 elements · editor JS heap 27 MB · renderer CPU 2.0 s
+   pan at fit (8%)      397 ms (style 4, script 37) worst frame   28 ms, 0 slow
+   zoom 8% -> 60%       481 ms (style 52, script 138) worst frame   57 ms, 5 slow
+   pan at 60%           712 ms (style 10, script 162) worst frame   77 ms, 7 slow
+   fit jump (60%->8%)   124 ms (style 9, script 22) worst frame   28 ms, 0 slow
+== v0.12.0
+   open page          main thread 0 ms in the first 5 s (script 0, style 0, layout 0) · 188 live documents · 5850 elements · editor JS heap 116 MB · renderer CPU 10.4 s
+   pan at fit (8%)     2261 ms (style 435, script 537) worst frame   83 ms, 40 slow
+   zoom 8% -> 60%      1699 ms (style 573, script 262) worst frame  187 ms, 16 slow
+   pan at 60%          1790 ms (style 396, script 399) worst frame   60 ms, 32 slow
+   fit jump (60%->8%)   399 ms (style 81, script 63) worst frame  114 ms, 7 slow
+== NEW, run 2
+   open page          main thread 0 ms in the first 5 s (script 0, style 0, layout 0) · 0 live documents · 5474 elements · editor JS heap 27 MB · renderer CPU 2.4 s
+   pan at fit (8%)      245 ms (style 4, script 33) worst frame   27 ms, 0 slow
+   zoom 8% -> 60%       538 ms (style 53, script 144) worst frame   58 ms, 3 slow
+   pan at 60%           720 ms (style 10, script 161) worst frame   77 ms, 5 slow
+   fit jump (60%->8%)   126 ms (style 10, script 22) worst frame   22 ms, 0 slow
+== v0.12.0, run 2
+   open page          main thread 0 ms in the first 5 s (script 0, style 0, layout 0) · 188 live documents · 5850 elements · editor JS heap 115 MB · renderer CPU 10.4 s
+   pan at fit (8%)     2308 ms (style 447, script 571) worst frame   78 ms, 37 slow
+   zoom 8% -> 60%      1688 ms (style 563, script 255) worst frame  236 ms, 16 slow
+   pan at 60%          1775 ms (style 402, script 405) worst frame   70 ms, 35 slow
+   fit jump (60%->8%)   389 ms (style 68, script 57) worst frame  100 ms, 5 slow
