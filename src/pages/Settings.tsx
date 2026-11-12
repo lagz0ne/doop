@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { navigate } from '../App'
+import { FULL_UI } from '../lib/fullUi'
 import { useT, type PlainMessageKey } from '../lib/i18n'
 import { ModelAccountPanel } from '../components/ModelAccount'
 import { ImageModelCard } from '../components/ImageModelCard'
@@ -161,14 +162,16 @@ export function Settings() {
           >
             {t('settings.keysTitle')}
           </DashNavItem>
-          <DashNavItem
-            density="rail"
-            icon={<BellIcon size="rail" />}
-            active={pane === 'webhooks'}
-            onClick={() => setPane('webhooks')}
-          >
-            {t('settings.webhooksTitle')}
-          </DashNavItem>
+          {FULL_UI && (
+            <DashNavItem
+              density="rail"
+              icon={<BellIcon size="rail" />}
+              active={pane === 'webhooks'}
+              onClick={() => setPane('webhooks')}
+            >
+              {t('settings.webhooksTitle')}
+            </DashNavItem>
+          )}
           <DashNavItem
             density="rail"
             icon={<TextIcon size="rail" />}
@@ -217,9 +220,11 @@ export function Settings() {
               <TabsTrigger value="keys">
                 <KeyIcon size="rail" /> {t('settings.keysTitle')}
               </TabsTrigger>
-              <TabsTrigger value="webhooks">
-                <BellIcon size="rail" /> {t('settings.webhooksTitle')}
-              </TabsTrigger>
+              {FULL_UI && (
+                <TabsTrigger value="webhooks">
+                  <BellIcon size="rail" /> {t('settings.webhooksTitle')}
+                </TabsTrigger>
+              )}
               <TabsTrigger value="account">
                 <UserIcon size="rail" /> {t('settings.accountTab')}
               </TabsTrigger>
