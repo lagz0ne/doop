@@ -1,0 +1,15 @@
+{
+	"scripts": {
+		"status": { "command": "bin/doop status" },
+		"check": { "command": "bin/doop check" },
+		"test": { "command": "bin/doop check --test" },
+		"app": {
+			"type": "service",
+			"command": "bin/doop apply && bin/doop serve $PASEO_PORT"
+		},
+		"base": {
+			"type": "service",
+			"command": "bin/doop base && bin/doop serve --base $PASEO_PORT"
+		}
+	}
+}

@@ -75,6 +75,18 @@ transform still applies, then `bin/doop check --test` and commit (`vendor/doop` 
    Rollback: ask the hub to point the app at the previous tag (or at `kgoedecke/doop` + the plain
    upstream tag).
 
+## Paseo
+
+Work on doop through Paseo: project `doop` (`<project>`), workspace `doop`
+(`<workspace>`, **local** isolation, at this directory). Scripts (`paseo.json`):
+`status`, `check`, `test` (check --test), and the services `app` (patched doop) and `base`
+(pristine upstream), each on a Paseo port behind its proxy URL, for perf A/B.
+
+Don't use worktree isolation here: there is one `build/doop` (shared node_modules + local data),
+and a new superproject worktree would have no `vendor/doop` until `git submodule update --init`
+re-clones it. Agents share the local workspace and take turns on `build/doop` (`apply`/`edit`
+refuse to clobber unexported work).
+
 ## Facts
 
 - Builds are reproducible. `git am --committer-date-is-author-date` with a fixed committer
