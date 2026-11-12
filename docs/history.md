@@ -29,10 +29,24 @@ worker session `<session>`.
 | 0004 | perf(canvas): culled frames are shells, a pan is one transform, documents boot in turn | FrameShell instead of a full FrameView for frames without a live document; camera offset only on the label layer; staged document boot; fixes patched.1's selection bug |
 | 0005 | feat(ui): put away the team and product chrome on a one-person instance | one person plus agents: workspaces, Share, Owned/Shared filters, Community, Automations, Integrations, avatar stacks, plan line, Help menu and the Webhooks pane hidden behind `FULL_UI` (`src/lib/fullUi.ts`). Entry points only; routes and server unchanged. `localStorage['doop:full-ui']='on'` restores |
 | 0006 | feat(operator): a token-gated API for users, sharing, canvas owners and agent keys | backs `bin/doopctl`. `/api/operator` answers only a bearer `DOOP_ADMIN_TOKEN` (32+ chars) and is absent while it is unset. Works with sign-up closed; audit lines `[operator] …`; `tests/operator.test.ts` |
+| 0007 | fix(screenshot): wait for a frame's web fonts before capturing it | a render waited for `load` + 120 ms, which does not cover `font-display: swap` fonts: 5-13 of 24 real frames were captured in the fallback face (other widths and line breaks than the live frame), and the picture was then cached as immutable. Now waits for `document.fonts.ready` (≤ 3 s): 0 of 24. Upstream bug, worth offering |
+| 0008 | perf(previews): the canvas shows each frame's preview at the scale it is on screen | the preview was the dashboard thumbnail, one 640 px JPEG q70 whatever the frame or zoom (a 12640×400 banner: 640×20 px). Now a pyramid of WebP q90 pictures at 0.25 / 0.5 / 1 (`/i/<id>.webp?preview&s=`), the level picked from zoom × devicePixelRatio when the camera rests, sharp levels only near the view |
+| 0009 | fix(canvas): a frame keeps its preview until its document has painted | a frame going live showed a blank iframe first: a fully white frame for 68-86 ms on every click or camera rest. The picture now stays until the frame runtime reports `doop:shown` |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → patched.2): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
 480-540 ms; pan at 60% 1780 → 715 ms; fit jump 390 → 125 ms; open page 10.4 → 2.2 s renderer
 CPU, editor heap 116 → 27 MB. Raw numbers: `perf/final-bench.txt`.
 
-Upstreaming: not attempted yet. Patches 0001-0004 are generic enough to offer to kgoedecke/doop.
+Preview fidelity (0007-0009, 2026-11-12; the human: culled frames look too rasterized, and a
+clicked frame looks way different from its neighbours). Three causes, measured on the host's
+canvas copy with `perf/look.mjs`, `perf/boot.mjs`, `perf/fonts.mts`: one fixed-size JPEG for
+every frame and zoom; server renders captured before the web font arrived; a white flash
+while a document boots. Stored previews: 0.25 median 4.3 KB, 0.5 8.4 KB, 1 33.7 KB (the
+640 px JPEG: 11.7 KB). Pan and zoom cost is unchanged within noise against patched.2
+(`perf/refine-bench.txt`, interleaved runs on a loaded machine). Not done: a preview whose
+font or image request fails outright is still stored as current (retrying it needs a
+"degraded render" notion in thumbs.ts).
+
+Upstreaming: not attempted yet. Patches 0001-0004 and 0007-0009 are generic enough to offer to
+kgoedecke/doop (0007 is a plain bug fix).

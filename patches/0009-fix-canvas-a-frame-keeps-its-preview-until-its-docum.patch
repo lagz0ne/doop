@@ -1,0 +1,222 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 05:04:49 +0000
+Subject: [PATCH 9/9] fix(canvas): a frame keeps its preview until its document
+ has painted
+
+A frame going live swapped its preview picture for an iframe at once. The
+iframe is blank until the runtime has booted, taken the HTML and painted,
+so every frame the camera settled on, and every frame clicked while it
+showed a picture, flashed white first. Measured from a screencast of one
+frame at 21% (click to select, which pins it live), three runs: a fully
+white frame on screen for 68-86 ms each time, then the document.
+
+The picture now stays on top of the booting document, in the same element
+(it is not taken down and put back), until the runtime reports the
+document shown. That is a new message, doop:shown, sent once per boot
+after the first HTML's stylesheets, images and web fonts have settled
+(bounded at 1.5 s) and two animation frames have passed, so a paint is
+behind it. A frame out of view gets no animation frames and answers when
+it scrolls in, which is when the swap matters. Same measurement after:
+no white frame in three runs, and the swap from picture to document
+changes the frame's pixels by 0.4 of 255 on average, where it is seen at
+all; the element toolbar appears as soon as before (433-1158 ms against
+493-777 ms, on a loaded machine).
+
+Frames being streamed into, and canvas elements (no picture), show their
+document directly as before.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/components/FrameView.tsx    | 32 ++++++++++++++++++++------
+ src/lib/frameRuntime.ts         | 40 +++++++++++++++++++++++++++++++++
+ src/lib/liveFrames.ts           |  6 +++++
+ tests/liveFramesBrowser.test.ts | 27 ++++++++++++++++++++++
+ 4 files changed, 98 insertions(+), 7 deletions(-)
+
+diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
+index 12a2969..1d82a04 100644
+--- a/src/components/FrameView.tsx
++++ b/src/components/FrameView.tsx
+@@ -15,7 +15,7 @@ import { copyElementLink } from '../lib/elementLink'
+ import { sendWs } from '../lib/ws'
+ import { throttle } from '../lib/throttle'
+ import { getIdentity } from '../lib/identity'
+-import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel } from '../lib/liveFrames'
++import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
+ import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
+ import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
+ import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
+@@ -621,18 +621,28 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+      A dropped iframe takes its runtime with it, so the handshake starts over
+      when it comes back: ready, then the current HTML is posted again. */
+   const live = useFrameLive(frame.id)
++  /* A document that has just been given its iframe has nothing to show yet:
++     the iframe is blank until the runtime boots, takes the HTML and paints,
++     and then its stylesheets and fonts land. Shown bare, every frame going
++     live flashed white (47 ms and up, measured) and re-flowed once. So the
++     preview picture stays on top until the runtime reports the document
++     shown (doop:shown, frameRuntime.ts): the frame goes from picture to
++     document without a blank in between. */
++  const [documentShown, setDocumentShown] = useState(false)
++  const previews = usePreviews()
+   useEffect(() => {
+     if (live) return
+     // eslint-disable-next-line react/set-state-in-effect -- the iframe is gone; its runtime state goes with it
+     setRuntimeReady(false)
+     setRuntimeDocument(null)
++    setDocumentShown(false)
+     localHtml.current = null
+   }, [live])
+   useEffect(() => {
+     function onMsg(ev: MessageEvent) {
+-      if (ev.data?.type === 'doop:frame-ready' && ev.source === iframeRef.current?.contentWindow) {
+-        setRuntimeReady(true)
+-      }
++      if (ev.source !== iframeRef.current?.contentWindow) return
++      if (ev.data?.type === 'doop:frame-ready') setRuntimeReady(true)
++      if (ev.data?.type === 'doop:shown') setDocumentShown(true)
+     }
+     window.addEventListener('message', onMsg)
+     return () => window.removeEventListener('message', onMsg)
+@@ -1445,7 +1455,7 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+             }}
+             onPointerLeave={clearHover}
+           >
+-            {live ? (
++            {live && (
+               <iframe
+                 ref={iframeRef}
+                 className={cn('block border-none', isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white')}
+@@ -1476,8 +1486,16 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+                   ...(isCanvasElement(frame.html) ? { colorScheme: 'light' } : null),
+                 }}
+               />
+-            ) : (
+-              <FramePreview frame={frame} />
++            )}
++            {/* The preview: all the frame shows without a document, and what
++            covers a booting one (see documentShown). One element in one place
++            for both, so the picture is never taken down and put back between
++            them. A frame being streamed into has no picture of what is
++            arriving, and shows its document as it comes. */}
++            {(!live || (!documentShown && previews && !stream)) && (
++              <div className={live ? 'pointer-events-none absolute inset-0' : undefined}>
++                <FramePreview frame={frame} />
++              </div>
+             )}
+             {!frame.html && (
+               <div className="absolute inset-0 grid place-items-center bg-[repeating-linear-gradient(45deg,transparent_0_10px,rgba(28,26,21,0.025)_10px_20px)] text-[13px] text-ink-faint">
+diff --git a/src/lib/frameRuntime.ts b/src/lib/frameRuntime.ts
+index a4570cc..662c02f 100644
+--- a/src/lib/frameRuntime.ts
++++ b/src/lib/frameRuntime.ts
+@@ -115,6 +115,45 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
+     }
+   }
+ 
++  /* The canvas keeps a frame's preview picture over this document until the
++     document has something to show (FrameView). The first HTML to arrive is
++     not that yet: its stylesheets, web fonts and images are still loading,
++     and a paint before them is a blank frame, then unstyled content in a
++     fallback face. So the first render is announced once those have settled
++     (bounded: a slow resource must not hold the picture up for good) and two
++     animation frames have passed, which puts a paint behind the message. A
++     frame out of view gets no animation frames, so it answers when it comes
++     into view and has painted. */
++  var shownAnnounced = false
++  function announceShown() {
++    if (shownAnnounced) return
++    shownAnnounced = true
++    var done = false
++    function finish() {
++      if (done) return
++      done = true
++      requestAnimationFrame(function () {
++        requestAnimationFrame(function () { parent.postMessage({ type: 'doop:shown' }, '*') })
++      })
++    }
++    setTimeout(finish, 1500)
++    var waiting = 1
++    function settled() {
++      if (--waiting > 0) return
++      /* a face starts loading at the layout that first needs it */
++      requestAnimationFrame(function () { document.fonts.ready.then(finish, finish) })
++    }
++    var loading = document.querySelectorAll('link[rel~="stylesheet"], img')
++    for (var i = 0; i < loading.length; i++) {
++      var el = loading[i]
++      if (el.tagName === 'IMG' ? el.complete : !!el.sheet) continue
++      waiting++
++      el.addEventListener('load', settled, { once: true })
++      el.addEventListener('error', settled, { once: true })
++    }
++    settled()
++  }
++
+   /* ---- inline text editing ----
+      The parent flips edit mode on. Instead of designMode (which makes the
+      whole document a caret trap), we hit-test: hovering a text-bearing
+@@ -941,6 +980,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
+       notifyFrameUpdated()
+       protoHtmlChanged()
+       if (d.reqId) parent.postMessage({ type: 'doop:html-result', reqId: d.reqId }, '*')
++      announceShown()
+     }
+     if (d.type === 'doop:edit') setEdit(!!d.on)
+     // Mirror the Layers eye in the live document, including during text edits.
+diff --git a/src/lib/liveFrames.ts b/src/lib/liveFrames.ts
+index ac85a1d..6882c56 100644
+--- a/src/lib/liveFrames.ts
++++ b/src/lib/liveFrames.ts
+@@ -192,6 +192,12 @@ export function pinnedBySelection(selectedIds: readonly string[]): readonly stri
+   return selectedIds.length <= MAX_PINNED_SELECTION ? selectedIds : []
+ }
+ 
++/** True once frames are being culled at all (false with culling switched
++ *  off): only then is there a preview to show for a frame. */
++export function usePreviews(): boolean {
++  return useLiveFrames((s) => s.ids !== null)
++}
++
+ /** True when the frame should render its live document. */
+ export function useFrameLive(frameId: string): boolean {
+   return useLiveFrames((s) => s.ids === null || s.ids.has(frameId))
+diff --git a/tests/liveFramesBrowser.test.ts b/tests/liveFramesBrowser.test.ts
+index 3ab4a96..de4ca1b 100644
+--- a/tests/liveFramesBrowser.test.ts
++++ b/tests/liveFramesBrowser.test.ts
+@@ -211,6 +211,33 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
+     expect(new URL(src).searchParams.get('v')).toBe('1')
+   }, 30_000)
+ 
++  it('keeps the preview over a document that has just booted until the document has painted', async () => {
++    await store(page, 'select(null)')
++    await camera(page, { x: 20, y: 60, zoom: 0.08 })
++    /* selecting pins the frame live: its iframe mounts blank and boots. The
++       picture must be there with it, and gone once the runtime reports the
++       document shown. */
++    const seen = (await page.evaluate(`new Promise((resolve) => {
++      import('/src/lib/store.ts').then(({ useStore }) => {
++        useStore.getState().select('f60')
++        const started = performance.now()
++        let covered = false
++        ;(function poll() {
++          const iframe = document.querySelector('iframe[title="Frame 60"]')
++          const preview = iframe?.parentElement?.querySelector('[data-doop-frame-preview]')
++          if (iframe && preview) covered = true
++          const ms = performance.now() - started
++          if (iframe && !preview) resolve({ covered, shown: true, ms })
++          else if (ms > 8000) resolve({ covered, shown: false, ms })
++          else setTimeout(poll, 2)
++        })()
++      })
++    })`)) as { covered: boolean; shown: boolean; ms: number }
++    expect(seen.covered).toBe(true)
++    expect(seen.shown).toBe(true)
++    await store(page, 'select(null)')
++  }, 30_000)
++
+   it('measures a click with culling on and off (written to $LIVEFRAMES_BENCH, not asserted)', async () => {
+     async function measure(cull: boolean) {
+       const p = await browser.newPage()

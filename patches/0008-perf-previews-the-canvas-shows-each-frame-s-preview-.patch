@@ -1,0 +1,878 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 05:00:31 +0000
+Subject: [PATCH 8/9] perf(previews): the canvas shows each frame's preview at
+ the scale it is on screen
+
+A frame without a live document shows a picture of itself. That picture
+was the dashboard thumbnail: one size for every frame and every zoom,
+min(1, 640 / width), JPEG at quality 70, clipped at 1200 px of height.
+On a real canvas (a 2x display):
+
+- a 1440x900 screen at 27% is 786 device px across and was drawn from
+  640, stretched, with JPEG ringing round every glyph;
+- a 12640x400 section banner (the titles a page is read by at fit zoom)
+  got a 640x20 picture, drawn 2360 px wide: unreadable;
+- a frame taller than 1200 px showed only its top.
+
+Selecting one of them gives it a live document, crisp among its blurred
+neighbours: the same frame looked like two different designs.
+
+Now there is a short pyramid, as for map tiles: the whole frame at 0.25,
+0.5 and 1 output px per frame px (PREVIEW_SCALES), WebP at quality 90,
+/i/<id>.webp?preview&s=<scale>&v=<version>. Each level is rendered when
+first asked for and stored like the thumbnail, with its own version
+(thumbs.ts), and a frame too large for a level is rendered as large as
+the limits allow (8 megapixels, 16000 px a side).
+
+The canvas asks for the smallest level that covers a frame at the
+resting camera's zoom x devicePixelRatio, so a picture is scaled down
+and never stretched, and only for the frames in or near the view; the
+rest of the page keeps the 0.25 picture. (Without that limit a zoom-in
+left every far preview with the large picture queued, and a jump back to
+the whole page loaded hundreds of them at once.) A level change keeps
+the picture on screen until the sharper one has loaded. A page that has
+just opened asks for nothing until its camera has rested once, since its
+zoom until then is the previous page's.
+
+Stored pictures, 219 frames of that canvas: 0.25 median 4.3 KB, 0.5
+8.4 KB, 1 33.7 KB; the 640 px JPEG was 11.7 KB. So the whole-page view,
+where every frame is a picture, now moves a third of the bytes and
+decodes a third of the pixels (360x225 against 640x400 per screen).
+Editor main thread on the 188-frame page, interleaved with the previous
+build on a loaded machine, median of 4: pan at fit 654 -> 596 ms, zoom
+8% -> 60% 850 -> 1066 ms, pan at 60% 1427 -> 1495 ms, fit jump
+305 -> 195 ms; the spread between runs of one build is larger than any
+of these differences.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ server/index.ts                 | 11 +++-
+ server/previews.ts              | 31 ++++++++---
+ server/screenshot.ts            |  4 +-
+ server/thumbs.ts                | 97 ++++++++++++++++++++++-----------
+ shared/types.ts                 | 40 ++++++++++++++
+ src/components/FrameView.tsx    | 13 +++--
+ src/components/Stage.tsx        | 35 +++++++++++-
+ src/lib/liveFrames.ts           | 51 +++++++++++++++--
+ tests/liveFrames.test.ts        | 19 +++++++
+ tests/liveFramesBrowser.test.ts | 39 +++++++++++++
+ tests/previewLevels.test.ts     | 53 ++++++++++++++++++
+ tests/previews.test.ts          | 17 ++++++
+ tests/thumbs.test.ts            | 45 +++++++++++++++
+ 13 files changed, 400 insertions(+), 55 deletions(-)
+ create mode 100644 tests/previewLevels.test.ts
+
+diff --git a/server/index.ts b/server/index.ts
+index 6470169..df54fa3 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -74,7 +74,7 @@ import { ANTHROPIC_MODELS, GEMINI_MODELS, OPENROUTER_MODELS } from '../shared/mo
+ import type { ModelOption } from '../shared/modelMenu.ts'
+ import { mentionedRole } from '../shared/agents.ts'
+ import { activeAgentTasks } from '../shared/agentActivity.ts'
+-import { colorFor } from '../shared/types.ts'
++import { colorFor, isPreviewScale } from '../shared/types.ts'
+ import { isPeerViewport } from '../shared/viewport.ts'
+ import type { Canvas, ClientMessage, Presence, ServerMessage } from '../shared/types.ts'
+ 
+@@ -368,7 +368,11 @@ app.use('/relay', async (req, res) => {
+ 
+ app.get('/i/:id.:ext', async (req, res) => {
+   const { id, ext } = req.params as { id: string; ext: string }
+-  if (ext !== 'png' && ext !== 'jpg') return res.status(404).end()
++  if (ext !== 'png' && ext !== 'jpg' && ext !== 'webp') return res.status(404).end()
++  /* a webp is one level of the editor's preview pyramid and nothing else:
++     /i/<id>.webp?preview&s=<scale> (previews.ts) */
++  const level = ext === 'webp' && req.query.preview !== undefined ? Number(req.query.s) : undefined
++  if (ext === 'webp' && !isPreviewScale(level)) return res.status(404).end()
+   const frame = store.getFrame(id)
+   if (!frame) return res.status(404).end()
+ 
+@@ -380,6 +384,7 @@ app.get('/i/:id.:ext', async (req, res) => {
+       quality: Math.min(100, Math.max(1, Number(req.query.quality) || 90)),
+       /* ?preview — the dashboard-card variant; see previews.ts */
+       preview: req.query.preview !== undefined,
++      ...(isPreviewScale(level) ? { level } : null),
+       ...(typeof req.query.v === 'string' && /^\d+$/.test(req.query.v) ? { version: Number(req.query.v) } : null),
+       ip: req.ip ?? 'unknown',
+       /* the render limit targets anonymous hotlink abuse — a logged-in user
+@@ -398,7 +403,7 @@ app.get('/i/:id.:ext', async (req, res) => {
+   }
+   const { buf } = result
+ 
+-  res.set('Content-Type', ext === 'jpg' ? 'image/jpeg' : 'image/png')
++  res.set('Content-Type', ext === 'jpg' ? 'image/jpeg' : ext === 'webp' ? 'image/webp' : 'image/png')
+   /* A URL that names the frame's current version (?v=<updatedAt>, as the
+      editor's culled frames ask for it) can never show anything else: the
+      browser keeps it for good and a page of hundreds of previews costs no
+diff --git a/server/previews.ts b/server/previews.ts
+index a7110db..44a67f8 100644
+--- a/server/previews.ts
++++ b/server/previews.ts
+@@ -1,5 +1,5 @@
+ import { env } from './env.ts'
+-import type { Frame } from '../shared/types.ts'
++import type { Frame, PreviewScale } from '../shared/types.ts'
+ import * as thumbs from './thumbs.ts'
+ 
+ /**
+@@ -32,13 +32,17 @@ const renderHits = new Map<string, number[]>()
+ const RENDERS_PER_MIN = env.PREVIEW_RENDERS_PER_MIN
+ 
+ export interface ImageRequest {
+-  ext: 'png' | 'jpg'
++  ext: 'png' | 'jpg' | 'webp'
+   scale: 1 | 2
+   quality: number
+   /** dashboard-card variant: small, clipped, jpeg, persisted. Only
+    *  meaningful for jpg — a png?preview would serve jpeg bytes under an
+    *  image/png content-type, so the flag is ignored there. */
+   preview: boolean
++  /** the level of the editor's preview pyramid asked for (?preview&s=):
++   *  the whole frame at that scale, persisted like the card thumbnail.
++   *  The only thing a webp is. */
++  level?: PreviewScale
+   /** the frame version the URL names (?v=), if any. The editor's culled
+    *  frames ask for the current one and show nothing else until the next
+    *  edit, so a thumbnail known to be older is not an answer to them. */
+@@ -54,8 +58,13 @@ export type ImageResult = { status: 'ok'; buf: Buffer; fresh: boolean } | { stat
+ 
+ /** May reject when the render itself fails — the caller owns the 500. */
+ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageResult> {
+-  const preview = req.preview && req.ext === 'jpg'
+-  const key = imageKey(frame.id, req.ext, req.scale, req.ext === 'jpg' ? req.quality : '', preview)
++  const level = req.ext === 'webp' ? req.level : undefined
++  if (req.ext === 'webp' && level === undefined) throw new Error('a webp image is a preview level: ?preview&s=')
++  const preview = level !== undefined || (req.preview && req.ext === 'jpg')
++  const key =
++    level !== undefined
++      ? `${frame.id}:level:${level}`
++      : imageKey(frame.id, req.ext, req.scale, req.ext === 'jpg' ? req.quality : '', preview)
+   const cached = imgCache.get(key)
+   let pending =
+     cached && cached.updatedAt === frame.updatedAt && Date.now() - cached.at < IMG_CACHE_MS ? cached.buf : null
+@@ -65,7 +74,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
+      costs no Chromium boot — so it isn't metered either */
+   let fresh = true
+   if (!pending && preview) {
+-    const stored = await thumbs.getStored(frame)
++    const stored = await thumbs.getStored(frame, level)
+     /* A request for exactly this version, answered from a thumbnail on record
+        as older, would pin the old picture on a frame that shows it until its
+        next edit: that one waits for the render instead (deduped and capped in
+@@ -78,7 +87,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
+       req.version === frame.updatedAt &&
+       (await consumeRenderBudget(req.ip, req.isAuthenticated))
+     if (mustRender) {
+-      pending = thumbs.create(frame)
++      pending = thumbs.create(frame, level)
+       remember(key, pending, frame.updatedAt)
+     } else if (stored) {
+       pending = Promise.resolve(stored.buf)
+@@ -93,7 +102,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
+     if (!(await consumeRenderBudget(req.ip, req.isAuthenticated))) return { status: 'rate-limited' }
+     pending = preview
+       ? /* renders AND persists — the next cold start serves from storage */
+-        thumbs.create(frame)
++        thumbs.create(frame, level)
+       : loadScreenshot().then(({ renderFrame }) =>
+           renderFrame(frame, req.scale, { type: req.ext === 'jpg' ? 'jpeg' : 'png', quality: req.quality }),
+         )
+@@ -103,7 +112,13 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
+   return { status: 'ok', buf: await pending, fresh }
+ }
+ 
+-function imageKey(id: string, ext: 'png' | 'jpg', scale: 1 | 2, quality: number | '', preview: boolean): string {
++function imageKey(
++  id: string,
++  ext: 'png' | 'jpg' | 'webp',
++  scale: 1 | 2,
++  quality: number | '',
++  preview: boolean,
++): string {
+   return `${id}:${ext}:${scale}:${quality}:${preview ? 'p' : ''}`
+ }
+ 
+diff --git a/server/screenshot.ts b/server/screenshot.ts
+index f380c8e..48b2bf9 100644
+--- a/server/screenshot.ts
++++ b/server/screenshot.ts
+@@ -397,7 +397,7 @@ export async function renderFrame(
+   frame: Frame,
+   /* output pixel density — fractional values downscale huge frames */
+   scale: number = 1,
+-  opts: { type?: 'png' | 'jpeg'; quality?: number; maxHeight?: number } = {},
++  opts: { type?: 'png' | 'jpeg' | 'webp'; quality?: number; maxHeight?: number } = {},
+ ): Promise<Buffer> {
+   const loaded = await loadFramePage(frame)
+   const { page } = loaded
+@@ -414,7 +414,7 @@ export async function renderFrame(
+         : undefined
+     const buf = await page.screenshot({
+       type,
+-      ...(type === 'jpeg' ? { quality: opts.quality ?? 90 } : {}),
++      ...(type === 'png' ? {} : { quality: opts.quality ?? 90 }),
+       ...(clip ? { clip } : {}),
+     })
+     return Buffer.from(buf)
+diff --git a/server/thumbs.ts b/server/thumbs.ts
+index d52324c..0d8c048 100644
+--- a/server/thumbs.ts
++++ b/server/thumbs.ts
+@@ -1,4 +1,10 @@
+-import { PREVIEW_MAX_HEIGHT, type Frame } from '../shared/types.ts'
++import {
++  PREVIEW_MAX_HEIGHT,
++  PREVIEW_SCALES,
++  previewRenderScale,
++  type Frame,
++  type PreviewScale,
++} from '../shared/types.ts'
+ import * as storage from './storage.ts'
+ 
+ /**
+@@ -16,8 +22,19 @@ import * as storage from './storage.ts'
+  * showed (the editor's culled frames show these previews, hundreds a page).
+  * A thumbnail stored before the sidecar existed still degrades to one
+  * background re-render — never to a blank tile.
++ *
++ * Beside the card thumbnail a frame has one stored picture per level of the
++ * editor's preview pyramid (PREVIEW_SCALES in shared/types.ts): the whole
++ * frame at that scale, as WebP, for the canvas to show in place of the live
++ * document. Each is rendered when first asked for and kept the same way,
++ * with its own version; every function here takes the level, and none means
++ * the card thumbnail.
+  */
+ 
++/** What all the bookkeeping below is keyed by: a frame's card thumbnail, or
++ *  one level of its preview pyramid. */
++const slot = (frameId: string, level?: PreviewScale) => (level === undefined ? frameId : `${frameId}@${level}`)
++
+ /** frame.updatedAt the stored thumb was rendered from; absent = unknown */
+ const written = new Map<string, number>()
+ /** in-flight render+persist per frame — concurrent callers share it */
+@@ -29,8 +46,13 @@ const MIN_REVALIDATE_MS = 30_000
+ /** frames purged mid-render — a pending create must not re-persist them */
+ const dead = new Set<string>()
+ 
+-const keyFor = (frameId: string) => `thumb/${frameId}.jpg`
+-const versionKeyFor = (frameId: string) => `thumb/${frameId}.ver`
++/* storage keys are `<name>.<ext>` with no further dots (storage.ts), so a
++   level goes into the extension: thumb/<id>.p25 is the 0.25 picture */
++const keyFor = (frameId: string, level?: PreviewScale) =>
++  level === undefined ? `thumb/${frameId}.jpg` : `thumb/${frameId}.p${level * 100}`
++const versionKeyFor = (frameId: string, level?: PreviewScale) =>
++  level === undefined ? `thumb/${frameId}.ver` : `thumb/${frameId}.p${level * 100}ver`
++const mimeFor = (level?: PreviewScale) => (level === undefined ? 'image/jpeg' : 'image/webp')
+ 
+ /* Global bound on concurrent preview renders. Per-frame dedupe caps repeat
+    requests but not breadth: a post-restart dashboard of 50 stale canvases
+@@ -47,11 +69,17 @@ const loadScreenshot = () => (screenshot ??= import('./screenshot.ts'))
+ 
+ /** The preview render: card-sized, clipped, cheap — matches what /i/?preview
+  *  serves, because this IS what /i/?preview serves. */
+-async function render(frame: Frame): Promise<Buffer> {
++async function render(frame: Frame, level?: PreviewScale): Promise<Buffer> {
+   if (active >= MAX_CONCURRENT_RENDERS) await new Promise<void>((r) => waiting.push(r))
+   active++
+   try {
+     const { renderFrame } = await loadScreenshot()
++    /* A level of the pyramid is the whole frame, unclipped, at that scale.
++       WebP at 90 because the picture stands in for the live document right
++       beside live ones: JPEG at 70 rings around every glyph and hairline,
++       and WebP at 90 is clean at half the bytes of JPEG at 90 or PNG. */
++    if (level !== undefined)
++      return await renderFrame(frame, previewRenderScale(frame, level), { type: 'webp', quality: 90 })
+     return await renderFrame(frame, Math.min(1, 640 / frame.width), {
+       type: 'jpeg',
+       quality: 70,
+@@ -65,29 +93,30 @@ async function render(frame: Frame): Promise<Buffer> {
+ 
+ /** Render now, persist, and return the bytes. Deduped per frame; rejects on
+  *  render failure (the caller decides what a failed render means). */
+-export function create(frame: Frame): Promise<Buffer> {
+-  const inflight = pending.get(frame.id)
++export function create(frame: Frame, level?: PreviewScale): Promise<Buffer> {
++  const id = slot(frame.id, level)
++  const inflight = pending.get(id)
+   if (inflight) return inflight
+-  lastAttempt.set(frame.id, Date.now())
+-  const p = render(frame).then(async (buf) => {
++  lastAttempt.set(id, Date.now())
++  const p = render(frame, level).then(async (buf) => {
+     /* persist is best-effort: a bucket hiccup must not fail the response
+        that only needed the bytes */
+     try {
+       if (!dead.has(frame.id)) {
+-        await storage.putObject(keyFor(frame.id), buf, 'image/jpeg')
+-        written.set(frame.id, frame.updatedAt)
++        await storage.putObject(keyFor(frame.id, level), buf, mimeFor(level))
++        written.set(id, frame.updatedAt)
+         /* purge may have run during the put — its delete can land before
+            our write finishes, so re-check and clean up our own orphan */
+-        if (dead.has(frame.id)) await storage.deleteObject(keyFor(frame.id))
+-        else await storage.putObject(versionKeyFor(frame.id), Buffer.from(String(frame.updatedAt)), 'text/plain')
++        if (dead.has(frame.id)) await storage.deleteObject(keyFor(frame.id, level))
++        else await storage.putObject(versionKeyFor(frame.id, level), Buffer.from(String(frame.updatedAt)), 'text/plain')
+       }
+     } catch (e) {
+-      console.error(`thumb persist failed for ${frame.id}:`, e)
++      console.error(`thumb persist failed for ${id}:`, e)
+     }
+     return buf
+   })
+-  pending.set(frame.id, p)
+-  p.catch(() => {}).finally(() => pending.delete(frame.id))
++  pending.set(id, p)
++  p.catch(() => {}).finally(() => pending.delete(id))
+   return p
+ }
+ 
+@@ -96,40 +125,46 @@ export function create(frame: Frame): Promise<Buffer> {
+  *  off (throttled, deduped, errors logged and swallowed) and the stored
+  *  bytes are returned anyway: stale beats blank. Returns null when nothing
+  *  is stored yet. */
+-export async function getStored(frame: Frame): Promise<{ buf: Buffer; fresh: boolean; known: boolean } | null> {
++export async function getStored(
++  frame: Frame,
++  level?: PreviewScale,
++): Promise<{ buf: Buffer; fresh: boolean; known: boolean } | null> {
++  const id = slot(frame.id, level)
+   let buf: Buffer | null
+   try {
+-    buf = await storage.getObject(keyFor(frame.id))
++    buf = await storage.getObject(keyFor(frame.id, level))
+   } catch (e) {
+-    console.error(`thumb read failed for ${frame.id}:`, e)
++    console.error(`thumb read failed for ${id}:`, e)
+     return null
+   }
+   if (!buf) {
+     /* the map claimed fresh but the object is gone (manual purge, new
+        bucket) — forget, so the caller falls through to a live render */
+-    written.delete(frame.id)
++    written.delete(id)
+     return null
+   }
+   /* after a restart the version is on storage, not in memory: read it once */
+-  if (!written.has(frame.id)) {
+-    const version = Number((await storage.getObject(versionKeyFor(frame.id)).catch(() => null))?.toString())
+-    if (Number.isFinite(version) && !written.has(frame.id)) written.set(frame.id, version)
++  if (!written.has(id)) {
++    const version = Number((await storage.getObject(versionKeyFor(frame.id, level)).catch(() => null))?.toString())
++    if (Number.isFinite(version) && !written.has(id)) written.set(id, version)
+   }
+-  const fresh = written.get(frame.id) === frame.updatedAt
+-  const throttled = Date.now() - (lastAttempt.get(frame.id) ?? 0) < MIN_REVALIDATE_MS
+-  if (!fresh && !throttled && !pending.has(frame.id))
+-    create(frame).catch((e) => console.error(`thumb revalidate failed for ${frame.id}:`, e))
++  const fresh = written.get(id) === frame.updatedAt
++  const throttled = Date.now() - (lastAttempt.get(id) ?? 0) < MIN_REVALIDATE_MS
++  if (!fresh && !throttled && !pending.has(id))
++    create(frame, level).catch((e) => console.error(`thumb revalidate failed for ${id}:`, e))
+   /* `known`: the version it was rendered from is on record (a thumbnail from
+      before versions were stored is of unknown age, not known to be old) */
+-  return { buf, fresh, known: written.has(frame.id) }
++  return { buf, fresh, known: written.has(id) }
+ }
+ 
+ /** Frame (or its whole canvas) is gone — drop the derived object too, so the
+  *  thumb folder holds only live frames. Best-effort fire-and-forget. */
+ export function purge(frameId: string): void {
+   dead.add(frameId)
+-  written.delete(frameId)
+-  lastAttempt.delete(frameId)
+-  storage.deleteObject(keyFor(frameId)).catch(() => {})
+-  storage.deleteObject(versionKeyFor(frameId)).catch(() => {})
++  for (const level of [undefined, ...PREVIEW_SCALES]) {
++    written.delete(slot(frameId, level))
++    lastAttempt.delete(slot(frameId, level))
++    storage.deleteObject(keyFor(frameId, level)).catch(() => {})
++    storage.deleteObject(versionKeyFor(frameId, level)).catch(() => {})
++  }
+ }
+diff --git a/shared/types.ts b/shared/types.ts
+index 358a0de..a8cc775 100644
+--- a/shared/types.ts
++++ b/shared/types.ts
+@@ -84,6 +84,46 @@ export interface CanvasMeta {
+  *  image must assume this cap, not the frame's real height. */
+ export const PREVIEW_MAX_HEIGHT = 1200
+ 
++/** The scales the editor's preview of a frame is rendered at
++ *  (`/i/<id>.webp?preview&s=<scale>`): output pixels per frame pixel. A frame
++ *  the canvas shows as a picture (src/lib/liveFrames.ts) is anything from a
++ *  few dozen to a couple of thousand device pixels across depending on the
++ *  zoom, and one fixed size is wrong for most of that range: too soft up
++ *  close, wasted bytes and decode from afar. So, like map tiles or mipmaps,
++ *  there is a short pyramid and the canvas asks for the level that covers
++ *  what is on screen. */
++export const PREVIEW_SCALES = [0.25, 0.5, 1] as const
++export type PreviewScale = (typeof PREVIEW_SCALES)[number]
++
++export function isPreviewScale(value: unknown): value is PreviewScale {
++  return (PREVIEW_SCALES as readonly unknown[]).includes(value)
++}
++
++/** A scaled preview is never larger than this many pixels… */
++const PREVIEW_MAX_PIXELS = 8_000_000
++/** …nor longer than this on a side (WebP's limit is 16383). */
++const PREVIEW_MAX_SIDE = 16_000
++
++/** The scale a frame's preview is actually rendered at for a level of the
++ *  pyramid: the level itself, unless the frame is so large that the picture
++ *  would pass the limits above (a 1440×9000 page, a 20000 px strip). */
++export function previewRenderScale(frame: { width: number; height: number }, level: PreviewScale): number {
++  const width = Math.max(1, frame.width)
++  const height = Math.max(1, frame.height)
++  return Math.min(level, PREVIEW_MAX_SIDE / Math.max(width, height), Math.sqrt(PREVIEW_MAX_PIXELS / (width * height)))
++}
++
++/** The pyramid level for a frame drawn at `density` device pixels per frame
++ *  pixel (camera zoom × devicePixelRatio): the smallest one that covers it,
++ *  so the picture is only ever scaled down, never stretched; and no level
++ *  above the one where the frame's size limit already bites (those would
++ *  all be the same picture). */
++export function previewLevelFor(frame: { width: number; height: number }, density: number): PreviewScale {
++  const top = PREVIEW_SCALES[PREVIEW_SCALES.length - 1] ?? 1
++  const wanted = Math.min(density, previewRenderScale(frame, top))
++  return PREVIEW_SCALES.find((level) => level >= wanted) ?? top
++}
++
+ /* ---- community gallery ---- */
+ 
+ export const COMMUNITY_CATEGORIES = ['website', 'app', 'dashboard', 'mobile', 'marketing', 'other'] as const
+diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
+index 7c2cf62..12a2969 100644
+--- a/src/components/FrameView.tsx
++++ b/src/components/FrameView.tsx
+@@ -15,7 +15,7 @@ import { copyElementLink } from '../lib/elementLink'
+ import { sendWs } from '../lib/ws'
+ import { throttle } from '../lib/throttle'
+ import { getIdentity } from '../lib/identity'
+-import { previewSrc, useFrameAwake, useFrameLive } from '../lib/liveFrames'
++import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel } from '../lib/liveFrames'
+ import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
+ import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
+ import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
+@@ -1807,21 +1807,26 @@ function FramePreview({ frame }: { frame: Frame }) {
+   const attempt = retry.version === frame.updatedAt ? retry.count : 0
+   const timer = useRef(0)
+   useEffect(() => () => window.clearTimeout(timer.current), [])
+-  const src = previewSrc(frame.id, frame.updatedAt)
++  /* The picture is fetched at the scale it is on screen (liveFrames.ts). When
++     the level changes, or the frame does, the <img> keeps painting what it
++     has until the new picture has loaded: a zoom sharpens the previews in
++     place, it never blanks them. */
++  const level = usePreviewLevel(frame)
++  const src = level === null ? null : previewSrc(frame.id, frame.updatedAt, level)
+   return (
+     <div
+       className={cn('block overflow-hidden', element ? 'bg-transparent' : 'bg-white')}
+       style={{ width: frame.width, height: frame.height }}
+       data-doop-frame-preview=""
+     >
+-      {frame.html && !element && (
++      {frame.html && !element && src && (
+         <img
+           src={attempt ? `${src}&retry=${attempt}` : src}
+           alt=""
+           draggable={false}
+           loading="lazy"
+           decoding="async"
+-          className="pointer-events-none block w-full select-none"
++          className="pointer-events-none block h-full w-full select-none"
+           onError={() => {
+             if (attempt >= PREVIEW_RETRIES) return
+             window.clearTimeout(timer.current)
+diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
+index 4b2faa4..1431409 100644
+--- a/src/components/Stage.tsx
++++ b/src/components/Stage.tsx
+@@ -48,7 +48,14 @@ import { useCanvasDrawing } from './CanvasDrawing'
+ import { FrameLabelLayer } from './FrameLabelLayer'
+ import { layoutZoomFor } from '../lib/layoutZoom'
+ import { isCanvasElement } from '../lib/drawing'
+-import { computeLiveFrames, cullingEnabled, pinnedBySelection, useLiveFrames, type FrameBox } from '../lib/liveFrames'
++import {
++  computeLiveFrames,
++  cullingEnabled,
++  pinnedBySelection,
++  sharpPreviews,
++  useLiveFrames,
++  type FrameBox,
++} from '../lib/liveFrames'
+ 
+ const MIN_ZOOM = 0.08
+ /* The settled world is laid out at up to this zoom too (layoutZoomFor), so
+@@ -167,6 +174,8 @@ export function Stage({
+     }
+     setLabelLayer(el)
+   }, [])
++  /* the page whose previews have a density (see the culling effect) */
++  const previewPage = useRef<string | null>(null)
+   /* the zoom and grid period last written to the DOM (see apply) */
+   const appliedZoom = useRef<number | null>(null)
+   const appliedPeriod = useRef<number | null>(null)
+@@ -301,6 +310,17 @@ export function Stage({
+     const elements = new Set(frames.filter((f) => f.element).map((f) => f.id))
+     let timer = 0
+     let pump = 0
++    /* The previews' resolution follows the camera too (setPreviews), but
++       only a camera at rest. A page that has just opened is about to be
++       fitted or put back where it was, and its zoom until then is the last
++       page's: asking for pictures at that density would fetch (and render,
++       the first time) a whole page of them at the wrong size. So a new page
++       starts with no density, and gets one when its camera first rests. */
++    const page = canvas ? `${canvas.id}:${useStore.getState().activePageId ?? ''}` : null
++    let rested = previewPage.current === page
++    let restPending = !rested
++    previewPage.current = page
++    if (!rested) useLiveFrames.getState().setPreviews(null)
+     /* Documents boot a few per animation frame, nearest the view first. A
+        camera that comes to rest over twenty frames would otherwise create
+        twenty documents in one task: a visible hitch, and input queued behind
+@@ -329,15 +349,24 @@ export function Stage({
+       for (const p of Object.values(s.presences)) if (p.activeFrameId) pinned.add(p.activeFrameId)
+       for (const id of Object.keys(s.streams)) pinned.add(id)
+       const live = useLiveFrames.getState()
+-      admit(computeLiveFrames(frames, s.viewport, measuredStage(el), pinned, live.ids ?? new Set()), pinned)
++      const stage = measuredStage(el)
++      if (rested) live.setPreviews(s.viewport.zoom * window.devicePixelRatio, sharpPreviews(frames, s.viewport, stage))
++      admit(computeLiveFrames(frames, s.viewport, stage, pinned, live.ids ?? new Set()), pinned)
++    }
++    function atRest() {
++      rested = true
++      restPending = false
++      compute()
+     }
+     compute()
++    if (restPending) timer = window.setTimeout(atRest, 120)
+     const unsub = useStore.subscribe((s, prev) => {
+       const moved = s.viewport !== prev.viewport
+       if (!moved && s.selectedIds === prev.selectedIds && s.presences === prev.presences && s.streams === prev.streams)
+         return
++      if (moved) restPending = true
+       window.clearTimeout(timer)
+-      timer = window.setTimeout(compute, moved ? 120 : 0)
++      timer = window.setTimeout(restPending ? atRest : compute, moved ? 120 : 0)
+     })
+     const resize = new ResizeObserver(([entry]) => {
+       if (entry) {
+diff --git a/src/lib/liveFrames.ts b/src/lib/liveFrames.ts
+index 56913a9..ac85a1d 100644
+--- a/src/lib/liveFrames.ts
++++ b/src/lib/liveFrames.ts
+@@ -1,4 +1,5 @@
+ import { create } from 'zustand'
++import { PREVIEW_SCALES, previewLevelFor, type PreviewScale } from '../../shared/types'
+ 
+ /* Viewport culling for frame iframes.
+ 
+@@ -119,6 +120,21 @@ export function computeLiveFrames(
+   return live
+ }
+ 
++/** The frames whose previews are worth a sharper picture than the smallest:
++ *  the ones within the entry margin of the resting view (those the camera
++ *  shows, or will with a short pan). Everything farther keeps the smallest
++ *  level. Without that limit a zoom-in changed every preview on the page to
++ *  the large picture; the far ones only queued it (they load lazily), and a
++ *  jump back out to the whole page then fetched and decoded hundreds of
++ *  full-size pictures at once, each about to be replaced by the small one. */
++export function sharpPreviews(frames: readonly FrameBox[], camera: Camera, stage: Size): Set<string> {
++  const sharp = new Set<string>()
++  if (stage.width <= 0 || stage.height <= 0 || camera.zoom <= 0) return sharp
++  const near = viewRect(camera, stage, ENTER_MARGIN)
++  for (const f of frames) if (!f.element && intersects(f, near)) sharp.add(f.id)
++  return sharp
++}
++
+ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+   if (a.size !== b.size) return false
+   for (const id of a) if (!b.has(id)) return false
+@@ -131,18 +147,32 @@ interface LiveFramesState {
+   ids: ReadonlySet<string> | null
+   /** frames a press woke: FrameViews (not necessarily live), newest last */
+   woken: readonly string[]
++  /** device pixels per frame pixel where the camera last came to rest
++   *  (zoom × devicePixelRatio); null until it has rested on this page. The
++   *  previews of the frames near that view (`sharp`) are fetched at the
++   *  pyramid level that covers it, the others at the smallest. */
++  previewDensity: number | null
++  sharp: ReadonlySet<string>
+   set(ids: ReadonlySet<string>): void
++  setPreviews(density: number | null, sharp?: ReadonlySet<string>): void
+   wake(frameId: string): void
+ }
+ 
+ export const useLiveFrames = create<LiveFramesState>((set, get) => ({
+   ids: null,
+   woken: [],
++  previewDensity: null,
++  sharp: new Set(),
+   set(ids) {
+     const prev = get().ids
+     if (prev && sameSet(prev, ids)) return
+     set({ ids })
+   },
++  setPreviews(density, sharp = new Set()) {
++    const prev = get()
++    if (prev.previewDensity === density && sameSet(prev.sharp, sharp)) return
++    set({ previewDensity: density, sharp: sameSet(prev.sharp, sharp) ? prev.sharp : sharp })
++  },
+   wake(frameId) {
+     const woken = get().woken
+     if (woken[woken.length - 1] === frameId) return
+@@ -167,8 +197,21 @@ export function useFrameLive(frameId: string): boolean {
+   return useLiveFrames((s) => s.ids === null || s.ids.has(frameId))
+ }
+ 
+-/** Where a culled frame's stand-in image comes from: the persisted preview,
+- *  re-requested whenever the frame changes. */
+-export function previewSrc(frameId: string, updatedAt: number): string {
+-  return `/i/${frameId}.jpg?preview&v=${updatedAt}`
++/** The level of the preview pyramid (shared/types.ts) a frame's picture is
++ *  shown at. Near the resting view it is the one that covers the frame as
++ *  the camera draws it, so the picture is as sharp as the screen and no
++ *  larger; farther away it is the smallest. null while the camera has not
++ *  rested on the page yet. Changes only when the level does, so a zoom
++ *  re-renders a preview a couple of times across its whole range. */
++export function usePreviewLevel(frame: { id: string; width: number; height: number }): PreviewScale | null {
++  return useLiveFrames((s) => {
++    if (s.previewDensity === null) return null
++    return s.sharp.has(frame.id) ? previewLevelFor(frame, s.previewDensity) : (PREVIEW_SCALES[0] ?? null)
++  })
++}
++
++/** Where a culled frame's stand-in image comes from: the persisted preview
++ *  at one level of the pyramid, re-requested whenever the frame changes. */
++export function previewSrc(frameId: string, updatedAt: number, level: PreviewScale): string {
++  return `/i/${frameId}.webp?preview&s=${level}&v=${updatedAt}`
+ }
+diff --git a/tests/liveFrames.test.ts b/tests/liveFrames.test.ts
+index 5be0291..680701e 100644
+--- a/tests/liveFrames.test.ts
++++ b/tests/liveFrames.test.ts
+@@ -5,6 +5,7 @@ import {
+   MAX_LIVE,
+   MAX_PINNED_SELECTION,
+   pinnedBySelection,
++  sharpPreviews,
+   useLiveFrames,
+   viewRect,
+   type FrameBox,
+@@ -115,3 +116,21 @@ describe('wake', () => {
+     expect(useLiveFrames.getState().woken.at(-1)).toBe('f19')
+   })
+ })
++
++describe('sharpPreviews', () => {
++  it('names the frames in or near the view: only those get a picture above the smallest level', () => {
++    // the view shows world 0..1400 × 0..900; with half a viewport of margin, -700..2100 × -450..1350
++    const sharp = sharpPreviews(grid(200), { x: 0, y: 0, zoom: 1 }, stage)
++    expect([...sharp].sort()).toEqual(['f0', 'f1', 'f8', 'f9'])
++  })
++
++  it('is every frame when the whole page is in view', () => {
++    expect(sharpPreviews(grid(40), { x: 0, y: 0, zoom: 0.08 }, stage).size).toBe(40)
++  })
++
++  it('never names a canvas element (no picture), nor anything before the stage is measured', () => {
++    const shape: FrameBox = { id: 'shape', x: 100, y: 100, width: 200, height: 200, element: true }
++    expect(sharpPreviews([shape], { x: 0, y: 0, zoom: 1 }, stage).size).toBe(0)
++    expect(sharpPreviews(grid(4), { x: 0, y: 0, zoom: 1 }, { width: 0, height: 0 }).size).toBe(0)
++  })
++})
+diff --git a/tests/liveFramesBrowser.test.ts b/tests/liveFramesBrowser.test.ts
+index a25a255..3ab4a96 100644
+--- a/tests/liveFramesBrowser.test.ts
++++ b/tests/liveFramesBrowser.test.ts
+@@ -172,6 +172,45 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
+     await store(page, 'select(null)')
+   }, 30_000)
+ 
++  /* Previews are fetched at the scale they are on screen (shared/types.ts,
++     PREVIEW_SCALES); this browser's devicePixelRatio is 1. */
++  const previewLevels = (page: Page) =>
++    page.evaluate(() => [
++      ...new Set(
++        [...document.querySelectorAll<HTMLImageElement>('[data-doop-frame-preview] img')].map(
++          (img) => new URL(img.src).searchParams.get('s') ?? 'none',
++        ),
++      ),
++    ])
++
++  it('asks for the previews at the level that covers them on screen, and again when the zoom changes it', async () => {
++    await store(page, 'select(null)')
++    /* the whole page in view */
++    await camera(page, { x: 20, y: 60, zoom: 0.08 })
++    expect(await previewLevels(page)).toEqual(['0.25'])
++    /* closer: the frames near the view sharpen, the rest of the page keeps the small picture */
++    await camera(page, { x: 20, y: 60, zoom: 0.29 })
++    const levels = (await page.evaluate(() =>
++      Object.fromEntries(
++        ['Frame 0', 'Frame 199'].map((name) => [
++          name,
++          new URL(
++            [...document.querySelectorAll('[data-frame-shell]')]
++              .find((shell) => shell.querySelector('[data-frame-title]')?.textContent === name)!
++              .querySelector('img')!.src,
++          ).searchParams.get('s'),
++        ]),
++      ),
++    )) as Record<string, string>
++    expect(levels).toEqual({ 'Frame 0': '0.5', 'Frame 199': '0.25' })
++    /* every one is the whole frame as webp, named by version */
++    const src = await page.evaluate(
++      () => document.querySelector<HTMLImageElement>('[data-doop-frame-preview] img')!.src,
++    )
++    expect(new URL(src).pathname).toMatch(/^\/i\/f\d+\.webp$/)
++    expect(new URL(src).searchParams.get('v')).toBe('1')
++  }, 30_000)
++
+   it('measures a click with culling on and off (written to $LIVEFRAMES_BENCH, not asserted)', async () => {
+     async function measure(cull: boolean) {
+       const p = await browser.newPage()
+diff --git a/tests/previewLevels.test.ts b/tests/previewLevels.test.ts
+new file mode 100644
+index 0000000..57b2176
+--- /dev/null
++++ b/tests/previewLevels.test.ts
+@@ -0,0 +1,53 @@
++import { describe, expect, it } from 'vitest'
++import { isPreviewScale, PREVIEW_SCALES, previewLevelFor, previewRenderScale } from '../shared/types'
++
++/* The editor's preview pyramid: which picture of a frame the canvas asks for
++   at a given density (camera zoom × devicePixelRatio), and what scale the
++   server renders it at. */
++
++const screen = { width: 1440, height: 900 }
++
++describe('previewLevelFor', () => {
++  it('picks the smallest level that covers the frame on screen, so a picture is never stretched', () => {
++    expect(previewLevelFor(screen, 0.08)).toBe(0.25) // fit zoom, 1× display
++    expect(previewLevelFor(screen, 0.18)).toBe(0.25) // 9% on a 2× display
++    expect(previewLevelFor(screen, 0.25)).toBe(0.25)
++    expect(previewLevelFor(screen, 0.26)).toBe(0.5)
++    expect(previewLevelFor(screen, 0.5)).toBe(0.5)
++    expect(previewLevelFor(screen, 0.58)).toBe(1) // 29% on a 2× display
++    expect(previewLevelFor(screen, 1)).toBe(1)
++  })
++
++  it('stops at the largest level however dense the screen', () => {
++    expect(previewLevelFor(screen, 6)).toBe(1)
++  })
++
++  it('never asks above the level where a huge frame is already at its size limit', () => {
++    const strip = { width: 40_000, height: 400 } // limited to 0.4
++    expect(previewLevelFor(strip, 2)).toBe(0.5)
++    expect(previewLevelFor(strip, 0.2)).toBe(0.25)
++  })
++})
++
++describe('previewRenderScale', () => {
++  it('is the level itself for ordinary frames, wide banners included', () => {
++    for (const level of PREVIEW_SCALES) expect(previewRenderScale(screen, level)).toBe(level)
++    expect(previewRenderScale({ width: 12_640, height: 400 }, 1)).toBe(1)
++  })
++
++  it('shrinks a picture that would pass 8 megapixels or 16000 px on a side', () => {
++    const tall = { width: 1440, height: 9000 }
++    const scale = previewRenderScale(tall, 1)
++    expect(scale).toBeLessThan(1)
++    expect(tall.width * tall.height * scale * scale).toBeCloseTo(8_000_000, -2)
++    expect(previewRenderScale({ width: 40_000, height: 400 }, 1)).toBeCloseTo(0.4)
++    expect(previewRenderScale(tall, 0.25)).toBe(0.25)
++  })
++})
++
++describe('isPreviewScale', () => {
++  it('accepts the levels and nothing else (the route takes ?s= from the URL)', () => {
++    expect(PREVIEW_SCALES.every(isPreviewScale)).toBe(true)
++    for (const other of [0, 0.3, 2, Number.NaN, '0.5', undefined]) expect(isPreviewScale(other)).toBe(false)
++  })
++})
+diff --git a/tests/previews.test.ts b/tests/previews.test.ts
+index f125fab..013d364 100644
+--- a/tests/previews.test.ts
++++ b/tests/previews.test.ts
+@@ -64,6 +64,23 @@ describe('getImage', () => {
+     expect(mocks.putObject).not.toHaveBeenCalled()
+   })
+ 
++  it('webp?preview&s= renders that level of the pyramid and persists it', async () => {
++    const f = frame()
++    const r = await getImage(f, req({ ext: 'webp', preview: true, level: 0.5 }))
++    expect(r).toEqual({ status: 'ok', buf: Buffer.from('rendered'), fresh: true })
++    expect(mocks.renderFrame).toHaveBeenCalledWith(expect.anything(), 0.5, { type: 'webp', quality: 90 })
++    expect(mocks.putObject).toHaveBeenCalledWith(`thumb/${f.id}.p50`, expect.anything(), 'image/webp')
++    /* a second request for the level is the cached render; another level is its own */
++    await getImage(f, req({ ext: 'webp', preview: true, level: 0.5 }))
++    expect(mocks.renderFrame).toHaveBeenCalledTimes(1)
++    await getImage(f, req({ ext: 'webp', preview: true, level: 1 }))
++    expect(mocks.renderFrame).toHaveBeenCalledTimes(2)
++  })
++
++  it('refuses a webp that names no level', async () => {
++    await expect(getImage(frame(), req({ ext: 'webp', preview: true }))).rejects.toThrow()
++  })
++
+   it('jpg?preview renders card-size and persists the thumb', async () => {
+     const f = frame()
+     const r = await getImage(f, req({ preview: true }))
+diff --git a/tests/thumbs.test.ts b/tests/thumbs.test.ts
+index 3f5e413..ad794fc 100644
+--- a/tests/thumbs.test.ts
++++ b/tests/thumbs.test.ts
+@@ -134,4 +134,49 @@ describe('thumbs', () => {
+     await tick()
+     expect(mocks.renderFrame).toHaveBeenCalledTimes(1)
+   })
++
++  /* the editor's preview pyramid: one stored picture per level, beside the
++     card thumbnail and independent of it */
++  it('renders a pyramid level as the whole frame at that scale, in webp, under its own key', async () => {
++    mocks.renderFrame.mockResolvedValue(Buffer.from('webp'))
++    await thumbs.create(frame('level'), 0.5)
++    expect(mocks.renderFrame).toHaveBeenCalledWith(expect.anything(), 0.5, { type: 'webp', quality: 90 })
++    expect(mocks.putObject).toHaveBeenCalledWith('thumb/level.p50', Buffer.from('webp'), 'image/webp')
++    expect(mocks.putObject).toHaveBeenCalledWith('thumb/level.p50ver', Buffer.from('1'), 'text/plain')
++  })
++
++  it('renders a huge frame below the level it was asked at, within the picture limits', async () => {
++    mocks.renderFrame.mockResolvedValue(Buffer.from('webp'))
++    await thumbs.create({ ...frame('strip'), width: 40_000, height: 400 }, 1)
++    const scale = mocks.renderFrame.mock.calls[0]![1] as number
++    expect(scale).toBeCloseTo(0.4) // 16000 px on the long side
++  })
++
++  it('keeps each level and the card thumbnail apart: one being current says nothing of another', async () => {
++    mocks.renderFrame.mockResolvedValue(Buffer.from('new'))
++    const f = frame('apart')
++    await thumbs.create(f, 0.25)
++    mocks.renderFrame.mockClear()
++    mocks.getObject.mockImplementation((key: string) => Promise.resolve(key.endsWith('ver') ? null : Buffer.from('b')))
++    expect((await thumbs.getStored(f, 0.25))?.fresh).toBe(true)
++    expect((await thumbs.getStored(f, 1))?.fresh).toBe(false)
++    expect((await thumbs.getStored(f))?.fresh).toBe(false)
++    await tick()
++    /* the two that were not current are refreshed, each as itself */
++    expect(mocks.renderFrame).toHaveBeenCalledTimes(2)
++    expect(mocks.renderFrame).toHaveBeenCalledWith(expect.anything(), 1, { type: 'webp', quality: 90 })
++    expect(mocks.renderFrame).toHaveBeenCalledWith(expect.anything(), 0.5, expect.objectContaining({ type: 'jpeg' }))
++  })
++
++  it('purges every level with the frame', () => {
++    thumbs.purge('gone')
++    const deleted = mocks.deleteObject.mock.calls.map((c) => c[0] as string).sort()
++    expect(deleted).toEqual(
++      [
++        'thumb/gone.jpg',
++        'thumb/gone.ver',
++        ...[25, 50, 100].flatMap((p) => [`thumb/gone.p${p}`, `thumb/gone.p${p}ver`]),
++      ].sort(),
++    )
++  })
+ })
