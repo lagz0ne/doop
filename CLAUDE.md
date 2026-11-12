@@ -115,8 +115,9 @@ refuse to clobber unexported work).
 
 - Builds are reproducible. `git am --committer-date-is-author-date` with a fixed committer
   (`lagz0ne`, overridable via `DOOP_COMMITTER_NAME/EMAIL`) means the same pin and patches
-  give the same commit hash. pin v0.12.0 + patches 0001-0004 = `38b882d` = `v0.12.0-patched.2`,
-  exactly what is deployed.
+  give the same commit hash: pin v0.12.0 + 0001-0004 = `38b882d` = `v0.12.0-patched.2`, + 0001-0006
+  = `ed357c2` = `v0.12.0-patched.3`. `bin/doop status` shows what is released and what is deployed;
+  `patches/` can be ahead of both.
 - the deployer builds doop from the **fork's tag** with doop's own Dockerfile; we never push images.
   Patches must not need Dockerfile or dependency changes unless the hub is told (it verifies
   this before deploying).
