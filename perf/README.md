@@ -40,5 +40,6 @@ machine was loaded, so only the comparison means anything, not the absolute numb
 Playwright probes against **production** doop.example.com, logged in as the agent account
 (`~/.config/doop/doop-claude-*`), on the host's "Big canvas" canvas. They measured the
 cross-page prototype flow (`cases.json`) and gave `baseline-v0.12.0.txt`. They use the host's
-playwright install (`../host-app/node_modules`). Read-only, except `layout.new.py`, which
+playwright install (`../host-app/node_modules`). `previews.mjs [page] [dpr]` opens a page without clicking and reports what the culled frames
+show (preview level asked for, loaded or not, picture widths, cache headers). Read-only, except `layout.new.py`, which
 reorganised the host's canvas pages (a reorg) and should not be re-run blindly.

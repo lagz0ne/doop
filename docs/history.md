@@ -17,6 +17,8 @@
 | 2026-11-12 05:0x | `v0.12.0-patched.3` (`ed357c2`) = patches 0001-0006, released from a second checkout while another agent held build/doop. Deploy request a deploy request |
 | 2026-11-12 05:20 | patched.3 deployed (a deploy request). Hidden UI live. The hub left the operator API off pending the human's OK on exposure, and noted that a 401 alone doesn't prove the API is on (the session gate also answers 401) |
 | 2026-11-12 08:45 | The human chose option A, host-only, and unblocked a deploy request. `DOOP_ADMIN_TOKEN` set (token in `~/.config/doop/doop-admin-token`). Traefik route `the proxy's dynamic config` allows `/api/operator` from loopback/docker gateway only, as a case-insensitive regex, because Express matches routes case-insensitively and `/api/Operator` would have bypassed a plain prefix. doopctl connects via 127.0.0.1 (efee048). Checked: 401 "operator token required" locally, 403 publicly for every spelling, `doopctl users` lists 2 accounts. Found: 1 ownerless canvas ("Welcome Canvas", `<canvas>`) that any account can edit; left for the human |
+| 2026-11-12 05:13 | `v0.12.0-patched.4` (`6914e39`) = patches 0001-0009 (0007-0009: preview fidelity), released after the human approved release and deploy. Deploy request a deploy request, written to run only after a deploy request and to change nothing but the tag. It sat blocked behind a deploy request until the human unblocked both |
+| 2026-11-12 08:48 | patched.4 deployed (a deploy request), env unchanged. Checked on production, read-only (`perf/probes/previews.mjs`): a page of 32 culled frames asks for `/i/<id>.webp?preview&s=0.25`, all 200 `image/webp`, `immutable`, loaded 1.7 s after opening; the pictures are in the frames' own font (Public Sans) and a 12640×400 banner is 3160 px wide at 0.25 and 12640 px at 1. Rollback: tag `v0.12.0-patched.3` |
 
 The work was done in a Paseo agent session in `../host-app` (Claude transcript
 `<session>`, queue name `agent`) and deployed by the hub
@@ -50,6 +52,13 @@ while a document boots. Stored previews: 0.25 median 4.3 KB, 0.5 8.4 KB, 1 33.7 
 (`perf/refine-bench.txt`, interleaved runs on a loaded machine). Not done: a preview whose
 font or image request fails outright is still stored as current (retrying it needs a
 "degraded render" notion in thumbs.ts).
+
+Cloudflare sits in front of `/i/`: it caches `.webp`/`.jpg`/`.png` responses at the edge by
+URL including the query, and sends browsers `max-age=14400` where doop said 60 (the versioned,
+`immutable` preview URLs keep their year). So an unversioned `/i/<id>.jpg?preview` (the
+dashboard thumbnail) can be up to 4 h old in a browser, and a 404 is remembered at the edge
+for about 3 minutes (seen right after the patched.4 switch, on a URL probed during it). Not a
+doop change; hub-owned if it ever needs tuning.
 
 Upstreaming: not attempted yet. Patches 0001-0004 and 0007-0009 are generic enough to offer to
 kgoedecke/doop (0007 is a plain bug fix).
