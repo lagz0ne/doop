@@ -1,0 +1,635 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 04:40:02 +0000
+Subject: [PATCH 5/6] feat(ui): put away the team and product chrome on a
+ one-person instance
+
+This doop runs for one person and their agents (sign-up is closed), so the
+entry points to everything built for teams and the hosted product are
+hidden: workspaces (rail section, "Move to workspace"), "Owned by me" /
+"Shared with me", Community, Automations and Integrations (rail, the home
+hero's automation chip and its integrations bar), owner/member avatar
+stacks on canvas tiles, the plan line in the account menu, Share (canvas
+top bar, phone menu, canvas tile menu), the canvas Help menu (docs,
+support chat) and the Webhooks settings pane.
+
+Kept on purpose: the presence pill (it is also where a working agent
+shows), comments, the Doop Agent, Activity, Memory, Connect AI and Agent
+keys (the host's MCP key is one).
+
+Only the ways in are hidden: the pages still open by URL and the server
+is unchanged, so none of this is a permission. One flag, FULL_UI in
+src/lib/fullUi.ts, guards every spot; localStorage['doop:full-ui'] = 'on'
+and a reload bring the full UI back.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/components/AppRail.tsx   | 207 +++++++++++++++++++----------------
+ src/components/DashShell.tsx |  25 +++--
+ src/components/HomeHero.tsx  |  55 +++++-----
+ src/components/SideRail.tsx  |  41 +++----
+ src/lib/fullUi.ts            |  19 ++++
+ src/pages/CanvasPage.tsx     |  33 +++---
+ src/pages/Home.tsx           |  21 ++--
+ src/pages/Settings.tsx       |  19 ++--
+ 8 files changed, 238 insertions(+), 182 deletions(-)
+ create mode 100644 src/lib/fullUi.ts
+
+diff --git a/src/components/AppRail.tsx b/src/components/AppRail.tsx
+index e6952e1..664758c 100644
+--- a/src/components/AppRail.tsx
++++ b/src/components/AppRail.tsx
+@@ -3,6 +3,7 @@ import type { CanvasMeta, WorkspaceSummary } from '../../shared/types'
+ import { colorFor } from '../../shared/types'
+ import { api } from '../lib/api'
+ import { authClient } from '../lib/auth'
++import { FULL_UI } from '../lib/fullUi'
+ import { navigate } from '../lib/navigate'
+ import { useRailDrawer } from '../lib/railDrawer'
+ import { timeAgo } from '../lib/time'
+@@ -238,31 +239,35 @@ export function AppRail({
+       <IconButton aria-label="All canvases" on={active === 'all'} onClick={() => scope('all')}>
+         <GridIcon size="rail" />
+       </IconButton>
+-      <IconButton aria-label="Owned by me" on={active === 'mine'} onClick={() => scope('mine')}>
+-        <UserIcon size="rail" />
+-      </IconButton>
+-      <IconButton aria-label="Shared with me" on={active === 'shared'} onClick={() => scope('shared')}>
+-        <UsersIcon size="rail" />
+-      </IconButton>
+-      <Rule />
+-      {spaces.map((w) => (
+-        <IconButton key={w.id} aria-label={w.name} on={active === `ws:${w.id}`} onClick={() => scope(`ws:${w.id}`)}>
+-          <BuildingIcon size="rail" />
+-        </IconButton>
+-      ))}
+-      <IconButton aria-label="New workspace" onClick={createWorkspace}>
+-        <FolderPlusIcon size="rail" />
+-      </IconButton>
+-      <Rule />
+-      <IconButton aria-label="Community" on={active === 'community'} onClick={() => go('/community')}>
+-        <WebIcon size="rail" />
+-      </IconButton>
+-      <IconButton aria-label="Automations" on={active === 'automations'} onClick={() => go('/automations')}>
+-        <WorkflowIcon size="rail" />
+-      </IconButton>
+-      <IconButton aria-label="Integrations" on={active === 'integrations'} onClick={() => go('/integrations')}>
+-        <BlocksIcon size="rail" />
+-      </IconButton>
++      {FULL_UI && (
++        <>
++          <IconButton aria-label="Owned by me" on={active === 'mine'} onClick={() => scope('mine')}>
++            <UserIcon size="rail" />
++          </IconButton>
++          <IconButton aria-label="Shared with me" on={active === 'shared'} onClick={() => scope('shared')}>
++            <UsersIcon size="rail" />
++          </IconButton>
++          <Rule />
++          {spaces.map((w) => (
++            <IconButton key={w.id} aria-label={w.name} on={active === `ws:${w.id}`} onClick={() => scope(`ws:${w.id}`)}>
++              <BuildingIcon size="rail" />
++            </IconButton>
++          ))}
++          <IconButton aria-label="New workspace" onClick={createWorkspace}>
++            <FolderPlusIcon size="rail" />
++          </IconButton>
++          <Rule />
++          <IconButton aria-label="Community" on={active === 'community'} onClick={() => go('/community')}>
++            <WebIcon size="rail" />
++          </IconButton>
++          <IconButton aria-label="Automations" on={active === 'automations'} onClick={() => go('/automations')}>
++            <WorkflowIcon size="rail" />
++          </IconButton>
++          <IconButton aria-label="Integrations" on={active === 'integrations'} onClick={() => go('/integrations')}>
++            <BlocksIcon size="rail" />
++          </IconButton>
++        </>
++      )}
+       <Rule />
+       {agents.map((a) => (
+         <span key={a.name} className="grid size-8 place-items-center" title={a.name}>
+@@ -319,82 +324,90 @@ export function AppRail({
+         >
+           All canvases
+         </DashNavItem>
+-        <DashNavItem
+-          density="rail"
+-          icon={<UserIcon size="rail" />}
+-          active={active === 'mine'}
+-          onClick={() => scope('mine')}
+-        >
+-          Owned by me
+-        </DashNavItem>
+-        <DashNavItem
+-          density="rail"
+-          icon={<UsersIcon size="rail" />}
+-          active={active === 'shared'}
+-          onClick={() => scope('shared')}
+-        >
+-          Shared with me
+-        </DashNavItem>
++        {FULL_UI && (
++          <>
++            <DashNavItem
++              density="rail"
++              icon={<UserIcon size="rail" />}
++              active={active === 'mine'}
++              onClick={() => scope('mine')}
++            >
++              Owned by me
++            </DashNavItem>
++            <DashNavItem
++              density="rail"
++              icon={<UsersIcon size="rail" />}
++              active={active === 'shared'}
++              onClick={() => scope('shared')}
++            >
++              Shared with me
++            </DashNavItem>
++          </>
++        )}
+       </nav>
+ 
+-      <DashSectionLabel density="rail">Workspaces</DashSectionLabel>
+-      <nav className="flex flex-col gap-0.5">
+-        {spaces.map((w) => (
+-          <DashNavItem
+-            key={w.id}
+-            density="rail"
+-            icon={<BuildingIcon size="rail" />}
+-            count={
+-              w.active ? (
+-                <em className="not-italic">{workspaceCounts.get(w.id) ?? 0}</em>
+-              ) : (
+-                <span className="inline-flex items-center gap-1" title="No plan yet">
+-                  <LockIcon width={12} height={12} aria-hidden />
+-                </span>
+-              )
+-            }
+-            active={active === `ws:${w.id}`}
+-            onClick={() => scope(`ws:${w.id}`)}
+-          >
+-            {w.name}
+-          </DashNavItem>
+-        ))}
+-        <DashNavItem density="rail" icon={<FolderPlusIcon size="rail" />} onClick={createWorkspace}>
+-          {spaces.length ? 'New workspace' : 'Create workspace'}
+-        </DashNavItem>
+-      </nav>
++      {FULL_UI && (
++        <>
++          <DashSectionLabel density="rail">Workspaces</DashSectionLabel>
++          <nav className="flex flex-col gap-0.5">
++            {spaces.map((w) => (
++              <DashNavItem
++                key={w.id}
++                density="rail"
++                icon={<BuildingIcon size="rail" />}
++                count={
++                  w.active ? (
++                    <em className="not-italic">{workspaceCounts.get(w.id) ?? 0}</em>
++                  ) : (
++                    <span className="inline-flex items-center gap-1" title="No plan yet">
++                      <LockIcon width={12} height={12} aria-hidden />
++                    </span>
++                  )
++                }
++                active={active === `ws:${w.id}`}
++                onClick={() => scope(`ws:${w.id}`)}
++              >
++                {w.name}
++              </DashNavItem>
++            ))}
++            <DashNavItem density="rail" icon={<FolderPlusIcon size="rail" />} onClick={createWorkspace}>
++              {spaces.length ? 'New workspace' : 'Create workspace'}
++            </DashNavItem>
++          </nav>
+ 
+-      <DashSectionLabel density="rail">Explore</DashSectionLabel>
+-      <nav className="flex flex-col gap-0.5">
+-        <DashNavItem
+-          density="rail"
+-          icon={<WebIcon size="rail" />}
+-          active={active === 'community'}
+-          onClick={() => go('/community')}
+-        >
+-          Community
+-        </DashNavItem>
+-      </nav>
++          <DashSectionLabel density="rail">Explore</DashSectionLabel>
++          <nav className="flex flex-col gap-0.5">
++            <DashNavItem
++              density="rail"
++              icon={<WebIcon size="rail" />}
++              active={active === 'community'}
++              onClick={() => go('/community')}
++            >
++              Community
++            </DashNavItem>
++          </nav>
+ 
+-      <DashSectionLabel density="rail">Resources</DashSectionLabel>
+-      <nav className="flex flex-col gap-0.5">
+-        <DashNavItem
+-          density="rail"
+-          icon={<WorkflowIcon size="rail" />}
+-          active={active === 'automations'}
+-          onClick={() => go('/automations')}
+-        >
+-          Automations
+-        </DashNavItem>
+-        <DashNavItem
+-          density="rail"
+-          icon={<BlocksIcon size="rail" />}
+-          active={active === 'integrations'}
+-          onClick={() => go('/integrations')}
+-        >
+-          Integrations
+-        </DashNavItem>
+-      </nav>
++          <DashSectionLabel density="rail">Resources</DashSectionLabel>
++          <nav className="flex flex-col gap-0.5">
++            <DashNavItem
++              density="rail"
++              icon={<WorkflowIcon size="rail" />}
++              active={active === 'automations'}
++              onClick={() => go('/automations')}
++            >
++              Automations
++            </DashNavItem>
++            <DashNavItem
++              density="rail"
++              icon={<BlocksIcon size="rail" />}
++              active={active === 'integrations'}
++              onClick={() => go('/integrations')}
++            >
++              Integrations
++            </DashNavItem>
++          </nav>
++        </>
++      )}
+ 
+       {/* a page's own group keeps the drawer's contract: a pick puts it away */}
+       <div
+diff --git a/src/components/DashShell.tsx b/src/components/DashShell.tsx
+index f2a6d58..f5ac173 100644
+--- a/src/components/DashShell.tsx
++++ b/src/components/DashShell.tsx
+@@ -1,5 +1,6 @@
+ import * as React from 'react'
+ import { authClient } from '../lib/auth'
++import { FULL_UI } from '../lib/fullUi'
+ import { navigate } from '../App'
+ import { posthog } from '../lib/posthog'
+ import { useMe } from '../lib/me'
+@@ -71,17 +72,19 @@ export function AccountMenu({
+         </DropdownMenuLabel>
+         {/* the plan is a workspace thing; this line says which side of it the
+             account is on — a member of a live paid workspace is on Team */}
+-        <div className="mx-2.5 mb-2 flex items-center gap-[7px] text-caption text-ink-soft">
+-          {me?.plan === 'team' ? (
+-            <>
+-              <Badge tone="accent">team</Badge> Team plan
+-            </>
+-          ) : (
+-            <>
+-              <Badge>free</Badge> Personal plan
+-            </>
+-          )}
+-        </div>
++        {FULL_UI && (
++          <div className="mx-2.5 mb-2 flex items-center gap-[7px] text-caption text-ink-soft">
++            {me?.plan === 'team' ? (
++              <>
++                <Badge tone="accent">team</Badge> Team plan
++              </>
++            ) : (
++              <>
++                <Badge>free</Badge> Personal plan
++              </>
++            )}
++          </div>
++        )}
+         <DropdownMenuSeparator />
+         <DropdownMenuItem onSelect={() => navigate('/settings')}>
+           <GearIcon size="rail" /> Settings
+diff --git a/src/components/HomeHero.tsx b/src/components/HomeHero.tsx
+index 246d533..e6afcd3 100644
+--- a/src/components/HomeHero.tsx
++++ b/src/components/HomeHero.tsx
+@@ -1,4 +1,5 @@
+ import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
++import { FULL_UI } from '../lib/fullUi'
+ import { DRAFT_OPTIONS, DRAFTS_STORAGE_KEY, isDraftCount, readStoredDrafts, type DraftCount } from '../lib/homePrompt'
+ import { DoopMark } from './Logo'
+ import { ModelPicker } from './ModelPicker'
+@@ -59,7 +60,7 @@ interface Chip {
+ 
+ const chipIcon = { width: 13, height: 13 } as const
+ 
+-const CHIPS: Chip[] = [
++const ALL_CHIPS: Chip[] = [
+   {
+     id: 'landing',
+     label: 'Draft a landing page',
+@@ -94,6 +95,8 @@ const CHIPS: Chip[] = [
+   },
+ ]
+ 
++const CHIPS = FULL_UI ? ALL_CHIPS : ALL_CHIPS.filter((chip) => chip.action !== 'onAutomations')
++
+ /** the beam walks the strip while nobody hovers, like a slow carousel */
+ const BEAM_STEP_MS = 4000
+ const MAX_COMPOSER_LINES = 6
+@@ -314,32 +317,34 @@ export function HomeHero({
+             </IconButton>
+           </div>
+         </div>
+-        <Pressable
+-          focus="ring"
+-          onClick={actions.onIntegrations}
+-          className="group mx-[14px] flex w-[calc(100%-28px)] items-center rounded-b-card bg-sub px-5 pb-2.5 pt-3 text-body text-ink-soft transition-colors hover:text-ink"
+-        >
+-          Connect your existing designs for better results
+-          <ChevronRightIcon
+-            width={12}
+-            height={12}
+-            className="ml-1.5 -translate-x-0.5 text-ink-faint opacity-0 blur-[2px] transition-[opacity,transform,filter] duration-fast ease-out-quad group-hover:translate-x-0 group-hover:opacity-100 group-hover:blur-none motion-reduce:transition-none"
+-            aria-hidden
+-          />
+-          {/* the marks rest a little faded and desaturated; the bar's hover wakes the
+-              row, and the mark under the pointer comes fully to life and lifts */}
+-          <span
+-            className="marks ml-auto flex items-center gap-[9px] [&>*]:opacity-75 [&>*]:saturate-[.8] [&>*]:transition-[opacity,filter,transform] [&>*]:duration-fast [&>*]:ease-out-quad group-hover:[&>*]:opacity-90 group-hover:[&>*]:saturate-[.95] [&>*:hover]:-translate-y-px [&>*:hover]:!opacity-100 [&>*:hover]:!saturate-100 motion-reduce:[&>*]:transition-none"
+-            aria-hidden
++        {FULL_UI && (
++          <Pressable
++            focus="ring"
++            onClick={actions.onIntegrations}
++            className="group mx-[14px] flex w-[calc(100%-28px)] items-center rounded-b-card bg-sub px-5 pb-2.5 pt-3 text-body text-ink-soft transition-colors hover:text-ink"
+           >
+-            <span className="grid size-4 place-items-center rounded-tag bg-surface shadow-ring">
+-              <BrandMark brand="figma" size={12} />
++            Connect your existing designs for better results
++            <ChevronRightIcon
++              width={12}
++              height={12}
++              className="ml-1.5 -translate-x-0.5 text-ink-faint opacity-0 blur-[2px] transition-[opacity,transform,filter] duration-fast ease-out-quad group-hover:translate-x-0 group-hover:opacity-100 group-hover:blur-none motion-reduce:transition-none"
++              aria-hidden
++            />
++            {/* the marks rest a little faded and desaturated; the bar's hover wakes the
++                row, and the mark under the pointer comes fully to life and lifts */}
++            <span
++              className="marks ml-auto flex items-center gap-[9px] [&>*]:opacity-75 [&>*]:saturate-[.8] [&>*]:transition-[opacity,filter,transform] [&>*]:duration-fast [&>*]:ease-out-quad group-hover:[&>*]:opacity-90 group-hover:[&>*]:saturate-[.95] [&>*:hover]:-translate-y-px [&>*:hover]:!opacity-100 [&>*:hover]:!saturate-100 motion-reduce:[&>*]:transition-none"
++              aria-hidden
++            >
++              <span className="grid size-4 place-items-center rounded-tag bg-surface shadow-ring">
++                <BrandMark brand="figma" size={12} />
++              </span>
++              <BrandMark brand="github" size={16} className="text-ink" />
++              <BrandMark brand="canva" size={16} />
++              <BrandMark brand="photoshop" size={16} />
+             </span>
+-            <BrandMark brand="github" size={16} className="text-ink" />
+-            <BrandMark brand="canva" size={16} />
+-            <BrandMark brand="photoshop" size={16} />
+-          </span>
+-        </Pressable>
++          </Pressable>
++        )}
+       </div>
+     </section>
+   )
+diff --git a/src/components/SideRail.tsx b/src/components/SideRail.tsx
+index e2e1cb0..f16f2c3 100644
+--- a/src/components/SideRail.tsx
++++ b/src/components/SideRail.tsx
+@@ -1,5 +1,6 @@
+ import type { CSSProperties } from 'react'
+ import { useStore, type PanelTab } from '../lib/store'
++import { FULL_UI } from '../lib/fullUi'
+ import { useOpenThreadCount } from '../lib/comments'
+ import { navigate } from '../App'
+ import { cn } from '@/lib/utils'
+@@ -62,25 +63,27 @@ export function SideRail({
+         <ToolbarControl label="Settings" onClick={() => navigate('/settings')}>
+           <GearIcon />
+         </ToolbarControl>
+-        <DropdownMenu>
+-          <Tooltip label="Help" side="left">
+-            <DropdownMenuTrigger asChild>
+-              <ToolbarButton aria-label="Help" className="data-[state=open]:bg-paper-deep data-[state=open]:text-ink">
+-                <HelpIcon />
+-              </ToolbarButton>
+-            </DropdownMenuTrigger>
+-          </Tooltip>
+-          <DropdownMenuContent side="left" align="end" width="sm">
+-            <DropdownMenuItem asChild>
+-              <a href="/docs" target="_blank" rel="noopener noreferrer">
+-                <BookOpenIcon /> Docs
+-              </a>
+-            </DropdownMenuItem>
+-            <DropdownMenuItem onSelect={() => openSupportChat()}>
+-              <CommentIcon /> Contact support
+-            </DropdownMenuItem>
+-          </DropdownMenuContent>
+-        </DropdownMenu>
++        {FULL_UI && (
++          <DropdownMenu>
++            <Tooltip label="Help" side="left">
++              <DropdownMenuTrigger asChild>
++                <ToolbarButton aria-label="Help" className="data-[state=open]:bg-paper-deep data-[state=open]:text-ink">
++                  <HelpIcon />
++                </ToolbarButton>
++              </DropdownMenuTrigger>
++            </Tooltip>
++            <DropdownMenuContent side="left" align="end" width="sm">
++              <DropdownMenuItem asChild>
++                <a href="/docs" target="_blank" rel="noopener noreferrer">
++                  <BookOpenIcon /> Docs
++                </a>
++              </DropdownMenuItem>
++              <DropdownMenuItem onSelect={() => openSupportChat()}>
++                <CommentIcon /> Contact support
++              </DropdownMenuItem>
++            </DropdownMenuContent>
++          </DropdownMenu>
++        )}
+         <Tooltip label={`You are “${me.name}” — click to change your name`} side="left">
+           <button
+             type="button"
+diff --git a/src/lib/fullUi.ts b/src/lib/fullUi.ts
+new file mode 100644
+index 0000000..d77c606
+--- /dev/null
++++ b/src/lib/fullUi.ts
+@@ -0,0 +1,19 @@
++/**
++ * This build runs for one person and their agents, so the chrome for the
++ * rest of the product is put away: workspaces, sharing, the community,
++ * automations, integrations, webhooks, the plan line and the help menu.
++ *
++ * Only the ways in are hidden. The pages still open by their URL and the
++ * server is untouched, so nothing here is a permission.
++ *
++ * `localStorage['doop:full-ui'] = 'on'` (then reload) brings it all back.
++ */
++function readFullUi(): boolean {
++  try {
++    return localStorage.getItem('doop:full-ui') === 'on'
++  } catch {
++    return false
++  }
++}
++
++export const FULL_UI = readFullUi()
+diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
+index d475e99..7ffcf0b 100644
+--- a/src/pages/CanvasPage.tsx
++++ b/src/pages/CanvasPage.tsx
+@@ -57,6 +57,7 @@ import { clearHistory, redo, undo } from '../lib/history'
+ import { deleteSelection, duplicateLayers, toggleLockSelection, toggleSelectionHidden } from '../lib/layerEdits'
+ import { copyLayers, hasElementClip, pasteLayer } from '../lib/elementClipboard'
+ import { authClient } from '../lib/auth'
++import { FULL_UI } from '../lib/fullUi'
+ import { posthog } from '../lib/posthog'
+ import { useIsMobile } from '../hooks/use-mobile'
+ import { cn } from '@/lib/utils'
+@@ -637,10 +638,12 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
+             </Button>
+           </BarPill>
+           <BarPill>
+-            <Button variant="bare" className={barPillBtn} onClick={() => setShowShare(true)}>
+-              <ShareUpIcon className="size-3.5" />
+-              Share
+-            </Button>
++            {FULL_UI && (
++              <Button variant="bare" className={barPillBtn} onClick={() => setShowShare(true)}>
++                <ShareUpIcon className="size-3.5" />
++                Share
++              </Button>
++            )}
+             <Tooltip
+               label={
+                 selectedId ? 'Present from this frame' : playFrom ? 'Present the prototype' : 'Add a frame to present'
+@@ -875,16 +878,18 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
+                     <ImportIcon /> Import website
+                   </Button>
+                 )}
+-                <Button
+-                  variant="ghost"
+-                  className="h-11 justify-start gap-2.5 border-line bg-surface px-4"
+-                  onClick={() => {
+-                    setShowMobileActions(false)
+-                    setShowShare(true)
+-                  }}
+-                >
+-                  <ShareIcon /> Share canvas
+-                </Button>
++                {FULL_UI && (
++                  <Button
++                    variant="ghost"
++                    className="h-11 justify-start gap-2.5 border-line bg-surface px-4"
++                    onClick={() => {
++                      setShowMobileActions(false)
++                      setShowShare(true)
++                    }}
++                  >
++                    <ShareIcon /> Share canvas
++                  </Button>
++                )}
+                 {/* the phone's tool strip has no room for the Edit / Prototype
+                     switch, so Prototype mode toggles here */}
+                 <Button
+diff --git a/src/pages/Home.tsx b/src/pages/Home.tsx
+index 302d0bd..9219430 100644
+--- a/src/pages/Home.tsx
++++ b/src/pages/Home.tsx
+@@ -3,6 +3,7 @@ import type { Canvas, CanvasMeta, WorkspaceSummary } from '../../shared/types'
+ import { colorFor } from '../../shared/types'
+ import { api, errorMessage, paywalledWorkspace } from '../lib/api'
+ import { authClient } from '../lib/auth'
++import { FULL_UI } from '../lib/fullUi'
+ import { navigate } from '../App'
+ import { timeAgo } from '../lib/time'
+ import { useStore } from '../lib/store'
+@@ -427,7 +428,7 @@ export function Home() {
+                             workspace={scopedWorkspace ? undefined : workspaceName(c.workspaceId)}
+                           />
+                         </div>
+-                        <PeopleStack canvas={c} />
++                        {FULL_UI && <PeopleStack canvas={c} />}
+                       </TileBody>
+                     </Pressable>
+                     <CanvasActions
+@@ -469,9 +470,11 @@ export function Home() {
+                       <span className="hidden w-[82px] flex-none text-caption text-ink-faint sm:block">
+                         {c.frameCount} frame{c.frameCount === 1 ? '' : 's'}
+                       </span>
+-                      <span className="hidden w-[72px] flex-none xs:flex">
+-                        <PeopleStack canvas={c} />
+-                      </span>
++                      {FULL_UI && (
++                        <span className="hidden w-[72px] flex-none xs:flex">
++                          <PeopleStack canvas={c} />
++                        </span>
++                      )}
+                       <span className="hidden w-[62px] flex-none gap-[3px] xs:flex">
+                         {(c.agents ?? []).slice(0, 3).map((a) => (
+                           <AgentIcon key={a.name} name={a.name} size={11} color={colorFor(a.name)} />
+@@ -682,13 +685,15 @@ function CanvasActions({
+         </IconButton>
+       </DropdownMenuTrigger>
+       <DropdownMenuContent width="md">
+-        <DropdownMenuItem onSelect={onShare}>
+-          <ShareIcon className="size-4" /> Share
+-        </DropdownMenuItem>
++        {FULL_UI && (
++          <DropdownMenuItem onSelect={onShare}>
++            <ShareIcon className="size-4" /> Share
++          </DropdownMenuItem>
++        )}
+         <DropdownMenuItem disabled={duplicating} onSelect={onDuplicate}>
+           <CopyIcon className="size-4" /> {duplicating ? 'Duplicating…' : 'Duplicate'}
+         </DropdownMenuItem>
+-        {onMove && (
++        {FULL_UI && onMove && (
+           <DropdownMenuItem onSelect={onMove}>
+             <BuildingIcon className="size-4" /> {canvas.workspaceId ? 'Move…' : 'Move to workspace…'}
+           </DropdownMenuItem>
+diff --git a/src/pages/Settings.tsx b/src/pages/Settings.tsx
+index 1e5cdf7..d250c27 100644
+--- a/src/pages/Settings.tsx
++++ b/src/pages/Settings.tsx
+@@ -1,5 +1,6 @@
+ import { useState } from 'react'
+ import { navigate } from '../App'
++import { FULL_UI } from '../lib/fullUi'
+ import { ModelAccountPanel } from '../components/ModelAccount'
+ import { ImageModelCard } from '../components/ImageModelCard'
+ import { useAllowance } from '../components/TeamAllowance'
+@@ -117,14 +118,16 @@ export function Settings() {
+           >
+             Agent keys
+           </DashNavItem>
+-          <DashNavItem
+-            density="rail"
+-            icon={<BellIcon size="rail" />}
+-            active={pane === 'webhooks'}
+-            onClick={() => setPane('webhooks')}
+-          >
+-            Webhooks
+-          </DashNavItem>
++          {FULL_UI && (
++            <DashNavItem
++              density="rail"
++              icon={<BellIcon size="rail" />}
++              active={pane === 'webhooks'}
++              onClick={() => setPane('webhooks')}
++            >
++              Webhooks
++            </DashNavItem>
++          )}
+           <DashNavItem
+             density="rail"
+             icon={<UserIcon size="rail" />}

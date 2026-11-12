@@ -1,0 +1,768 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 04:53:20 +0000
+Subject: [PATCH 6/6] feat(operator): a token-gated API for users, sharing,
+ canvas owners and agent keys
+
+Running a one-person instance with sign-up closed left no way to manage it:
+a new account is refused by SIGNUP_EMAIL_DOMAINS, inviting and link access
+are owner-only, admin "view as" is read-only, and production without SMTP
+promotes no admin at all. Writing the database by hand is not an answer
+either: canvas members, owners and link access live in the in-memory store
+with write-through, so such a write is invisible until a restart, or
+overwritten.
+
+/api/operator (server/operator.ts) is the API a CLI (doopctl) drives, the
+way mattermost's mmctl drives its server. It answers only a bearer
+DOOP_ADMIN_TOKEN (>= 32 chars, compared in constant time), is absent (404)
+while the token is unset, which is the default, and sits ahead of the
+session gate, so no account or role is involved. Every write is logged as
+"[operator] ...".
+
+- users: list, show, create (sign-up allowlist does not apply, and there is
+  no first canvas or demo; a generated password comes back once), set
+  password (optionally signing out), ban / unban, delete (?dryRun=1 lists
+  the canvases it would delete, same rule as account deletion; agent keys
+  go too)
+- agent keys for any user: list, mint (secret returned once), revoke
+- canvases: list with owner, members, link access; show access; add /
+  remove a member by email; set link access; hand over ownership (the
+  previous owner stays a member unless keepPrevious is false). Room roles
+  are refreshed, so a removed member's open tab loses access at once.
+
+A user is addressed by id or email. auth.ts marks operator creation with an
+AsyncLocalStorage, so a browser sign-up running concurrently is still
+checked. store.setOwner is new.
+
+tests/operator.test.ts runs it against a real server with sign-up closed
+(10 tests); the 40 existing test files that sign users up, plus admin,
+agent keys, share links and workspaces, still pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .env.example           |   8 +
+ server/auth.ts         |  24 ++-
+ server/env.ts          |   8 +
+ server/index.ts        |   5 +
+ server/operator.ts     | 381 +++++++++++++++++++++++++++++++++++++++++
+ server/store.ts        |  12 ++
+ tests/operator.test.ts | 187 ++++++++++++++++++++
+ 7 files changed, 621 insertions(+), 4 deletions(-)
+ create mode 100644 server/operator.ts
+ create mode 100644 tests/operator.test.ts
+
+diff --git a/.env.example b/.env.example
+index b3b1dd9..cdac034 100644
+--- a/.env.example
++++ b/.env.example
+@@ -41,6 +41,14 @@
+ # nobody and says so at boot; local development promotes without verifying.
+ #ADMIN_EMAILS=you@example.com
+ 
++# Operator API for the doopctl CLI (/api/operator: users, sharing, canvas
++# owners, agent keys), authenticated by this bearer token alone — no account
++# or admin role involved, and it works while sign-up is closed. Unset = the
++# API does not exist. At least 32 characters: `openssl rand -hex 32`.
++# Whoever holds it controls every account and canvas; keep it with the
++# instance's other secrets.
++#DOOP_ADMIN_TOKEN=
++
+ # Optional SSO against an external OIDC provider (Zitadel, Okta, Authentik,
+ # Keycloak, etc.), alongside email/password — not a replacement for it.
+ # Set all three of ISSUER/CLIENT_ID/CLIENT_SECRET together to enable; the
+diff --git a/server/auth.ts b/server/auth.ts
+index 2aa23b7..74f1ed1 100644
+--- a/server/auth.ts
++++ b/server/auth.ts
+@@ -13,6 +13,20 @@ import { acceptInvites } from './workspaces.ts'
+ import { purgeUserData } from './accountDeletion.ts'
+ import { createHash } from 'node:crypto'
+ import { createRemoteJWKSet, jwtVerify } from 'jose'
++import { AsyncLocalStorage } from 'node:async_hooks'
++
++/**
++ * Set while the operator API (server/operator.ts) creates an account. Such an
++ * account is someone being let in by whoever runs the instance, not a
++ * sign-up: SIGNUP_EMAIL_DOMAINS does not apply, and there is no first canvas
++ * or demo. Scoped to that one call's async chain, so a browser sign-up
++ * running at the same moment is checked as usual.
++ */
++const operatorCreation = new AsyncLocalStorage<true>()
++
++export function createdByOperator<T>(create: () => Promise<T>): Promise<T> {
++  return operatorCreation.run(true, create)
++}
+ 
+ /**
+  * better-auth on our own database: email/password + cookie sessions now;
+@@ -457,12 +471,14 @@ function buildAuth() {
+       user: {
+         create: {
+           before: async (user) => {
+-            assertSignupDomainAllowed(user.email)
++            if (!operatorCreation.getStore()) assertSignupDomainAllowed(user.email)
+           },
+           after: async (user) => {
+-            const first = (user.name || 'Your').split(/\s+/)[0]
+-            const canvas = store.createCanvas(`${first}'s first canvas`, user.id)
+-            demo.markPending(canvas.id)
++            if (!operatorCreation.getStore()) {
++              const first = (user.name || 'Your').split(/\s+/)[0]
++              const canvas = store.createCanvas(`${first}'s first canvas`, user.id)
++              demo.markPending(canvas.id)
++            }
+             /* the other half of the ADMIN_EMAILS reconcile: syncAdmins covers
+                people who already existed at boot, this covers signups after.
+                With SMTP on, a fresh signup is never verified yet, so the
+diff --git a/server/env.ts b/server/env.ts
+index 0b29c96..c0a5d88 100644
+--- a/server/env.ts
++++ b/server/env.ts
+@@ -57,6 +57,12 @@ const int = (minimum: number) =>
+ 
+ /** A per-minute cap: 0 would refuse every call, so the floor is 1. */
+ const perMinute = int(1)
++
++/** A bearer secret worth the name: at least 32 characters. */
++const secret = makeExactValidator<string>((input) => {
++  if (input.length < 32) throw new TypeError('Invalid secret (expected at least 32 characters)')
++  return input
++})
+ const nonNegativeInt = int(0)
+ 
+ /* ------------------------------------------------------------------ */
+@@ -81,6 +87,8 @@ const schema = {
+   TRUSTED_ORIGINS: list({ default: [] }),
+   SIGNUP_EMAIL_DOMAINS: list({ default: [] }),
+   ADMIN_EMAILS: list({ default: [] }),
++  /* unset = the operator API (server/operator.ts) does not exist */
++  DOOP_ADMIN_TOKEN: secret({ default: undefined }),
+   REQUIRE_EMAIL_VERIFICATION: bool({ default: true }),
+   OIDC_ISSUER: str({ default: undefined }),
+   OIDC_CLIENT_ID: str({ default: undefined }),
+diff --git a/server/index.ts b/server/index.ts
+index b044dcd..6470169 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -35,6 +35,7 @@ import {
+ import { isLinkAccess, roleAllows, type CanvasRole } from '../shared/canvasRole.ts'
+ import { auth, initAuth, syncAdmins, getUserName, loginProvidersConfig } from './auth.ts'
+ import { adminRouter } from './admin.ts'
++import { operatorRouter } from './operator.ts'
+ import { communityRouter, parseListing, publishableFrames } from './community.ts'
+ import { automationsRouter, startScheduler } from './automations.ts'
+ import { integrationsRouter, relayDesktopCallback } from './integrations.ts'
+@@ -632,6 +633,10 @@ app.post('/ingest/:key', express.json({ limit: '10mb', type: () => true }), (req
+   })
+ })
+ 
++/* the operator API (doopctl): bearer DOOP_ADMIN_TOKEN only, absent while it
++   is unset — see server/operator.ts. Ahead of the session gate on purpose. */
++app.use('/api/operator', operatorRouter(refreshRoomRoles))
++
+ /* everything else under /api requires a logged-in user; the session's user
+    is authoritative for names — clients don't get to pick who they are */
+ interface SessionUser {
+diff --git a/server/operator.ts b/server/operator.ts
+new file mode 100644
+index 0000000..e9762ea
+--- /dev/null
++++ b/server/operator.ts
+@@ -0,0 +1,381 @@
++import express from 'express'
++import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
++import { eq, sql } from 'drizzle-orm'
++import { env } from './env.ts'
++import { db } from './db/index.ts'
++import * as authSchema from './db/auth-schema.ts'
++import { agentKeys } from './db/schema.ts'
++import { store } from './store.ts'
++import { auth, createdByOperator } from './auth.ts'
++import { purgeUserData } from './accountDeletion.ts'
++import { createAgentKey, deleteAgentKey, listAgentKeys } from './agentKeys.ts'
++import { isLinkAccess } from '../shared/canvasRole.ts'
++import type { Canvas } from '../shared/types.ts'
++
++/**
++ * The operator API: users, sharing, canvases and agent keys for whoever runs
++ * this instance, driven by a CLI (doopctl) rather than a browser.
++ *
++ * It answers only a bearer DOOP_ADMIN_TOKEN, and is not there at all (404)
++ * while the token is unset, which is the default. It is mounted ahead of the
++ * /api session gate: no cookie, no account, no admin role is involved, so it
++ * works on an instance where sign-up is closed and nobody is an admin.
++ *
++ * Everything goes through the running server, never around it: canvas
++ * membership, owners and link access live in the in-memory store with
++ * write-through to Postgres, so a tool writing the database directly would be
++ * invisible until a restart, or overwritten by the next write. Each write is
++ * logged as `[operator] …` for the audit trail.
++ *
++ * A user is addressed by id or by email (anything with an @).
++ */
++
++type Refresh = (canvasId: string) => void
++
++interface UserRow {
++  id: string
++  name: string
++  email: string
++  role: string | null
++  banned: boolean | null
++  createdAt: Date
++}
++
++const userColumns = {
++  id: authSchema.user.id,
++  name: authSchema.user.name,
++  email: authSchema.user.email,
++  role: authSchema.user.role,
++  banned: authSchema.user.banned,
++  createdAt: authSchema.user.createdAt,
++}
++
++function digest(value: string): Buffer {
++  return createHash('sha256').update(value).digest()
++}
++
++/** Constant-time: both sides are hashed to the same length first. */
++function tokenMatches(presented: string, expected: string): boolean {
++  return timingSafeEqual(digest(presented), digest(expected))
++}
++
++function audit(line: string) {
++  console.log(`[operator] ${line}`)
++}
++
++async function findUser(ref: string): Promise<UserRow | undefined> {
++  const key = ref.trim()
++  const where = key.includes('@')
++    ? eq(sql`lower(${authSchema.user.email})`, key.toLowerCase())
++    : eq(authSchema.user.id, key)
++  const [row] = await db.select(userColumns).from(authSchema.user).where(where)
++  return row
++}
++
++function publicUser(u: UserRow) {
++  return { id: u.id, name: u.name, email: u.email, role: u.role ?? 'user', banned: !!u.banned }
++}
++
++/** What deleting this user takes with it: the canvases only they can reach
++ *  (the same rule as purgeUserData), and the ones they merely leave. */
++function deletionPlan(userId: string) {
++  const deletes: { id: string; name: string; frames: number }[] = []
++  const leaves: { id: string; name: string }[] = []
++  for (const c of store.allCanvases()) {
++    const others = (c.memberIds ?? []).filter((id) => id !== userId)
++    if (c.ownerId === userId && others.length === 0 && !c.workspaceId)
++      deletes.push({ id: c.id, name: c.name, frames: c.frames.length })
++    else if (c.ownerId === userId) leaves.push({ id: c.id, name: c.name })
++    else if (c.memberIds?.includes(userId)) leaves.push({ id: c.id, name: c.name })
++  }
++  return { deletes, leaves }
++}
++
++/** A route parameter; Express always sets the ones its path names. */
++function param(req: express.Request, name: string): string {
++  return req.params[name] ?? ''
++}
++
++function randomPassword(): string {
++  return randomBytes(18).toString('base64url')
++}
++
++const PASSWORD_MIN = 8
++
++export function operatorRouter(refreshRoomRoles: Refresh): express.Router {
++  const router = express.Router()
++  /* Express 4 does not catch a rejected handler; hand the error on instead */
++  type Handler = (req: express.Request, res: express.Response) => Promise<unknown>
++  const wrap =
++    (fn: Handler): express.RequestHandler =>
++    (req, res, next) =>
++      void fn(req, res).catch(next)
++  const get = (path: string, fn: Handler) => router.get(path, wrap(fn))
++  const post = (path: string, fn: Handler) => router.post(path, wrap(fn))
++  const put = (path: string, fn: Handler) => router.put(path, wrap(fn))
++  const del = (path: string, fn: Handler) => router.delete(path, wrap(fn))
++
++  /* the token gate: absent token = no surface at all */
++  router.use((req, res, next) => {
++    const expected = env.DOOP_ADMIN_TOKEN
++    if (!expected) return res.status(404).end()
++    const presented = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? '')?.[1]?.trim()
++    if (!presented || !tokenMatches(presented, expected)) {
++      audit(`refused ${req.method} ${req.path} from ${req.ip}`)
++      return res.status(401).json({ error: 'operator token required' })
++    }
++    res.set('Cache-Control', 'no-store')
++    next()
++  })
++
++  /* ---------------------------------------------------------------- users */
++
++  get('/users', async (_req, res) => {
++    const rows = await db.select(userColumns).from(authSchema.user)
++    const owned = new Map<string, number>()
++    const member = new Map<string, number>()
++    for (const c of store.allCanvases()) {
++      if (c.ownerId) owned.set(c.ownerId, (owned.get(c.ownerId) ?? 0) + 1)
++      for (const id of c.memberIds ?? []) member.set(id, (member.get(id) ?? 0) + 1)
++    }
++    res.json(
++      rows
++        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
++        .map((u) => ({
++          ...publicUser(u),
++          createdAt: u.createdAt.getTime(),
++          owns: owned.get(u.id) ?? 0,
++          memberOf: member.get(u.id) ?? 0,
++        })),
++    )
++  })
++
++  /** Create an account, sign-up allowlist or not. No first canvas and no demo:
++   *  this is a person being let in, not a new signup to onboard. Without a
++   *  password one is generated and returned, once. */
++  post('/users', async (req, res) => {
++    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : ''
++    const name = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim() : email.split('@')[0]
++    const given = typeof req.body?.password === 'string' ? req.body.password : undefined
++    if (!email.includes('@')) return res.status(400).json({ error: 'email required' })
++    if (given !== undefined && given.length < PASSWORD_MIN)
++      return res.status(400).json({ error: `password must be at least ${PASSWORD_MIN} characters` })
++    if (await findUser(email)) return res.status(409).json({ error: `${email} already has an account` })
++    const password = given ?? randomPassword()
++    let created
++    try {
++      created = await createdByOperator(() =>
++        auth.api.createUser({ body: { email, name: name ?? email, password, role: 'user' } }),
++      )
++    } catch (err) {
++      return res.status(400).json({ error: err instanceof Error ? err.message : 'could not create the user' })
++    }
++    audit(`created user ${email} (${created.user.id})`)
++    res.status(201).json({
++      user: { id: created.user.id, name: created.user.name, email: created.user.email },
++      ...(given === undefined && { password }),
++    })
++  })
++
++  get('/users/:user', async (req, res) => {
++    const u = await findUser(param(req, 'user'))
++    if (!u) return res.status(404).json({ error: 'no such user' })
++    const canvases = store
++      .allCanvases()
++      .filter((c) => c.ownerId === u.id || c.memberIds?.includes(u.id))
++      .map((c) => ({ id: c.id, name: c.name, role: c.ownerId === u.id ? 'owner' : 'member' }))
++    res.json({ ...publicUser(u), createdAt: u.createdAt.getTime(), canvases, keys: await listAgentKeys(u.id) })
++  })
++
++  /** Set (or generate) a password. `signOut` also ends the user's browser
++   *  sessions; agent keys are separate credentials and keep working. */
++  post('/users/:user/password', async (req, res) => {
++    const u = await findUser(param(req, 'user'))
++    if (!u) return res.status(404).json({ error: 'no such user' })
++    const given = typeof req.body?.password === 'string' ? req.body.password : undefined
++    if (given !== undefined && given.length < PASSWORD_MIN)
++      return res.status(400).json({ error: `password must be at least ${PASSWORD_MIN} characters` })
++    const password = given ?? randomPassword()
++    const ctx = await auth.$context
++    const hash = await ctx.password.hash(password)
++    const accounts = await ctx.internalAdapter.findAccounts(u.id)
++    if (accounts.some((a) => a.providerId === 'credential')) await ctx.internalAdapter.updatePassword(u.id, hash)
++    else
++      await ctx.internalAdapter.linkAccount({ accountId: u.id, providerId: 'credential', password: hash, userId: u.id })
++    if (req.body?.signOut === true) await ctx.internalAdapter.deleteUserSessions(u.id)
++    audit(`set password for ${u.email}${req.body?.signOut === true ? ', signed out' : ''}`)
++    res.json({ ok: true, ...(given === undefined && { password }) })
++  })
++
++  /** Ban: sessions end now; MCP (OAuth and agent keys) stops within a minute
++   *  (auth.isBanned caches for 60s). */
++  post('/users/:user/ban', async (req, res) => {
++    const u = await findUser(param(req, 'user'))
++    if (!u) return res.status(404).json({ error: 'no such user' })
++    const reason = typeof req.body?.reason === 'string' ? req.body.reason.slice(0, 200) : null
++    const ctx = await auth.$context
++    await ctx.internalAdapter.updateUser(u.id, { banned: true, banReason: reason, banExpires: null })
++    await ctx.internalAdapter.deleteUserSessions(u.id)
++    audit(`banned ${u.email}${reason ? ` (${reason})` : ''}`)
++    res.json({ ok: true })
++  })
++
++  post('/users/:user/unban', async (req, res) => {
++    const u = await findUser(param(req, 'user'))
++    if (!u) return res.status(404).json({ error: 'no such user' })
++    const ctx = await auth.$context
++    await ctx.internalAdapter.updateUser(u.id, { banned: false, banReason: null, banExpires: null })
++    audit(`unbanned ${u.email}`)
++    res.json({ ok: true })
++  })
++
++  /** Delete an account. `?dryRun=1` answers with the plan and changes
++   *  nothing; the CLI shows it before asking. */
++  del('/users/:user', async (req, res) => {
++    const u = await findUser(param(req, 'user'))
++    if (!u) return res.status(404).json({ error: 'no such user' })
++    const plan = deletionPlan(u.id)
++    if (req.query.dryRun === '1') return res.json({ user: publicUser(u), ...plan })
++    await purgeUserData(u.id)
++    await db.delete(agentKeys).where(eq(agentKeys.userId, u.id))
++    const ctx = await auth.$context
++    await ctx.internalAdapter.deleteUser(u.id)
++    audit(`deleted user ${u.email}: ${plan.deletes.length} canvas(es) deleted, left ${plan.leaves.length}`)
++    res.json({ ok: true, user: publicUser(u), ...plan })
++  })
++
++  /* ----------------------------------------------------------- agent keys */
++
++  get('/users/:user/keys', async (req, res) => {
++    const u = await findUser(param(req, 'user'))
++    if (!u) return res.status(404).json({ error: 'no such user' })
++    res.json(await listAgentKeys(u.id))
++  })
++
++  /** The secret is in this response and nowhere else, ever. */
++  post('/users/:user/keys', async (req, res) => {
++    const u = await findUser(param(req, 'user'))
++    if (!u) return res.status(404).json({ error: 'no such user' })
++    const name = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim().slice(0, 80) : ''
++    if (!name) return res.status(400).json({ error: 'name required' })
++    const created = await createAgentKey(u.id, name)
++    if (!created) return res.status(409).json({ error: 'this account is at its agent key limit' })
++    audit(`minted agent key "${name}" for ${u.email}`)
++    res.status(201).json(created)
++  })
++
++  del('/users/:user/keys/:keyId', async (req, res) => {
++    const u = await findUser(param(req, 'user'))
++    if (!u) return res.status(404).json({ error: 'no such user' })
++    if (!(await deleteAgentKey(u.id, param(req, 'keyId')))) return res.status(404).json({ error: 'no such key' })
++    audit(`revoked agent key ${param(req, 'keyId')} of ${u.email}`)
++    res.json({ ok: true })
++  })
++
++  /* ------------------------------------------------------------- canvases */
++
++  async function emails(ids: string[]): Promise<Map<string, { name: string; email: string }>> {
++    const rows = await db.select(userColumns).from(authSchema.user)
++    const wanted = new Set(ids)
++    return new Map(rows.filter((r) => wanted.has(r.id)).map((r) => [r.id, { name: r.name, email: r.email }]))
++  }
++
++  get('/canvases', async (_req, res) => {
++    const all = store.allCanvases().sort((a, b) => b.updatedAt - a.updatedAt)
++    const people = await emails(all.flatMap((c) => (c.ownerId ? [c.ownerId] : [])))
++    res.json(
++      all.map((c) => ({
++        id: c.id,
++        name: c.name,
++        owner: c.ownerId ? (people.get(c.ownerId)?.email ?? c.ownerId) : null,
++        frames: c.frames.length,
++        members: c.memberIds?.length ?? 0,
++        linkAccess: c.linkAccess ?? 'none',
++        workspaceId: c.workspaceId ?? null,
++        updatedAt: c.updatedAt,
++      })),
++    )
++  })
++
++  function canvasOr404(id: string, res: express.Response): Canvas | null {
++    const c = store.getCanvas(id)
++    if (!c) res.status(404).json({ error: 'no such canvas' })
++    return c ?? null
++  }
++
++  async function accessOf(c: Canvas) {
++    const ids = [...(c.ownerId ? [c.ownerId] : []), ...(c.memberIds ?? [])]
++    const people = await emails(ids)
++    const person = (id: string) => ({ id, name: people.get(id)?.name ?? 'Unknown', email: people.get(id)?.email ?? '' })
++    return {
++      id: c.id,
++      name: c.name,
++      owner: c.ownerId ? person(c.ownerId) : null,
++      members: (c.memberIds ?? []).map(person),
++      linkAccess: c.linkAccess ?? 'none',
++      workspaceId: c.workspaceId ?? null,
++    }
++  }
++
++  get('/canvases/:id', async (req, res) => {
++    const c = canvasOr404(param(req, 'id'), res)
++    if (c) res.json(await accessOf(c))
++  })
++
++  post('/canvases/:id/members', async (req, res) => {
++    const c = canvasOr404(param(req, 'id'), res)
++    if (!c) return
++    const u = typeof req.body?.user === 'string' ? await findUser(req.body.user) : undefined
++    if (!u) return res.status(404).json({ error: 'no such user (create the account first)' })
++    if (u.id === c.ownerId) return res.status(400).json({ error: `${u.email} owns this canvas` })
++    if (!c.memberIds?.includes(u.id)) {
++      store.addMember(c.id, u.id, c.ownerId ?? u.id)
++      refreshRoomRoles(c.id)
++      audit(`added ${u.email} to canvas ${c.id}`)
++    }
++    res.json(await accessOf(c))
++  })
++
++  del('/canvases/:id/members/:user', async (req, res) => {
++    const c = canvasOr404(param(req, 'id'), res)
++    if (!c) return
++    const u = await findUser(param(req, 'user'))
++    if (!u || !store.removeMember(c.id, u.id)) return res.status(404).json({ error: 'not a member of this canvas' })
++    refreshRoomRoles(c.id)
++    audit(`removed ${u.email} from canvas ${c.id}`)
++    res.json(await accessOf(c))
++  })
++
++  put('/canvases/:id/link', async (req, res) => {
++    const c = canvasOr404(param(req, 'id'), res)
++    if (!c) return
++    const access: unknown = req.body?.access
++    if (!isLinkAccess(access)) return res.status(400).json({ error: 'access must be none, view, comment or edit' })
++    store.setLinkAccess(c.id, access)
++    refreshRoomRoles(c.id)
++    audit(`link access of canvas ${c.id} = ${access}`)
++    res.json(await accessOf(c))
++  })
++
++  /** Hand a canvas to another account. The previous owner stays on as a
++   *  member unless `keepPrevious` is false, so nobody loses access by
++   *  accident. */
++  post('/canvases/:id/owner', async (req, res) => {
++    const c = canvasOr404(param(req, 'id'), res)
++    if (!c) return
++    const u = typeof req.body?.user === 'string' ? await findUser(req.body.user) : undefined
++    if (!u) return res.status(404).json({ error: 'no such user' })
++    if (u.id === c.ownerId) return res.json(await accessOf(c))
++    const previous = c.ownerId
++    store.setOwner(c.id, u.id)
++    if (previous && req.body?.keepPrevious !== false) store.addMember(c.id, previous, u.id)
++    refreshRoomRoles(c.id)
++    audit(`owner of canvas ${c.id}: ${previous ?? 'none'} -> ${u.email}`)
++    res.json(await accessOf(c))
++  })
++
++  /* nothing below this prefix falls through to the session gate */
++  router.use((_req, res) => res.status(404).json({ error: 'no such operator route' }))
++
++  return router
++}
+diff --git a/server/store.ts b/server/store.ts
+index 83d8d66..5905562 100644
+--- a/server/store.ts
++++ b/server/store.ts
+@@ -379,6 +379,18 @@ class Store {
+     return c
+   }
+ 
++  /** Hand a canvas to another account (the operator API). The new owner
++   *  stops being a member, since ownership already covers it. Like the
++   *  privacy toggles this is not a design edit, so updatedAt stays put. */
++  setOwner(id: string, userId: string): Canvas | undefined {
++    const c = this.canvases.get(id)
++    if (!c) return undefined
++    if (c.memberIds?.includes(userId)) this.removeMember(id, userId)
++    c.ownerId = userId
++    persist.saveCanvas(c)
++    return c
++  }
++
+   /** Owner-set link policy ('none' is the default and stored as unset).
+    *  Deliberately does not bump updatedAt — a privacy toggle is not a
+    *  design edit. */
+diff --git a/tests/operator.test.ts b/tests/operator.test.ts
+new file mode 100644
+index 0000000..84f9b03
+--- /dev/null
++++ b/tests/operator.test.ts
+@@ -0,0 +1,187 @@
++import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
++import { Client, startServer, type Server } from './harness.ts'
++import { stubEnv, unstubAllEnvs } from './envStub.ts'
++
++/* The operator API (server/operator.ts) on a real server whose sign-up is
++   closed the way a one-person instance closes it: an allowlist nobody's
++   address matches. */
++
++const TOKEN = 'operator-test-token-0123456789abcdef'
++let server: Server
++
++beforeAll(async () => {
++  server = await startServer({ DOOP_ADMIN_TOKEN: TOKEN, SIGNUP_EMAIL_DOMAINS: 'signup-closed.invalid' })
++}, 70_000)
++
++afterAll(() => server?.stop())
++
++function op(path: string, init: { method?: string; body?: unknown; token?: string | null } = {}) {
++  const token = init.token === undefined ? TOKEN : init.token
++  return fetch(`${server.base}/api/operator${path}`, {
++    method: init.method ?? (init.body === undefined ? 'GET' : 'POST'),
++    headers: { 'Content-Type': 'application/json', ...(token && { Authorization: `Bearer ${token}` }) },
++    body: init.body === undefined ? undefined : JSON.stringify(init.body),
++  })
++}
++
++async function json<T = Record<string, unknown>>(res: Response, status: number): Promise<T> {
++  const text = await res.text()
++  expect(res.status, text).toBe(status)
++  return JSON.parse(text) as T
++}
++
++async function signIn(email: string, password: string): Promise<{ client: Client; status: number }> {
++  const client = new Client(server)
++  const res = await client.post('/api/auth/sign-in/email', { email, password })
++  return { client, status: res.status }
++}
++
++async function createUser(email: string, password = 'password12345') {
++  return json<{ user: { id: string; email: string } }>(
++    await op('/users', { body: { email, name: email.split('@')[0], password } }),
++    201,
++  )
++}
++
++describe('operator API: the token', () => {
++  it('refuses a missing or wrong token', async () => {
++    expect((await op('/users', { token: null })).status).toBe(401)
++    expect((await op('/users', { token: 'x'.repeat(40) })).status).toBe(401)
++  })
++
++  it('answers an unknown route itself instead of falling through to the session gate', async () => {
++    expect((await op('/nope')).status).toBe(404)
++  })
++
++  it('does not exist without DOOP_ADMIN_TOKEN', async () => {
++    const plain = await startServer()
++    try {
++      const res = await fetch(`${plain.base}/api/operator/users`, { headers: { Authorization: `Bearer ${TOKEN}` } })
++      expect(res.status).toBe(404)
++    } finally {
++      plain.stop()
++    }
++  }, 70_000)
++
++  describe('env', () => {
++    afterEach(() => unstubAllEnvs())
++    it('rejects a token shorter than 32 characters at boot', () => {
++      expect(() => stubEnv('DOOP_ADMIN_TOKEN', 'short')).toThrow(/DOOP_ADMIN_TOKEN/)
++    })
++  })
++})
++
++describe('operator API: users', () => {
++  it('creates an account while sign-up is closed, with a generated password and no first canvas', async () => {
++    const created = await json<{ user: { id: string }; password: string }>(
++      await op('/users', { body: { email: 'Guest@Example.com', name: 'Guest' } }),
++      201,
++    )
++    expect(created.password.length).toBeGreaterThanOrEqual(16)
++
++    const { client, status } = await signIn('guest@example.com', created.password)
++    expect(status).toBe(200)
++    expect(await json<unknown[]>(await client.get('/api/canvases'), 200)).toEqual([])
++
++    /* the browser's sign-up is still closed */
++    const outsider = new Client(server)
++    const signup = await outsider.post('/api/auth/sign-up/email', {
++      email: 'outsider@example.com',
++      password: 'password12345',
++      name: 'Outsider',
++    })
++    expect(signup.status).toBe(400)
++
++    expect((await op('/users', { body: { email: 'guest@example.com' } })).status).toBe(409)
++  })
++
++  it('sets a password, bans and unbans', async () => {
++    await createUser('pw@example.com', 'first-password-1')
++    await json(await op('/users/pw@example.com/password', { body: { password: 'second-password-2' } }), 200)
++    expect((await signIn('pw@example.com', 'first-password-1')).status).toBe(401)
++    expect((await signIn('pw@example.com', 'second-password-2')).status).toBe(200)
++
++    await json(await op('/users/pw@example.com/ban', { body: { reason: 'test' } }), 200)
++    expect((await signIn('pw@example.com', 'second-password-2')).status).not.toBe(200)
++    await json(await op('/users/pw@example.com/unban', { body: {} }), 200)
++    expect((await signIn('pw@example.com', 'second-password-2')).status).toBe(200)
++  })
++
++  it('mints, lists and revokes agent keys', async () => {
++    await createUser('keys@example.com')
++    const key = await json<{ id: string; secret: string }>(
++      await op('/users/keys@example.com/keys', { body: { name: 'ci' } }),
++      201,
++    )
++    expect(key.secret).toMatch(/^dpk_/)
++    const listed = await json<{ id: string; name: string }[]>(await op('/users/keys@example.com/keys'), 200)
++    expect(listed.map((k) => k.name)).toEqual(['ci'])
++    await json(await op(`/users/keys@example.com/keys/${key.id}`, { method: 'DELETE' }), 200)
++    expect(await json<unknown[]>(await op('/users/keys@example.com/keys'), 200)).toEqual([])
++  })
++
++  it('previews a deletion, then deletes the account and the canvases only it could reach', async () => {
++    await createUser('leaver@example.com')
++    const { client } = await signIn('leaver@example.com', 'password12345')
++    const canvas = await json<{ id: string }>(await client.post('/api/canvases', { name: 'Solo work' }), 200)
++
++    const plan = await json<{ deletes: { id: string }[] }>(
++      await op('/users/leaver@example.com?dryRun=1', { method: 'DELETE' }),
++      200,
++    )
++    expect(plan.deletes.map((c) => c.id)).toEqual([canvas.id])
++    expect((await op(`/canvases/${canvas.id}`)).status).toBe(200) // a dry run changes nothing
++
++    await json(await op('/users/leaver@example.com', { method: 'DELETE' }), 200)
++    expect((await op('/users/leaver@example.com')).status).toBe(404)
++    expect((await op(`/canvases/${canvas.id}`)).status).toBe(404)
++  })
++})
++
++describe('operator API: sharing', () => {
++  it('adds and removes members, sets link access and hands a canvas over', async () => {
++    await createUser('owner@example.com')
++    await createUser('friend@example.com')
++    const owner = (await signIn('owner@example.com', 'password12345')).client
++    const friend = (await signIn('friend@example.com', 'password12345')).client
++    const { id } = await json<{ id: string }>(await owner.post('/api/canvases', { name: 'Shared work' }), 200)
++
++    expect((await friend.get(`/api/canvases/${id}`)).status).toBe(403)
++    const added = await json<{ members: { email: string }[] }>(
++      await op(`/canvases/${id}/members`, { body: { user: 'friend@example.com' } }),
++      200,
++    )
++    expect(added.members.map((m) => m.email)).toEqual(['friend@example.com'])
++    expect((await friend.get(`/api/canvases/${id}`)).status).toBe(200)
++
++    await json(await op(`/canvases/${id}/members/friend@example.com`, { method: 'DELETE' }), 200)
++    expect((await friend.get(`/api/canvases/${id}`)).status).toBe(403)
++
++    expect((await op(`/canvases/${id}/link`, { method: 'PUT', body: { access: 'owner' } })).status).toBe(400)
++    const linked = await json<{ linkAccess: string }>(
++      await op(`/canvases/${id}/link`, { method: 'PUT', body: { access: 'view' } }),
++      200,
++    )
++    expect(linked.linkAccess).toBe('view')
++    expect((await friend.get(`/api/canvases/${id}`)).status).toBe(200)
++    await json(await op(`/canvases/${id}/link`, { method: 'PUT', body: { access: 'none' } }), 200)
++
++    const moved = await json<{ owner: { email: string }; members: { email: string }[] }>(
++      await op(`/canvases/${id}/owner`, { body: { user: 'friend@example.com' } }),
++      200,
++    )
++    expect(moved.owner.email).toBe('friend@example.com')
++    expect(moved.members.map((m) => m.email)).toEqual(['owner@example.com'])
++    expect((await owner.get(`/api/canvases/${id}`)).status).toBe(200)
++
++    const listed = await json<{ id: string; owner: string }[]>(await op('/canvases'), 200)
++    expect(listed.find((c) => c.id === id)?.owner).toBe('friend@example.com')
++  })
++
++  it('will not add someone who has no account', async () => {
++    await createUser('lonely@example.com')
++    const { client } = await signIn('lonely@example.com', 'password12345')
++    const { id } = await json<{ id: string }>(await client.post('/api/canvases', { name: 'Mine' }), 200)
++    expect((await op(`/canvases/${id}/members`, { body: { user: 'ghost@example.com' } })).status).toBe(404)
++  })
++})

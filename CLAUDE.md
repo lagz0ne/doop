@@ -26,6 +26,7 @@ patches and transforms**, plus the tool that combines them.
 | `patches/` | our changes, in order |
 | `transforms/` | scripted rewrites, in order |
 | `bin/doop` | the tool (below); `bin/shims/bunx` lets doop's own git hooks run |
+| `bin/doopctl` | users, sharing, canvas owners and agent keys on a running doop (below) |
 | `build/doop` | generated: pin + patches + transforms (keeps its `node_modules`, `dist`, `data` across rebuilds) |
 | `build/base` | generated: the pristine pin, for A/B perf runs |
 | `perf/` | render-perf harness and results (`perf/README.md`); traces in `perf/out/` (ignored) |
@@ -46,6 +47,29 @@ patches and transforms**, plus the tool that combines them.
 
 `apply`/`edit` refuse to throw away uncommitted or unexported work in build/doop; `--force`
 (before the command) overrides.
+
+## bin/doopctl
+
+Manages a running doop through its operator API (`/api/operator`, our `feat(operator)` patch):
+accounts, canvas sharing, canvas owners and agent keys. `bin/doopctl --help` lists everything.
+
+    bin/doopctl users                              # accounts
+    bin/doopctl users create <email> [--name N]    # works while sign-up is closed; prints a password once
+    bin/doopctl share "Big canvas"              # who can open a canvas, and its link setting
+    bin/doopctl share add <canvas> <email>...      # members (accounts must exist)
+    bin/doopctl share link <canvas> none|view|comment|edit
+    bin/doopctl keys create <email> <name>         # MCP agent key; secret printed once
+
+- **Talks to the server, never the database.** Canvas members, owners and link access live in
+  the server's memory with write-through, so a direct database write is lost or ignored.
+- **Token:** `DOOP_ADMIN_TOKEN`, else `~/.config/doop/doop-admin-token` (mode 600). The
+  server side is off until the hub sets the same `DOOP_ADMIN_TOKEN` (32+ chars) on the the deployer
+  app. Whoever holds it controls every account and canvas.
+- **Target:** `https://doop.example.com`, or `--url` / `DOOP_URL` (e.g. a local `bin/doop serve`).
+- **Safety:** passwords never go in argv (`--password-stdin`, or the server generates one).
+  Destructive commands ask for "yes", or need `--yes` when there is no terminal. `users delete`
+  shows which canvases go with the account first. Every write is logged by the server as
+  `[operator] …`.
 
 ## Workflows
 
@@ -103,5 +127,9 @@ refuse to clobber unexported work).
   when committing in build/doop, or doop's husky hooks fail.
 - The disk is slow (HDD RAID1): `bun install` and `vite build` take minutes, so leave
   `build/doop/node_modules` in place.
+- The UI hides the team/product chrome (workspaces, Share, Community, Automations, Integrations,
+  Webhooks, plan line, Help) behind `FULL_UI` (`src/lib/fullUi.ts`, our `feat(ui)` patch); only
+  the entry points are hidden, not the routes. `localStorage['doop:full-ui']='on'` plus a reload
+  brings it back in one browser.
 - Using doop as a design tool (the host's canvas, the doop MCP, canvas import tooling) is
   the host's business (`../host-app`, skill `doop-ui`), not this repo's.

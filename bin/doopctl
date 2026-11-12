@@ -1,0 +1,379 @@
+#!/usr/bin/env node
+// doopctl: manage users, sharing, canvas owners and agent keys on a doop
+// instance through its operator API (/api/operator, our feat(operator) patch). Talks to the
+// running server only, never the database: sharing lives in the server's
+// memory, so a direct database write would be lost or ignored.
+//
+//   token  $DOOP_ADMIN_TOKEN, else ~/.config/doop/doop-admin-token
+//   url    --url, else $DOOP_URL, else https://doop.example.com
+//
+// Safety: passwords never go on the command line (--password-stdin, or the
+// server generates one and it is printed once); destructive commands ask you
+// to type "yes" (or take --yes), and refuse without a terminal unless --yes.
+import { readFileSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { createInterface } from 'node:readline/promises'
+
+const USAGE = `doopctl: users, sharing, canvas owners and agent keys on doop
+
+usage: doopctl [--url URL] [--json] [--yes] <command> ...
+
+users
+  users                              list accounts
+  users show <user>                  one account: canvases, agent keys
+  users create <email> [--name N] [--password-stdin]
+                                     new account (works while sign-up is closed);
+                                     without --password-stdin a password is
+                                     generated and printed once
+  users passwd <user> [--password-stdin] [--sign-out]
+                                     set or generate a password; --sign-out ends
+                                     their browser sessions (agent keys keep working)
+  users ban <user> [--reason R]      sign them out and lock them out   (confirms)
+  users unban <user>
+  users delete <user>                shows what goes with it, then deletes (confirms)
+
+agent keys (MCP bearer credentials)
+  keys <user>                        list a user's keys
+  keys create <user> <name>          mint one; the secret is printed once
+  keys revoke <user> <key-id>                                           (confirms)
+
+canvases and sharing
+  canvases                           every canvas: owner, members, link access
+  share <canvas>                     who can open it, and the link setting
+  share add <canvas> <user>...       make them members (they must have an account)
+  share remove <canvas> <user>                                          (confirms)
+  share link <canvas> none|view|comment|edit
+                                     anyone signed in with the link     (confirms unless none)
+  share owner <canvas> <user> [--drop-previous]
+                                     hand the canvas over; the previous owner stays
+                                     a member unless --drop-previous   (confirms)
+
+A <user> is an email or a user id. A <canvas> is an id, or an exact name if
+only one canvas has it.
+
+options
+  --url URL     instance (default $DOOP_URL or https://doop.example.com)
+  --json        raw JSON out, for scripts
+  --yes         skip confirmations (required when there is no terminal)
+`
+
+/* ------------------------------------------------------------- arguments */
+
+const argv = process.argv.slice(2)
+const flags = { json: false, yes: false, url: process.env.DOOP_URL || 'https://doop.example.com' }
+const opts = {}
+const args = []
+const VALUED = new Set(['--url', '--name', '--reason'])
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i]
+  if (a === '-h' || a === '--help') {
+    process.stdout.write(USAGE)
+    process.exit(0)
+  } else if (a === '--json') flags.json = true
+  else if (a === '--yes' || a === '-y') flags.yes = true
+  else if (VALUED.has(a)) {
+    const v = argv[++i]
+    if (v === undefined) fail(`${a} needs a value`, 2)
+    if (a === '--url') flags.url = v
+    else opts[a.slice(2)] = v
+  } else if (a.startsWith('--')) opts[a.slice(2)] = true
+  else args.push(a)
+}
+flags.url = flags.url.replace(/\/+$/, '')
+
+function fail(message, code = 1) {
+  process.stderr.write(`doopctl: ${message}\n`)
+  process.exit(code)
+}
+
+function need(n, usage) {
+  if (args.length < n) fail(`usage: doopctl ${usage}`, 2)
+}
+
+/* ----------------------------------------------------------------- token */
+
+function token() {
+  if (process.env.DOOP_ADMIN_TOKEN) return process.env.DOOP_ADMIN_TOKEN.trim()
+  const file = `${homedir()}/.config/doop/doop-admin-token`
+  let text
+  try {
+    text = readFileSync(file, 'utf8')
+  } catch {
+    fail(`no operator token: set DOOP_ADMIN_TOKEN or put it in ${file} (mode 600)`, 2)
+  }
+  if (statSync(file).mode & 0o077) process.stderr.write(`doopctl: warning: ${file} is readable by others; chmod 600 it\n`)
+  return text.trim()
+}
+
+/* ------------------------------------------------------------------- api */
+
+async function api(path, { method, body } = {}) {
+  const res = await fetch(`${flags.url}/api/operator${path}`, {
+    method: method ?? (body === undefined ? 'GET' : 'POST'),
+    headers: { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  }).catch((err) => fail(`cannot reach ${flags.url}: ${err.cause?.code ?? err.message}`))
+  const text = await res.text()
+  let data
+  try {
+    data = text ? JSON.parse(text) : {}
+  } catch {
+    data = { error: text.slice(0, 200) }
+  }
+  if (!res.ok) {
+    if (res.status === 404 && !text) fail(`${flags.url} has no operator API (DOOP_ADMIN_TOKEN unset there, or a doop build without the operator patch)`)
+    if (res.status === 401) fail('the operator token was refused')
+    fail(data.error ?? `HTTP ${res.status}`)
+  }
+  return data
+}
+
+const enc = encodeURIComponent
+
+/** id first; else an exact, unique (case-insensitive) name */
+async function canvasId(ref) {
+  const res = await fetch(`${flags.url}/api/operator/canvases/${enc(ref)}`, {
+    headers: { Authorization: `Bearer ${token()}` },
+  }).catch(() => null)
+  if (res?.ok) return ref
+  const all = await api('/canvases')
+  const hits = all.filter((c) => c.name.toLowerCase() === ref.toLowerCase())
+  if (hits.length === 1) return hits[0].id
+  if (hits.length > 1) fail(`${hits.length} canvases are named "${ref}"; use an id: ${hits.map((c) => c.id).join(', ')}`)
+  fail(`no canvas "${ref}"`)
+}
+
+/* ---------------------------------------------------------------- output */
+
+function out(data, human) {
+  if (flags.json) process.stdout.write(`${JSON.stringify(data, null, 2)}\n`)
+  else human(data)
+}
+
+function table(rows, columns) {
+  if (!rows.length) return console.log('(none)')
+  const cells = rows.map((r) => columns.map(([, get]) => String(get(r) ?? '')))
+  const widths = columns.map(([h], i) => Math.max(h.length, ...cells.map((c) => c[i].length)))
+  const line = (c) => c.map((v, i) => v.padEnd(widths[i])).join('  ').trimEnd()
+  console.log(line(columns.map(([h]) => h)))
+  for (const c of cells) console.log(line(c))
+}
+
+const day = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : '')
+
+function showAccess(a) {
+  console.log(`${a.name}  (${a.id})`)
+  console.log(`  owner  ${a.owner ? `${a.owner.email}` : '(none)'}`)
+  console.log(`  link   ${a.linkAccess}${a.linkAccess === 'none' ? '' : '  (anyone signed in who has the link)'}`)
+  if (a.workspaceId) console.log(`  workspace  ${a.workspaceId}`)
+  console.log(`  members${a.members.length ? '' : '  (none)'}`)
+  for (const m of a.members) console.log(`    ${m.email}`)
+}
+
+/* ---------------------------------------------------------------- safety */
+
+async function confirm(what) {
+  if (flags.yes) return
+  if (!process.stdin.isTTY) fail(`refusing without a terminal (pass --yes to do it anyway): ${what}`, 2)
+  const rl = createInterface({ input: process.stdin, output: process.stderr })
+  const answer = await rl.question(`${what}\nType "yes" to go ahead: `)
+  rl.close()
+  if (answer.trim().toLowerCase() !== 'yes') fail('cancelled, nothing changed', 3)
+}
+
+/** From a pipe: the whole input, minus one trailing newline. At a terminal:
+ *  typed with echo off (raw mode), Enter ends it, Ctrl-C aborts. */
+async function passwordFromStdin() {
+  const stdin = process.stdin
+  if (!stdin.isTTY) {
+    let data = ''
+    for await (const chunk of stdin) data += chunk
+    return data.replace(/\r?\n$/, '')
+  }
+  process.stderr.write('Password: ')
+  stdin.setRawMode(true)
+  stdin.setEncoding('utf8')
+  stdin.resume()
+  return new Promise((resolve) => {
+    let pw = ''
+    const finish = () => {
+      stdin.off('data', onData)
+      stdin.setRawMode(false)
+      stdin.pause()
+      process.stderr.write('\n')
+    }
+    const onData = (chunk) => {
+      for (const c of chunk) {
+        if (c === '\r' || c === '\n') return finish(), resolve(pw)
+        if (c === '\u0003') return finish(), fail('cancelled, nothing changed', 130)
+        if (c === '\u007f' || c === '\b') pw = pw.slice(0, -1)
+        else pw += c
+      }
+    }
+    stdin.on('data', onData)
+  })
+}
+
+/* -------------------------------------------------------------- commands */
+
+const [group = 'help', sub, ...rest] = args
+
+async function users() {
+  if (!sub || sub === 'list') {
+    return out(await api('/users'), (us) =>
+      table(us, [
+        ['email', (u) => u.email],
+        ['name', (u) => u.name],
+        ['role', (u) => u.role + (u.banned ? ' BANNED' : '')],
+        ['owns', (u) => u.owns],
+        ['member of', (u) => u.memberOf],
+        ['since', (u) => day(u.createdAt)],
+        ['id', (u) => u.id],
+      ]),
+    )
+  }
+  const [who] = rest
+  switch (sub) {
+    case 'show': {
+      need(3, 'users show <user>')
+      return out(await api(`/users/${enc(who)}`), (u) => {
+        console.log(`${u.name} <${u.email}>  ${u.role}${u.banned ? '  BANNED' : ''}  (${u.id})`)
+        console.log(`canvases${u.canvases.length ? '' : '  (none)'}`)
+        for (const c of u.canvases) console.log(`  ${c.role.padEnd(6)}  ${c.name}  (${c.id})`)
+        console.log(`agent keys${u.keys.length ? '' : '  (none)'}`)
+        for (const k of u.keys) console.log(`  ${k.name}  ${k.start}…  created ${day(k.createdAt)}  last used ${day(k.lastUsedAt) || 'never'}  (${k.id})`)
+      })
+    }
+    case 'create': {
+      need(3, 'users create <email> [--name N] [--password-stdin]')
+      const password = opts['password-stdin'] ? await passwordFromStdin() : undefined
+      const r = await api('/users', { body: { email: who, name: opts.name, password } })
+      return out(r, () => {
+        console.log(`created ${r.user.email}  (${r.user.id})`)
+        if (r.password) console.log(`password: ${r.password}\n(shown once; hand it over privately)`)
+      })
+    }
+    case 'passwd': {
+      need(3, 'users passwd <user> [--password-stdin] [--sign-out]')
+      const password = opts['password-stdin'] ? await passwordFromStdin() : undefined
+      const r = await api(`/users/${enc(who)}/password`, { body: { password, signOut: !!opts['sign-out'] } })
+      return out(r, () => {
+        console.log(`password set for ${who}${opts['sign-out'] ? '; their browser sessions are ended' : ''}`)
+        if (r.password) console.log(`password: ${r.password}\n(shown once)`)
+      })
+    }
+    case 'ban': {
+      need(3, 'users ban <user> [--reason R]')
+      await confirm(`Ban ${who}: their sessions end now and agents lose access within a minute.`)
+      return out(await api(`/users/${enc(who)}/ban`, { body: { reason: opts.reason } }), () => console.log(`banned ${who}`))
+    }
+    case 'unban':
+      need(3, 'users unban <user>')
+      return out(await api(`/users/${enc(who)}/unban`, { body: {} }), () => console.log(`unbanned ${who}`))
+    case 'delete': {
+      need(3, 'users delete <user>')
+      const plan = await api(`/users/${enc(who)}?dryRun=1`, { method: 'DELETE' })
+      const lines = [`Delete ${plan.user.email} (${plan.user.id}), their sessions and agent keys.`]
+      if (plan.deletes.length) {
+        lines.push(`These canvases only they can reach are DELETED with them:`)
+        for (const c of plan.deletes) lines.push(`  ${c.name}  (${c.id}, ${c.frames} frames)`)
+      } else lines.push('No canvas is deleted.')
+      if (plan.leaves.length) lines.push(`They leave ${plan.leaves.length} shared canvas(es), which stay.`)
+      process.stderr.write(`${lines.join('\n')}\n`)
+      await confirm('This cannot be undone.')
+      return out(await api(`/users/${enc(who)}`, { method: 'DELETE' }), () => console.log(`deleted ${plan.user.email}`))
+    }
+    default:
+      fail(`unknown: users ${sub} (see doopctl --help)`, 2)
+  }
+}
+
+async function keys() {
+  if (!sub) fail('usage: doopctl keys <user> | keys create <user> <name> | keys revoke <user> <key-id>', 2)
+  const [who, x] = rest
+  switch (sub) {
+    case 'list':
+      need(3, 'keys list <user>')
+      return keysFor(who)
+    case 'create': {
+      need(4, 'keys create <user> <name>')
+      const k = await api(`/users/${enc(who)}/keys`, { body: { name: x } })
+      return out(k, () => console.log(`agent key "${k.name}" for ${who}:\n${k.secret}\n(shown once; store it, e.g. in ~/.config/doop, mode 600)`))
+    }
+    case 'revoke':
+      need(4, 'keys revoke <user> <key-id>')
+      await confirm(`Revoke agent key ${x} of ${who}: any agent using it stops at its next call.`)
+      return out(await api(`/users/${enc(who)}/keys/${enc(x)}`, { method: 'DELETE' }), () => console.log(`revoked ${x}`))
+    default:
+      return keysFor(sub) // keys <user>
+  }
+}
+
+async function keysFor(who) {
+  return out(await api(`/users/${enc(who)}/keys`), (ks) =>
+    table(ks, [
+      ['name', (k) => k.name],
+      ['starts', (k) => `${k.start}…`],
+      ['created', (k) => day(k.createdAt)],
+      ['last used', (k) => day(k.lastUsedAt) || 'never'],
+      ['id', (k) => k.id],
+    ]),
+  )
+}
+
+async function canvases() {
+  if (sub === 'show') {
+    need(3, 'canvases show <canvas>')
+    return out(await api(`/canvases/${enc(await canvasId(rest[0]))}`), showAccess)
+  }
+  if (sub && sub !== 'list') fail(`unknown: canvases ${sub} (see doopctl --help)`, 2)
+  return out(await api('/canvases'), (cs) =>
+    table(cs, [
+      ['name', (c) => c.name],
+      ['owner', (c) => c.owner ?? '(none)'],
+      ['members', (c) => c.members],
+      ['link', (c) => c.linkAccess],
+      ['frames', (c) => c.frames],
+      ['updated', (c) => day(c.updatedAt)],
+      ['id', (c) => c.id],
+    ]),
+  )
+}
+
+async function share() {
+  const actions = new Set(['add', 'remove', 'link', 'owner'])
+  if (!sub) fail('usage: doopctl share <canvas> | share add|remove|link|owner <canvas> ...', 2)
+  if (!actions.has(sub)) return out(await api(`/canvases/${enc(await canvasId(sub))}`), showAccess)
+  need(4, `share ${sub} <canvas> ...`)
+  const id = await canvasId(rest[0])
+  const targets = rest.slice(1)
+  switch (sub) {
+    case 'add': {
+      let last
+      for (const who of targets) last = await api(`/canvases/${enc(id)}/members`, { body: { user: who } })
+      return out(last, showAccess)
+    }
+    case 'remove': {
+      const [who] = targets
+      await confirm(`Remove ${who} from canvas ${id}: an open tab of theirs loses access now.`)
+      return out(await api(`/canvases/${enc(id)}/members/${enc(who)}`, { method: 'DELETE' }), showAccess)
+    }
+    case 'link': {
+      const [access] = targets
+      if (!['none', 'view', 'comment', 'edit'].includes(access)) fail('link access is none, view, comment or edit', 2)
+      if (access !== 'none') await confirm(`Let anyone signed in who has the link ${access} canvas ${id}.`)
+      return out(await api(`/canvases/${enc(id)}/link`, { method: 'PUT', body: { access } }), showAccess)
+    }
+    case 'owner': {
+      const [who] = targets
+      const drop = !!opts['drop-previous']
+      await confirm(`Make ${who} the owner of canvas ${id}${drop ? '; the previous owner loses access' : '; the previous owner stays a member'}.`)
+      return out(await api(`/canvases/${enc(id)}/owner`, { body: { user: who, keepPrevious: !drop } }), showAccess)
+    }
+  }
+}
+
+const commands = { users, user: users, keys, key: keys, canvases, canvas: canvases, share }
+if (group === 'help') process.stdout.write(USAGE)
+else if (!commands[group]) fail(`unknown command "${group}" (see doopctl --help)`, 2)
+else await commands[group]()
