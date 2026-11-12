@@ -14,6 +14,20 @@ import { purgeUserData } from './accountDeletion.ts'
 import { MCP_REFRESH_TOKEN_TTL_S } from './mcpTokens.ts'
 import { createHash } from 'node:crypto'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
+import { AsyncLocalStorage } from 'node:async_hooks'
+
+/**
+ * Set while the operator API (server/operator.ts) creates an account. Such an
+ * account is someone being let in by whoever runs the instance, not a
+ * sign-up: SIGNUP_EMAIL_DOMAINS does not apply, and there is no first canvas
+ * or demo. Scoped to that one call's async chain, so a browser sign-up
+ * running at the same moment is checked as usual.
+ */
+const operatorCreation = new AsyncLocalStorage<true>()
+
+export function createdByOperator<T>(create: () => Promise<T>): Promise<T> {
+  return operatorCreation.run(true, create)
+}
 
 /**
  * better-auth on our own database: email/password + cookie sessions now;
@@ -478,12 +492,14 @@ function buildAuth() {
       user: {
         create: {
           before: async (user) => {
-            assertSignupDomainAllowed(user.email)
+            if (!operatorCreation.getStore()) assertSignupDomainAllowed(user.email)
           },
           after: async (user) => {
-            const first = (user.name || 'Your').split(/\s+/)[0]
-            const canvas = store.createCanvas(`${first}'s first canvas`, user.id)
-            demo.markPending(canvas.id)
+            if (!operatorCreation.getStore()) {
+              const first = (user.name || 'Your').split(/\s+/)[0]
+              const canvas = store.createCanvas(`${first}'s first canvas`, user.id)
+              demo.markPending(canvas.id)
+            }
             /* the other half of the ADMIN_EMAILS reconcile: syncAdmins covers
                people who already existed at boot, this covers signups after.
                With SMTP on, a fresh signup is never verified yet, so the

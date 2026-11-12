@@ -45,6 +45,7 @@ import {
 import { isLinkAccess, roleAllows, type CanvasRole } from '../shared/canvasRole.ts'
 import { auth, initAuth, syncAdmins, getUserName, loginProvidersConfig } from './auth.ts'
 import { adminRouter } from './admin.ts'
+import { operatorRouter } from './operator.ts'
 import { communityRouter, parseListing, publishableFrames } from './community.ts'
 import { automationsRouter, startScheduler } from './automations.ts'
 import { startMcpTokenPrune } from './mcpTokens.ts'
@@ -703,6 +704,10 @@ app.post('/ingest/:key', express.json({ limit: '10mb', type: () => true }), (req
     if (!res.headersSent) res.status(500).json({ error: 'sync failed' })
   })
 })
+
+/* the operator API (doopctl): bearer DOOP_ADMIN_TOKEN only, absent while it
+   is unset — see server/operator.ts. Ahead of the session gate on purpose. */
+app.use('/api/operator', operatorRouter(refreshRoomRoles))
 
 /* everything else under /api requires a logged-in user; the session's user
    is authoritative for names — clients don't get to pick who they are */

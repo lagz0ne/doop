@@ -90,6 +90,12 @@ const int = (minimum: number) =>
 
 /** A per-minute cap: 0 would refuse every call, so the floor is 1. */
 const perMinute = int(1)
+
+/** A bearer secret worth the name: at least 32 characters. */
+const secret = makeExactValidator<string>((input) => {
+  if (input.length < 32) throw new TypeError('Invalid secret (expected at least 32 characters)')
+  return input
+})
 const nonNegativeInt = int(0)
 
 /* ------------------------------------------------------------------ */
@@ -118,6 +124,8 @@ const schema = {
   TRUSTED_ORIGINS: list({ default: [] }),
   SIGNUP_EMAIL_DOMAINS: list({ default: [] }),
   ADMIN_EMAILS: list({ default: [] }),
+  /* unset = the operator API (server/operator.ts) does not exist */
+  DOOP_ADMIN_TOKEN: secret({ default: undefined }),
   REQUIRE_EMAIL_VERIFICATION: bool({ default: true }),
   OIDC_ISSUER: str({ default: undefined }),
   OIDC_CLIENT_ID: str({ default: undefined }),

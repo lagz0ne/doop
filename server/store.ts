@@ -410,6 +410,18 @@ class Store {
     return c
   }
 
+  /** Hand a canvas to another account (the operator API). The new owner
+   *  stops being a member, since ownership already covers it. Like the
+   *  privacy toggles this is not a design edit, so updatedAt stays put. */
+  setOwner(id: string, userId: string): Canvas | undefined {
+    const c = this.canvases.get(id)
+    if (!c) return undefined
+    if (c.memberIds?.includes(userId)) this.removeMember(id, userId)
+    c.ownerId = userId
+    persist.saveCanvas(c)
+    return c
+  }
+
   /** Owner-set link policy ('none' is the default and stored as unset).
    *  Deliberately does not bump updatedAt — a privacy toggle is not a
    *  design edit. */
