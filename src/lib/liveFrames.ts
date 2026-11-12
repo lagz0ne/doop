@@ -192,6 +192,12 @@ export function pinnedBySelection(selectedIds: readonly string[]): readonly stri
   return selectedIds.length <= MAX_PINNED_SELECTION ? selectedIds : []
 }
 
+/** True once frames are being culled at all (false with culling switched
+ *  off): only then is there a preview to show for a frame. */
+export function usePreviews(): boolean {
+  return useLiveFrames((s) => s.ids !== null)
+}
+
 /** True when the frame should render its live document. */
 export function useFrameLive(frameId: string): boolean {
   return useLiveFrames((s) => s.ids === null || s.ids.has(frameId))

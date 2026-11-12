@@ -211,6 +211,33 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
     expect(new URL(src).searchParams.get('v')).toBe('1')
   }, 30_000)
 
+  it('keeps the preview over a document that has just booted until the document has painted', async () => {
+    await store(page, 'select(null)')
+    await camera(page, { x: 20, y: 60, zoom: 0.08 })
+    /* selecting pins the frame live: its iframe mounts blank and boots. The
+       picture must be there with it, and gone once the runtime reports the
+       document shown. */
+    const seen = (await page.evaluate(`new Promise((resolve) => {
+      import('/src/lib/store.ts').then(({ useStore }) => {
+        useStore.getState().select('f60')
+        const started = performance.now()
+        let covered = false
+        ;(function poll() {
+          const iframe = document.querySelector('iframe[title="Frame 60"]')
+          const preview = iframe?.parentElement?.querySelector('[data-doop-frame-preview]')
+          if (iframe && preview) covered = true
+          const ms = performance.now() - started
+          if (iframe && !preview) resolve({ covered, shown: true, ms })
+          else if (ms > 8000) resolve({ covered, shown: false, ms })
+          else setTimeout(poll, 2)
+        })()
+      })
+    })`)) as { covered: boolean; shown: boolean; ms: number }
+    expect(seen.covered).toBe(true)
+    expect(seen.shown).toBe(true)
+    await store(page, 'select(null)')
+  }, 30_000)
+
   it('measures a click with culling on and off (written to $LIVEFRAMES_BENCH, not asserted)', async () => {
     async function measure(cull: boolean) {
       const p = await browser.newPage()

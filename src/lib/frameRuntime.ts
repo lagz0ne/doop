@@ -116,6 +116,45 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     }
   }
 
+  /* The canvas keeps a frame's preview picture over this document until the
+     document has something to show (FrameView). The first HTML to arrive is
+     not that yet: its stylesheets, web fonts and images are still loading,
+     and a paint before them is a blank frame, then unstyled content in a
+     fallback face. So the first render is announced once those have settled
+     (bounded: a slow resource must not hold the picture up for good) and two
+     animation frames have passed, which puts a paint behind the message. A
+     frame out of view gets no animation frames, so it answers when it comes
+     into view and has painted. */
+  var shownAnnounced = false
+  function announceShown() {
+    if (shownAnnounced) return
+    shownAnnounced = true
+    var done = false
+    function finish() {
+      if (done) return
+      done = true
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () { parent.postMessage({ type: 'doop:shown' }, '*') })
+      })
+    }
+    setTimeout(finish, 1500)
+    var waiting = 1
+    function settled() {
+      if (--waiting > 0) return
+      /* a face starts loading at the layout that first needs it */
+      requestAnimationFrame(function () { document.fonts.ready.then(finish, finish) })
+    }
+    var loading = document.querySelectorAll('link[rel~="stylesheet"], img')
+    for (var i = 0; i < loading.length; i++) {
+      var el = loading[i]
+      if (el.tagName === 'IMG' ? el.complete : !!el.sheet) continue
+      waiting++
+      el.addEventListener('load', settled, { once: true })
+      el.addEventListener('error', settled, { once: true })
+    }
+    settled()
+  }
+
   /* ---- inline text editing ----
      The parent flips edit mode on. Instead of designMode (which makes the
      whole document a caret trap), we hit-test: hovering a text-bearing
@@ -1284,6 +1323,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       notifyFrameUpdated()
       protoHtmlChanged()
       if (d.reqId) parent.postMessage({ type: 'doop:html-result', reqId: d.reqId }, '*')
+      announceShown()
     }
     if (d.type === 'doop:text-format' && Array.isArray(d.selectors)) {
       parent.postMessage({ type: 'doop:text-format-result', reqId: d.reqId, selectors: formatLayers(d.selectors, d.command) }, '*')

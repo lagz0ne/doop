@@ -16,7 +16,7 @@ import { copyElementLink } from '../lib/elementLink'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
-import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel } from '../lib/liveFrames'
+import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
 import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
 import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
@@ -759,18 +759,28 @@ export const FrameView = memo(function FrameView({
      A dropped iframe takes its runtime with it, so the handshake starts over
      when it comes back: ready, then the current HTML is posted again. */
   const live = useFrameLive(frame.id)
+  /* A document that has just been given its iframe has nothing to show yet:
+     the iframe is blank until the runtime boots, takes the HTML and paints,
+     and then its stylesheets and fonts land. Shown bare, every frame going
+     live flashed white (47 ms and up, measured) and re-flowed once. So the
+     preview picture stays on top until the runtime reports the document
+     shown (doop:shown, frameRuntime.ts): the frame goes from picture to
+     document without a blank in between. */
+  const [documentShown, setDocumentShown] = useState(false)
+  const previews = usePreviews()
   useEffect(() => {
     if (live) return
     // eslint-disable-next-line react/set-state-in-effect -- the iframe is gone; its runtime state goes with it
     setRuntimeReady(false)
     setRuntimeDocument(null)
+    setDocumentShown(false)
     localHtml.current = null
   }, [live])
   useEffect(() => {
     function onMsg(ev: MessageEvent) {
-      if (ev.data?.type === 'doop:frame-ready' && ev.source === iframeRef.current?.contentWindow) {
-        setRuntimeReady(true)
-      }
+      if (ev.source !== iframeRef.current?.contentWindow) return
+      if (ev.data?.type === 'doop:frame-ready') setRuntimeReady(true)
+      if (ev.data?.type === 'doop:shown') setDocumentShown(true)
     }
     window.addEventListener('message', onMsg)
     return () => window.removeEventListener('message', onMsg)
@@ -1726,7 +1736,7 @@ export const FrameView = memo(function FrameView({
             }}
             onPointerLeave={leaveHover}
           >
-            {live ? (
+            {live && (
               <iframe
                 ref={iframeRef}
                 className={cn('block border-none', isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white')}
@@ -1757,8 +1767,16 @@ export const FrameView = memo(function FrameView({
                   ...(isCanvasElement(frame.html) ? { colorScheme: 'light' } : null),
                 }}
               />
-            ) : (
-              <FramePreview frame={frame} />
+            )}
+            {/* The preview: all the frame shows without a document, and what
+            covers a booting one (see documentShown). One element in one place
+            for both, so the picture is never taken down and put back between
+            them. A frame being streamed into has no picture of what is
+            arriving, and shows its document as it comes. */}
+            {(!live || (!documentShown && previews && !stream)) && (
+              <div className={live ? 'pointer-events-none absolute inset-0' : undefined}>
+                <FramePreview frame={frame} />
+              </div>
             )}
             {!frame.html && (
               <div className="absolute inset-0 grid place-items-center bg-[repeating-linear-gradient(45deg,transparent_0_10px,rgba(28,26,21,0.025)_10px_20px)] text-[13px] text-ink-faint">
