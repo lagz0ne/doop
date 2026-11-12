@@ -110,6 +110,25 @@ export async function openIsolatedPage(): Promise<IsolatedPage> {
   }
 }
 
+/** How long a render waits for the frame's web fonts before it goes ahead
+ *  with whatever has arrived (the PDF export's bound, pdfExport.ts). */
+const WEB_FONTS_TIMEOUT_MS = 3000
+
+/* `load` does not wait for web fonts. A face declared with font-display: swap
+   (what Google Fonts serves, and what most frames link) starts downloading at
+   the first layout, and its text is drawn in the fallback face until it
+   arrives. Every render runs in a fresh browser context with an empty cache,
+   so that download is real each time, and a screenshot taken 120 ms after
+   `load` often beat it: the picture then shows the fallback face, with other
+   widths and line breaks than the frame has in the editor. The PDF export
+   already waited (pdfExport.ts); screenshots, previews and inspection did
+   not. document.fonts.ready resolves once no face is loading. */
+async function webFontsSettled(page: Page): Promise<void> {
+  const timeout = new Promise<void>((resolve) => setTimeout(resolve, WEB_FONTS_TIMEOUT_MS))
+  const ready = page.evaluate(() => document.fonts.ready.then(() => undefined)).catch(() => undefined)
+  await Promise.race([ready, timeout])
+}
+
 export async function loadFramePage(frame: Frame): Promise<IsolatedPage> {
   const loaded = await openIsolatedPage()
   const { page } = loaded
@@ -148,6 +167,7 @@ export async function loadFramePage(frame: Frame): Promise<IsolatedPage> {
       /* Slow external resources: inspect whatever has rendered. */
     }
     await new Promise((resolve) => setTimeout(resolve, 120))
+    await webFontsSettled(page)
     return loaded
   } catch (error) {
     await loaded.close()
