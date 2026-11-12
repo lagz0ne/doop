@@ -1,5 +1,5 @@
 import { env } from './env.ts'
-import type { Frame } from '../shared/types.ts'
+import type { Frame, PreviewScale } from '../shared/types.ts'
 import * as thumbs from './thumbs.ts'
 import { store } from './store.ts'
 
@@ -33,7 +33,7 @@ const renderHits = new Map<string, number[]>()
 const RENDERS_PER_MIN = env.PREVIEW_RENDERS_PER_MIN
 
 export interface ImageRequest {
-  ext: 'png' | 'jpg'
+  ext: 'png' | 'jpg' | 'webp'
   /** output density, already parsed and fitted (shared/exportScale.ts) */
   scale: number
   quality: number
@@ -43,6 +43,10 @@ export interface ImageRequest {
   preview: boolean
   /** a layer export: the CSS selector of the element to cut the render to */
   layer?: string
+  /** the level of the editor's preview pyramid asked for (?preview&s=):
+   *  the whole frame at that scale, persisted like the card thumbnail.
+   *  The only thing a webp is. */
+  level?: PreviewScale
   /** the frame version the URL names (?v=), if any. The editor's culled
    *  frames ask for the current one and show nothing else until the next
    *  edit, so a thumbnail known to be older is not an answer to them. */
@@ -58,8 +62,13 @@ export type ImageResult = { status: 'ok'; buf: Buffer; fresh: boolean } | { stat
 
 /** May reject when the render itself fails — the caller owns the 500. */
 export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageResult> {
-  const preview = req.preview && req.ext === 'jpg'
-  const key = imageKey(frame.id, req.ext, req.scale, req.ext === 'jpg' ? req.quality : '', preview, req.layer)
+  const level = req.ext === 'webp' ? req.level : undefined
+  if (req.ext === 'webp' && level === undefined) throw new Error('a webp image is a preview level: ?preview&s=')
+  const preview = level !== undefined || (req.preview && req.ext === 'jpg')
+  const key =
+    level !== undefined
+      ? `${frame.id}:level:${level}`
+      : imageKey(frame.id, req.ext, req.scale, req.ext === 'jpg' ? req.quality : '', preview, req.layer)
   const cached = imgCache.get(key)
   let pending =
     cached && cached.updatedAt === frame.updatedAt && Date.now() - cached.at < IMG_CACHE_MS ? cached.buf : null
@@ -69,7 +78,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
      costs no Chromium boot — so it isn't metered either */
   let fresh = true
   if (!pending && preview) {
-    const stored = await thumbs.getStored(frame)
+    const stored = await thumbs.getStored(frame, level)
     /* A request for exactly this version, answered from a thumbnail on record
        as older, would pin the old picture on a frame that shows it until its
        next edit: that one waits for the render instead (deduped and capped in
@@ -82,7 +91,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
       req.version === frame.updatedAt &&
       (await consumeRenderBudget(req.ip, req.isAuthenticated))
     if (mustRender) {
-      pending = thumbs.create(frame)
+      pending = thumbs.create(frame, level)
       remember(key, pending, frame.updatedAt)
     } else if (stored) {
       pending = Promise.resolve(stored.buf)
@@ -97,7 +106,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
     if (!(await consumeRenderBudget(req.ip, req.isAuthenticated))) return { status: 'rate-limited' }
     pending = preview
       ? /* renders AND persists — the next cold start serves from storage */
-        thumbs.create(frame)
+        thumbs.create(frame, level)
       : loadScreenshot().then(async ({ renderFrame }) =>
           renderFrame(await store.renderSource(frame), req.scale, {
             type: req.ext === 'jpg' ? 'jpeg' : 'png',
@@ -113,7 +122,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
 
 function imageKey(
   id: string,
-  ext: 'png' | 'jpg',
+  ext: 'png' | 'jpg' | 'webp',
   scale: number,
   quality: number | '',
   preview: boolean,

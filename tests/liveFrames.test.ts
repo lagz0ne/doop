@@ -5,6 +5,7 @@ import {
   MAX_LIVE,
   MAX_PINNED_SELECTION,
   pinnedBySelection,
+  sharpPreviews,
   useLiveFrames,
   viewRect,
   type FrameBox,
@@ -113,5 +114,23 @@ describe('wake', () => {
     for (let i = 0; i < 20; i++) wake(`f${i}`)
     expect(useLiveFrames.getState().woken).toHaveLength(8)
     expect(useLiveFrames.getState().woken.at(-1)).toBe('f19')
+  })
+})
+
+describe('sharpPreviews', () => {
+  it('names the frames in or near the view: only those get a picture above the smallest level', () => {
+    // the view shows world 0..1400 × 0..900; with half a viewport of margin, -700..2100 × -450..1350
+    const sharp = sharpPreviews(grid(200), { x: 0, y: 0, zoom: 1 }, stage)
+    expect([...sharp].sort()).toEqual(['f0', 'f1', 'f8', 'f9'])
+  })
+
+  it('is every frame when the whole page is in view', () => {
+    expect(sharpPreviews(grid(40), { x: 0, y: 0, zoom: 0.08 }, stage).size).toBe(40)
+  })
+
+  it('never names a canvas element (no picture), nor anything before the stage is measured', () => {
+    const shape: FrameBox = { id: 'shape', x: 100, y: 100, width: 200, height: 200, element: true }
+    expect(sharpPreviews([shape], { x: 0, y: 0, zoom: 1 }, stage).size).toBe(0)
+    expect(sharpPreviews(grid(4), { x: 0, y: 0, zoom: 1 }, { width: 0, height: 0 }).size).toBe(0)
   })
 })

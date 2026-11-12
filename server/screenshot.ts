@@ -448,7 +448,7 @@ async function inspectOn(page: Page, frame: Frame): Promise<FrameInspection> {
 }
 
 export interface RenderOptions extends PageOptions {
-  type?: 'png' | 'jpeg'
+  type?: 'png' | 'jpeg' | 'webp'
   quality?: number
   maxHeight?: number
   /** cut the render to the box of the first element this CSS selector
@@ -533,7 +533,7 @@ async function screenshotOn(page: Page, frame: Frame, scale: number, opts: Rende
       : undefined
   const buf = await page.screenshot({
     type,
-    ...(type === 'jpeg' ? { quality: opts.quality ?? 90 } : {}),
+    ...(type === 'png' ? {} : { quality: opts.quality ?? 90 }),
     ...(clip ? { clip } : {}),
   })
   return Buffer.from(buf)
