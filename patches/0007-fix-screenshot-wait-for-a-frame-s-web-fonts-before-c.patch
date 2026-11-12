@@ -30,10 +30,10 @@ Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
  1 file changed, 20 insertions(+)
 
 diff --git a/server/screenshot.ts b/server/screenshot.ts
-index fdb5126..f380c8e 100644
+index f7e5768..d3c3742 100644
 --- a/server/screenshot.ts
 +++ b/server/screenshot.ts
-@@ -104,6 +104,25 @@ export async function openIsolatedPage(): Promise<IsolatedPage> {
+@@ -110,6 +110,25 @@ export async function openIsolatedPage(): Promise<IsolatedPage> {
    }
  }
  
@@ -59,7 +59,7 @@ index fdb5126..f380c8e 100644
  export async function loadFramePage(frame: Frame): Promise<IsolatedPage> {
    const loaded = await openIsolatedPage()
    const { page } = loaded
-@@ -142,6 +161,7 @@ export async function loadFramePage(frame: Frame): Promise<IsolatedPage> {
+@@ -148,6 +167,7 @@ export async function loadFramePage(frame: Frame): Promise<IsolatedPage> {
        /* Slow external resources: inspect whatever has rendered. */
      }
      await new Promise((resolve) => setTimeout(resolve, 120))

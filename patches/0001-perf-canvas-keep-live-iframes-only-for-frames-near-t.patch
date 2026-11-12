@@ -33,10 +33,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 tests/liveFramesBrowser.test.ts
 
 diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
-index a7b7b1b..cf10704 100644
+index 5c5afc9..0300bc9 100644
 --- a/src/components/FrameView.tsx
 +++ b/src/components/FrameView.tsx
-@@ -15,6 +15,7 @@ import { copyElementLink } from '../lib/elementLink'
+@@ -16,6 +16,7 @@ import { copyElementLink } from '../lib/elementLink'
  import { sendWs } from '../lib/ws'
  import { throttle } from '../lib/throttle'
  import { getIdentity } from '../lib/identity'
@@ -44,7 +44,7 @@ index a7b7b1b..cf10704 100644
  import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
  import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
  import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
-@@ -610,6 +611,18 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+@@ -748,6 +749,18 @@ export const FrameView = memo(function FrameView({
       flipped or shifted it away from a viewport edge */
    const menuAt = useRef({ x: 0, y: 0 })
    const [runtimeReady, setRuntimeReady] = useState(false)
@@ -63,9 +63,9 @@ index a7b7b1b..cf10704 100644
    useEffect(() => {
      function onMsg(ev: MessageEvent) {
        if (ev.data?.type === 'doop:frame-ready' && ev.source === iframeRef.current?.contentWindow) {
-@@ -1427,36 +1440,54 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+@@ -1708,36 +1721,54 @@ export const FrameView = memo(function FrameView({
              }}
-             onPointerLeave={clearHover}
+             onPointerLeave={leaveHover}
            >
 -            <iframe
 -              ref={iframeRef}
@@ -149,19 +149,19 @@ index a7b7b1b..cf10704 100644
                <div className="absolute inset-0 grid place-items-center bg-[repeating-linear-gradient(45deg,transparent_0_10px,rgba(28,26,21,0.025)_10px_20px)] text-[13px] text-ink-faint">
                  empty frame — add HTML
 diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
-index c4422b5..d8eb20e 100644
+index bf7bbef..2a93edc 100644
 --- a/src/components/Stage.tsx
 +++ b/src/components/Stage.tsx
-@@ -46,6 +46,8 @@ import { TOOLS, isDrawingTool, resolvePointerAction, toolForKey, type Tool } fro
- import { useCanvasDrawing } from './CanvasDrawing'
- import { FrameLabelLayer } from './FrameLabelLayer'
- import { layoutZoomFor } from '../lib/layoutZoom'
+@@ -53,6 +53,8 @@ import { NO_INSETS, fitBox, type StageInsets } from '../lib/viewFit'
+ import { spaceWouldScroll } from '../lib/spaceScroll'
+ import { viewOptionForKey } from '../lib/viewOptions'
+ import { ZOOM_DRAG_MIN, ZOOM_TOOL_STEP, zoomAtPoint, zoomToBox } from '../lib/zoomTool'
 +import { isCanvasElement } from '../lib/drawing'
 +import { computeLiveFrames, cullingEnabled, useLiveFrames, type FrameBox } from '../lib/liveFrames'
  
  const MIN_ZOOM = 0.08
  /* The settled world is laid out at up to this zoom too (layoutZoomFor), so
-@@ -243,6 +245,47 @@ export function Stage({
+@@ -346,6 +348,47 @@ export function Stage({
      }
    }, [])
  

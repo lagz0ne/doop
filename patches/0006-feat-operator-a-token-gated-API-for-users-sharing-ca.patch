@@ -52,10 +52,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 tests/operator.test.ts
 
 diff --git a/.env.example b/.env.example
-index b3b1dd9..cdac034 100644
+index 02b4a5c..ab6eab7 100644
 --- a/.env.example
 +++ b/.env.example
-@@ -41,6 +41,14 @@
+@@ -54,6 +54,14 @@
  # nobody and says so at boot; local development promotes without verifying.
  #ADMIN_EMAILS=you@example.com
  
@@ -71,11 +71,11 @@ index b3b1dd9..cdac034 100644
  # Keycloak, etc.), alongside email/password — not a replacement for it.
  # Set all three of ISSUER/CLIENT_ID/CLIENT_SECRET together to enable; the
 diff --git a/server/auth.ts b/server/auth.ts
-index 2aa23b7..74f1ed1 100644
+index 8057023..be789ae 100644
 --- a/server/auth.ts
 +++ b/server/auth.ts
-@@ -13,6 +13,20 @@ import { acceptInvites } from './workspaces.ts'
- import { purgeUserData } from './accountDeletion.ts'
+@@ -14,6 +14,20 @@ import { purgeUserData } from './accountDeletion.ts'
+ import { MCP_REFRESH_TOKEN_TTL_S } from './mcpTokens.ts'
  import { createHash } from 'node:crypto'
  import { createRemoteJWKSet, jwtVerify } from 'jose'
 +import { AsyncLocalStorage } from 'node:async_hooks'
@@ -95,7 +95,7 @@ index 2aa23b7..74f1ed1 100644
  
  /**
   * better-auth on our own database: email/password + cookie sessions now;
-@@ -457,12 +471,14 @@ function buildAuth() {
+@@ -478,12 +492,14 @@ function buildAuth() {
        user: {
          create: {
            before: async (user) => {
@@ -115,10 +115,10 @@ index 2aa23b7..74f1ed1 100644
                 people who already existed at boot, this covers signups after.
                 With SMTP on, a fresh signup is never verified yet, so the
 diff --git a/server/env.ts b/server/env.ts
-index 0b29c96..c0a5d88 100644
+index 715fe49..1482eb0 100644
 --- a/server/env.ts
 +++ b/server/env.ts
-@@ -57,6 +57,12 @@ const int = (minimum: number) =>
+@@ -90,6 +90,12 @@ const int = (minimum: number) =>
  
  /** A per-minute cap: 0 would refuse every call, so the floor is 1. */
  const perMinute = int(1)
@@ -131,7 +131,7 @@ index 0b29c96..c0a5d88 100644
  const nonNegativeInt = int(0)
  
  /* ------------------------------------------------------------------ */
-@@ -81,6 +87,8 @@ const schema = {
+@@ -118,6 +124,8 @@ const schema = {
    TRUSTED_ORIGINS: list({ default: [] }),
    SIGNUP_EMAIL_DOMAINS: list({ default: [] }),
    ADMIN_EMAILS: list({ default: [] }),
@@ -141,18 +141,18 @@ index 0b29c96..c0a5d88 100644
    OIDC_ISSUER: str({ default: undefined }),
    OIDC_CLIENT_ID: str({ default: undefined }),
 diff --git a/server/index.ts b/server/index.ts
-index b044dcd..6470169 100644
+index 86b4b8a..3512b03 100644
 --- a/server/index.ts
 +++ b/server/index.ts
-@@ -35,6 +35,7 @@ import {
+@@ -45,6 +45,7 @@ import {
  import { isLinkAccess, roleAllows, type CanvasRole } from '../shared/canvasRole.ts'
  import { auth, initAuth, syncAdmins, getUserName, loginProvidersConfig } from './auth.ts'
  import { adminRouter } from './admin.ts'
 +import { operatorRouter } from './operator.ts'
  import { communityRouter, parseListing, publishableFrames } from './community.ts'
  import { automationsRouter, startScheduler } from './automations.ts'
- import { integrationsRouter, relayDesktopCallback } from './integrations.ts'
-@@ -632,6 +633,10 @@ app.post('/ingest/:key', express.json({ limit: '10mb', type: () => true }), (req
+ import { startMcpTokenPrune } from './mcpTokens.ts'
+@@ -704,6 +705,10 @@ app.post('/ingest/:key', express.json({ limit: '10mb', type: () => true }), (req
    })
  })
  
@@ -551,10 +551,10 @@ index 0000000..e9762ea
 +  return router
 +}
 diff --git a/server/store.ts b/server/store.ts
-index 83d8d66..5905562 100644
+index e8e6cfd..b2282e8 100644
 --- a/server/store.ts
 +++ b/server/store.ts
-@@ -379,6 +379,18 @@ class Store {
+@@ -410,6 +410,18 @@ class Store {
      return c
    }
  

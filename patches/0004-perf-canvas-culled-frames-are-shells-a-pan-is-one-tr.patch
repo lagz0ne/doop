@@ -32,18 +32,18 @@ v0.12.0 -> this: pan at fit 2260 -> 245 ms (37 slow frames -> 0), zoom
 Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
 ---
  src/components/FrameContextMenu.tsx |   8 ++
- src/components/FrameView.tsx        | 127 ++++++++++++++---
+ src/components/FrameView.tsx        | 167 +++++++++++++++++++---
  src/components/Stage.tsx            | 206 +++++++++++++++++++++-------
  src/lib/liveFrames.ts               |  48 ++++++-
  tests/liveFrames.test.ts            |  43 +++++-
  tests/liveFramesBrowser.test.ts     |  58 +++++++-
- 6 files changed, 421 insertions(+), 69 deletions(-)
+ 6 files changed, 461 insertions(+), 69 deletions(-)
 
 diff --git a/src/components/FrameContextMenu.tsx b/src/components/FrameContextMenu.tsx
-index 3d709db..83947c7 100644
+index 08300b3..331656e 100644
 --- a/src/components/FrameContextMenu.tsx
 +++ b/src/components/FrameContextMenu.tsx
-@@ -31,6 +31,11 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
+@@ -43,6 +43,11 @@ export function FrameContextMenu({
    const [exportFrames, setExportFrames] = useState<Frame[] | null>(null)
    const [historyOpen, setHistoryOpen] = useState(false)
    const [savingApproval, setSavingApproval] = useState(false)
@@ -55,7 +55,7 @@ index 3d709db..83947c7 100644
    /* a right-click inside a multi-selection acts on the whole group */
    const selectedIds = useStore((s) => s.selectedIds)
    /* a view or comment link keeps the items that only read the frame */
-@@ -41,6 +46,7 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
+@@ -53,6 +58,7 @@ export function FrameContextMenu({
    const streaming = useStore((s) => groupIds.some((id) => !!s.streams[id]))
    /* Hide/Show reads as one item: the group shows when every frame in it is hidden */
    const allHidden = useStore((s) => {
@@ -63,7 +63,7 @@ index 3d709db..83947c7 100644
      const ids = s.selectedIds.includes(frame.id) ? s.selectedIds : [frame.id]
      return (s.canvas?.frames ?? []).filter((f) => ids.includes(f.id)).every((f) => !!f.hidden)
    })
-@@ -52,6 +58,7 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
+@@ -64,6 +70,7 @@ export function FrameContextMenu({
    /* Lock reads as one state for the group: it unlocks only once every frame
       in it is locked, otherwise it locks the rest (as ⌘⇧L does) */
    const allLocked = useStore((s) => {
@@ -71,7 +71,7 @@ index 3d709db..83947c7 100644
      const ids = s.selectedIds.includes(frame.id) ? s.selectedIds : [frame.id]
      const group = s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame]
      return group.every((f) => f.locked)
-@@ -61,6 +68,7 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
+@@ -73,6 +80,7 @@ export function FrameContextMenu({
      deleteFramesTracked(groupFrames().filter((f) => !f.locked))
    }
    const allReady = useStore((s) => {
@@ -80,10 +80,10 @@ index 3d709db..83947c7 100644
      const group = s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame]
      return group.every((f) => f.approval?.status === 'ready_for_dev')
 diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
-index cf10704..7c2cf62 100644
+index 0300bc9..435f3d8 100644
 --- a/src/components/FrameView.tsx
 +++ b/src/components/FrameView.tsx
-@@ -15,7 +15,7 @@ import { copyElementLink } from '../lib/elementLink'
+@@ -16,7 +16,7 @@ import { copyElementLink } from '../lib/elementLink'
  import { sendWs } from '../lib/ws'
  import { throttle } from '../lib/throttle'
  import { getIdentity } from '../lib/identity'
@@ -92,7 +92,7 @@ index cf10704..7c2cf62 100644
  import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
  import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
  import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
-@@ -311,10 +311,15 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+@@ -360,10 +360,15 @@ export const FrameView = memo(function FrameView({
      // A new surface press supersedes the previous click, including an iframe
      // reply that is already in flight when the next layer starts moving.
      if (mode === 'move' && probeOnClick && !skipElement) cancelProbe()
@@ -108,7 +108,7 @@ index cf10704..7c2cf62 100644
        elementMove.start(
          e,
          (press, move, released) => {
-@@ -1472,21 +1477,7 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+@@ -1753,21 +1758,7 @@ export const FrameView = memo(function FrameView({
                  }}
                />
              ) : (
@@ -131,7 +131,7 @@ index cf10704..7c2cf62 100644
              )}
              {!frame.html && (
                <div className="absolute inset-0 grid place-items-center bg-[repeating-linear-gradient(45deg,transparent_0_10px,rgba(28,26,21,0.025)_10px_20px)] text-[13px] text-ink-faint">
-@@ -1801,3 +1792,107 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+@@ -2157,3 +2148,147 @@ export const FrameView = memo(function FrameView({
      </ContextMenu>
    )
  })
@@ -187,14 +187,22 @@ index cf10704..7c2cf62 100644
 + * lands on it (it reads `data-frame-shell`), before the press is delivered,
 + * so selecting, dragging and the context menu behave as on any frame.
 + */
-+const FrameShell = memo(function FrameShell({ frame }: { frame: Frame }) {
++const FrameShell = memo(function FrameShell({ frame, stack }: { frame: Frame; stack?: number }) {
 +  const element = isCanvasElement(frame.html)
 +  return (
 +    <div
 +      data-frame-shell={frame.id}
 +      data-frame-locked={frame.locked ? '' : undefined}
 +      className="absolute"
-+      style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}
++      /* placed, turned and stacked exactly as its FrameView would be */
++      style={{
++        left: frame.x,
++        top: frame.y,
++        width: frame.width,
++        height: frame.height,
++        transform: frame.rotation ? `rotate(${frame.rotation}deg)` : undefined,
++        zIndex: stack,
++      }}
 +    >
 +      {!element && (
 +        <div
@@ -210,6 +218,21 @@ index cf10704..7c2cf62 100644
 +              <LockIcon width={11} height={11} />
 +            </span>
 +          )}
++          {isSyncedFrame(frame.html) && (
++            <span className="flex shrink-0 items-center text-brand">
++              <SyncIcon width={11} height={11} />
++            </span>
++          )}
++          {isGithubFrame(frame.html) && (
++            <span
++              className={cn(
++                'flex shrink-0 items-center',
++                isGithubPlaceholder(frame.html) ? 'text-ink-faint' : 'text-brand',
++              )}
++            >
++              <GithubIcon width={11} height={11} />
++            </span>
++          )}
 +          <span className="min-w-0 overflow-hidden text-ellipsis">{frame.name}</span>
 +          <FrameApprovalBadge frame={frame} />
 +        </div>
@@ -218,7 +241,11 @@ index cf10704..7c2cf62 100644
 +        data-frame-surface=""
 +        className={cn(
 +          'absolute inset-0 cursor-default overflow-hidden',
-+          element ? 'bg-transparent' : 'border border-line bg-white shadow-card',
++          /* no edge at rest and the same soft ring under the pointer as a
++             FrameView's surface, so waking a frame changes nothing on screen */
++          element
++            ? 'bg-transparent'
++            : 'bg-white hover:shadow-[0_0_0_calc(1px/var(--zoom,1))_color-mix(in_srgb,var(--brand)_55%,transparent)]',
 +        )}
 +      >
 +        <FramePreview frame={frame} />
@@ -234,16 +261,29 @@ index cf10704..7c2cf62 100644
 +
 +/** One frame on the Stage: a FrameView while it is live, woken, selected or
 + *  being designed into, a FrameShell the rest of the time. */
-+export const FrameSlot = memo(function FrameSlot({ frame, layoutZoom }: { frame: Frame; layoutZoom: number }) {
++export const FrameSlot = memo(function FrameSlot({
++  frame,
++  stack,
++  layoutZoom,
++}: {
++  frame: Frame
++  /** its place in the page's paint order (see FrameView) */
++  stack?: number
++  layoutZoom: number
++}) {
 +  const awake = useFrameAwake(frame.id)
 +  const engaged = useStore((s) => s.selectedIds.includes(frame.id) || !!s.streams[frame.id])
-+  return awake || engaged ? <FrameView frame={frame} layoutZoom={layoutZoom} /> : <FrameShell frame={frame} />
++  return awake || engaged ? (
++    <FrameView frame={frame} stack={stack} layoutZoom={layoutZoom} />
++  ) : (
++    <FrameShell frame={frame} stack={stack} />
++  )
 +})
 diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
-index d8eb20e..4b2faa4 100644
+index 2a93edc..b81d485 100644
 --- a/src/components/Stage.tsx
 +++ b/src/components/Stage.tsx
-@@ -6,7 +6,8 @@ import type { Frame } from '../../shared/types'
+@@ -7,7 +7,8 @@ import type { Frame } from '../../shared/types'
  import { usePageCanvas, currentPageCanvas } from '../lib/pages'
  import { sendWs } from '../lib/ws'
  import { throttle } from '../lib/throttle'
@@ -253,16 +293,16 @@ index d8eb20e..4b2faa4 100644
  import { CanvasComments, type CanvasComposeAt } from './CanvasComments'
  import { placeComposer } from '../lib/composerPlacement'
  import { isCanvasComment, type CanvasComment } from '../../shared/comments'
-@@ -47,7 +48,7 @@ import { useCanvasDrawing } from './CanvasDrawing'
- import { FrameLabelLayer } from './FrameLabelLayer'
- import { layoutZoomFor } from '../lib/layoutZoom'
+@@ -54,7 +55,7 @@ import { spaceWouldScroll } from '../lib/spaceScroll'
+ import { viewOptionForKey } from '../lib/viewOptions'
+ import { ZOOM_DRAG_MIN, ZOOM_TOOL_STEP, zoomAtPoint, zoomToBox } from '../lib/zoomTool'
  import { isCanvasElement } from '../lib/drawing'
 -import { computeLiveFrames, cullingEnabled, useLiveFrames, type FrameBox } from '../lib/liveFrames'
 +import { computeLiveFrames, cullingEnabled, pinnedBySelection, useLiveFrames, type FrameBox } from '../lib/liveFrames'
  
  const MIN_ZOOM = 0.08
  /* The settled world is laid out at up to this zoom too (layoutZoomFor), so
-@@ -114,21 +115,32 @@ const TOOL_ICONS: Record<Tool, React.ReactNode> = {
+@@ -159,21 +160,32 @@ const TOOL_ICONS: Record<Tool, React.ReactNode> = {
    frame: <FrameIcon />,
  }
  
@@ -306,9 +346,9 @@ index d8eb20e..4b2faa4 100644
 +  })
 +}, 50)
  
- export function Stage({
-   onAddFrame,
-@@ -145,6 +157,19 @@ export function Stage({
+ /** The stage's own paint when the page has a colour: the colour, and a dot
+  *  grid that reads on it (the theme's dots are tuned to the theme paper). */
+@@ -237,6 +249,19 @@ export function Stage({
    const gridRef = useRef<HTMLDivElement>(null)
    const pixelGridRef = useRef<HTMLDivElement>(null)
    const [labelLayer, setLabelLayer] = useState<HTMLDivElement | null>(null)
@@ -328,7 +368,7 @@ index d8eb20e..4b2faa4 100644
    const zoomLabelRef = useRef<HTMLSpanElement>(null)
    const setViewport = useStore((s) => s.setViewport)
    const canvas = usePageCanvas()
-@@ -202,28 +227,48 @@ export function Stage({
+@@ -304,28 +329,48 @@ export function Stage({
        const stage = ref.current
        if (!world || !grid || !stage) return
        world.style.transform = worldTransform(vp, layoutZoomRef.current)
@@ -365,7 +405,7 @@ index d8eb20e..4b2faa4 100644
        grid.style.transform = `translate(${gx}px, ${gy}px)`
        const pixels = pixelGridRef.current
        if (pixels) {
-         const opacity = pixelGridOpacity(vp.zoom)
+         const opacity = useStore.getState().viewOptions.pixelGrid ? pixelGridOpacity(vp.zoom) : 0
 -        pixels.hidden = opacity === 0
 -        pixels.style.opacity = String(opacity)
 -        pixels.style.backgroundSize = `${vp.zoom}px ${vp.zoom}px`
@@ -391,7 +431,7 @@ index d8eb20e..4b2faa4 100644
      }
      apply(useStore.getState().viewport)
      let settle = 0
-@@ -246,46 +291,115 @@ export function Stage({
+@@ -349,46 +394,115 @@ export function Stage({
    }, [])
  
    /* Viewport culling (liveFrames.ts): which frames keep a live document.
@@ -522,7 +562,7 @@ index d8eb20e..4b2faa4 100644
    /* a new layout zoom lands in the same commit as the frames' counter-zoom
       (FrameView), so no paint sees one without the other */
    useLayoutEffect(() => {
-@@ -965,7 +1079,7 @@ export function Stage({
+@@ -1228,7 +1342,7 @@ export function Stage({
                ref={gridRef}
              />
              {/* the selected frame's size badge, in screen px (FrameLabelLayer) */}
@@ -531,15 +571,15 @@ index d8eb20e..4b2faa4 100644
              {/* `world` is likewise a behaviour hook: pan hit-testing checks
              classList.contains('world') to tell background from frame */}
              <div
-@@ -977,7 +1091,7 @@ export function Stage({
-                   f.hidden ? (
-                     <HiddenFrameView key={f.id} frame={f} />
-                   ) : (
--                    <FrameView key={f.id} frame={f} layoutZoom={layoutZoom} />
-+                    <FrameSlot key={f.id} frame={f} layoutZoom={layoutZoom} />
-                   ),
-                 )}
-               </FrameLabelLayer.Provider>
+@@ -1453,7 +1567,7 @@ function FrameStack({ frames, layoutZoom }: { frames: Frame[]; layoutZoom: numbe
+         f.hidden ? (
+           <HiddenFrameView key={f.id} frame={f} stack={rank.get(f.id)} />
+         ) : (
+-          <FrameView key={f.id} frame={f} stack={rank.get(f.id)} layoutZoom={layoutZoom} />
++          <FrameSlot key={f.id} frame={f} stack={rank.get(f.id)} layoutZoom={layoutZoom} />
+         ),
+       )}
+     </div>
 diff --git a/src/lib/liveFrames.ts b/src/lib/liveFrames.ts
 index 452e175..56913a9 100644
 --- a/src/lib/liveFrames.ts

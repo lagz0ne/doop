@@ -35,10 +35,10 @@ Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
  4 files changed, 98 insertions(+), 7 deletions(-)
 
 diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
-index 12a2969..1d82a04 100644
+index d4d25a9..2176115 100644
 --- a/src/components/FrameView.tsx
 +++ b/src/components/FrameView.tsx
-@@ -15,7 +15,7 @@ import { copyElementLink } from '../lib/elementLink'
+@@ -16,7 +16,7 @@ import { copyElementLink } from '../lib/elementLink'
  import { sendWs } from '../lib/ws'
  import { throttle } from '../lib/throttle'
  import { getIdentity } from '../lib/identity'
@@ -47,7 +47,7 @@ index 12a2969..1d82a04 100644
  import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
  import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
  import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
-@@ -621,18 +621,28 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+@@ -759,18 +759,28 @@ export const FrameView = memo(function FrameView({
       A dropped iframe takes its runtime with it, so the handshake starts over
       when it comes back: ready, then the current HTML is posted again. */
    const live = useFrameLive(frame.id)
@@ -79,16 +79,16 @@ index 12a2969..1d82a04 100644
      }
      window.addEventListener('message', onMsg)
      return () => window.removeEventListener('message', onMsg)
-@@ -1445,7 +1455,7 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+@@ -1726,7 +1736,7 @@ export const FrameView = memo(function FrameView({
              }}
-             onPointerLeave={clearHover}
+             onPointerLeave={leaveHover}
            >
 -            {live ? (
 +            {live && (
                <iframe
                  ref={iframeRef}
                  className={cn('block border-none', isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white')}
-@@ -1476,8 +1486,16 @@ export const FrameView = memo(function FrameView({ frame, layoutZoom }: { frame:
+@@ -1757,8 +1767,16 @@ export const FrameView = memo(function FrameView({
                    ...(isCanvasElement(frame.html) ? { colorScheme: 'light' } : null),
                  }}
                />
@@ -108,10 +108,10 @@ index 12a2969..1d82a04 100644
              {!frame.html && (
                <div className="absolute inset-0 grid place-items-center bg-[repeating-linear-gradient(45deg,transparent_0_10px,rgba(28,26,21,0.025)_10px_20px)] text-[13px] text-ink-faint">
 diff --git a/src/lib/frameRuntime.ts b/src/lib/frameRuntime.ts
-index a4570cc..662c02f 100644
+index 850972c..227d783 100644
 --- a/src/lib/frameRuntime.ts
 +++ b/src/lib/frameRuntime.ts
-@@ -115,6 +115,45 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
+@@ -116,6 +116,45 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
      }
    }
  
@@ -157,14 +157,14 @@ index a4570cc..662c02f 100644
    /* ---- inline text editing ----
       The parent flips edit mode on. Instead of designMode (which makes the
       whole document a caret trap), we hit-test: hovering a text-bearing
-@@ -941,6 +980,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
+@@ -1284,6 +1323,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
        notifyFrameUpdated()
        protoHtmlChanged()
        if (d.reqId) parent.postMessage({ type: 'doop:html-result', reqId: d.reqId }, '*')
 +      announceShown()
      }
-     if (d.type === 'doop:edit') setEdit(!!d.on)
-     // Mirror the Layers eye in the live document, including during text edits.
+     if (d.type === 'doop:text-format' && Array.isArray(d.selectors)) {
+       parent.postMessage({ type: 'doop:text-format-result', reqId: d.reqId, selectors: formatLayers(d.selectors, d.command) }, '*')
 diff --git a/src/lib/liveFrames.ts b/src/lib/liveFrames.ts
 index ac85a1d..6882c56 100644
 --- a/src/lib/liveFrames.ts

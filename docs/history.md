@@ -19,6 +19,8 @@
 | 2026-11-12 08:45 | The human chose option A, host-only, and unblocked a deploy request. `DOOP_ADMIN_TOKEN` set (token in `~/.config/doop/doop-admin-token`). Traefik route `the proxy's dynamic config` allows `/api/operator` from loopback/docker gateway only, as a case-insensitive regex, because Express matches routes case-insensitively and `/api/Operator` would have bypassed a plain prefix. doopctl connects via 127.0.0.1 (efee048). Checked: 401 "operator token required" locally, 403 publicly for every spelling, `doopctl users` lists 2 accounts. Found: 1 ownerless canvas ("Welcome Canvas", `<canvas>`) that any account can edit; left for the human |
 | 2026-11-12 05:13 | `v0.12.0-patched.4` (`6914e39`) = patches 0001-0009 (0007-0009: preview fidelity), released after the human approved release and deploy. Deploy request a deploy request, written to run only after a deploy request and to change nothing but the tag. It sat blocked behind a deploy request until the human unblocked both |
 | 2026-11-12 08:48 | patched.4 deployed (a deploy request), env unchanged. Checked on production, read-only (`perf/probes/previews.mjs`): a page of 32 culled frames asks for `/i/<id>.webp?preview&s=0.25`, all 200 `image/webp`, `immutable`, loaded 1.7 s after opening; the pictures are in the frames' own font (Public Sans) and a 12640×400 banner is 3160 px wide at 0.25 and 12640 px at 1. Rollback: tag `v0.12.0-patched.3` |
+| 2026-11-12 | The human: make doop very lightweight and embeddable in the other systems instead of a standalone service; the use is a design system worked by AI and reviewed by humans. Researched first (doop internals, the hosts, prior art). Hosts are the host apps, all on the one doop through MCP, each with its own login; only agents write to the canvases; the host app already has an in-app Review tab over `/i/<frame>.png`. Decided by the human: (1) one doop backend, embedded UI: each host shows a doop review panel in an iframe and signs its user in with a short-lived token (the Metabase / Superset guest-token model), nobody logs into doop; not doop-as-a-library (AGPL would reach the host, React 18 vs 19, three copies). (2) Humans review only: look, comment, approve or request changes; no editor in the panel. (3) First upgrade to v0.14.0 and check our patches |
+| 2026-11-12 | Pin moved v0.12.0 → v0.14.0 (526 files upstream). Upstream fixed none of what our patches fix, so all 9 stay; v0.14.0 + 0001-0009 = `144b2ea`. 0001, 0004 and 0008 needed hand merges (0004: the shell now carries v0.14's stacking order, rotation and borderless surface), 0005 was redone on v0.14's rewritten rail/home/settings and also hides the account menu's "Get desktop app" and "Doop website" links, 0006 applied as it was. Not released. What a deploy brings: 9 DB migrations (0040-0048, so a database backup first and no rollback to v0.12 builds without it), `fonts-dejavu-core` in the Dockerfile, optional `SECRETS_ENCRYPTION_KEYS` (unset = stored credentials stay plaintext, with a boot warning), design tokens (MCP `get_tokens` / `create_tokens` / `set_tokens`), and signed-out viewing of link-shared canvases (5 on production have a link level set) |
 
 The work was done in a Paseo agent session in `../host-app` (Claude transcript
 `<session>`, queue name `agent`) and deployed by the hub
@@ -59,6 +61,16 @@ URL including the query, and sends browsers `max-age=14400` where doop said 60 (
 dashboard thumbnail) can be up to 4 h old in a browser, and a 404 is remembered at the edge
 for about 3 minutes (seen right after the patched.4 switch, on a URL probed during it). Not a
 doop change; hub-owned if it ever needs tuning.
+
+Upgrade to v0.14.0, tests (2026-11-12): typecheck, oxlint and prettier clean on every patched
+file; full vitest with a browser 2562 pass, 14 fail. The 10 `elementPanelBrowser` failures are
+the same on pristine v0.14.0 on this machine; `drawingBrowser`, `oidc`, `claudeExtension` and
+`elementIds` (1 each) pass when run alone, on both trees (timeouts under load). Local production
+build on the migrated perf data: culling, preview levels and the boot cover behave as on patched.4
+(`perf/look.mjs`, `perf/boot.mjs`). The main client bundle grew upstream from 1.7 to 2.1 MB,
+plus a lazy 10 MB MuPDF wasm for PDF import. Known follow-up: any frame write bumps `updatedAt`
+(a move, a restack, a rotation), and previews are keyed on it, so moving a frame re-renders its
+pictures though they are unchanged.
 
 Upstreaming: not attempted yet. Patches 0001-0004 and 0007-0009 are generic enough to offer to
 kgoedecke/doop (0007 is a plain bug fix).
