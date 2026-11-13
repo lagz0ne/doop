@@ -10,6 +10,7 @@ import { auth, createdByOperator } from './auth.ts'
 import { purgeUserData } from './accountDeletion.ts'
 import { createAgentKey, deleteAgentKey, listAgentKeys } from './agentKeys.ts'
 import { isLinkAccess } from '../shared/canvasRole.ts'
+import { isShadowEmail } from './embed.ts'
 import type { Canvas } from '../shared/types.ts'
 
 /**
@@ -130,8 +131,10 @@ export function operatorRouter(refreshRoomRoles: Refresh): express.Router {
 
   /* ---------------------------------------------------------------- users */
 
-  get('/users', async (_req, res) => {
-    const rows = await db.select(userColumns).from(authSchema.user)
+  /* ?all=1 includes the embedded review panel's shadow reviewers */
+  get('/users', async (req, res) => {
+    const all = req.query.all === '1'
+    const rows = (await db.select(userColumns).from(authSchema.user)).filter((u) => all || !isShadowEmail(u.email))
     const owned = new Map<string, number>()
     const member = new Map<string, number>()
     for (const c of store.allCanvases()) {

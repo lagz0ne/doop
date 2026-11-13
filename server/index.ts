@@ -46,6 +46,15 @@ import { isLinkAccess, roleAllows, type CanvasRole } from '../shared/canvasRole.
 import { auth, initAuth, syncAdmins, getUserName, loginProvidersConfig } from './auth.ts'
 import { adminRouter } from './admin.ts'
 import { operatorRouter } from './operator.ts'
+import {
+  canvasForReviewer,
+  embedGrantOf,
+  embedRole,
+  embedRouteAllowed,
+  forReviewer,
+  presenceForReviewer,
+  type EmbedGrant,
+} from './embed.ts'
 import { communityRouter, parseListing, publishableFrames } from './community.ts'
 import { automationsRouter, startScheduler } from './automations.ts'
 import { startMcpTokenPrune } from './mcpTokens.ts'
@@ -192,6 +201,9 @@ interface Conn {
    *  Showing their borrowed identity as a live cursor would tell the room
    *  the owner is here when they aren't. */
   silent?: boolean
+  /** an embedded review panel session: its role comes from the grant, and
+   *  the room reaches it through forReviewer */
+  embed?: EmbedGrant
 }
 
 /* What a signed-out guest is not sent: the team's conversation (comments,
@@ -243,6 +255,7 @@ function refreshPresenceImage(userId: string, image: string | undefined): void {
 function connRole(conn: Conn): CanvasRole | null {
   const canvas = store.getCanvas(conn.canvasId)
   if (!canvas) return null
+  if (conn.embed) return embedRole(conn.embed, canvas)
   return conn.userId ? canvasRole(conn.userId, canvas) : guestCanvasRole(canvas)
 }
 
@@ -273,7 +286,7 @@ function send(ws: WebSocket, msg: ServerMessage) {
 function broadcast(canvasId: string, msg: ServerMessage, excludeClientId?: string) {
   for (const c of room(canvasId)) {
     if (excludeClientId && c.presence.clientId === excludeClientId) continue
-    const shown = c.userId ? msg : forGuest(msg)
+    const shown = c.embed ? forReviewer(msg) : c.userId ? msg : forGuest(msg)
     if (shown) send(c.ws, shown)
   }
 }
@@ -730,6 +743,8 @@ declare global {
       user?: SessionUser
       /** admin's user id when this session is a "view as" — see /api/admin */
       impersonatedBy?: string
+      /** an embedded review panel session: its one canvas and role */
+      embed?: EmbedGrant
     }
   }
 }
@@ -744,6 +759,11 @@ app.use('/api', async (req, res, next) => {
     if (!session) return res.status(401).json({ error: 'unauthorized' })
     req.user = session.user
     req.impersonatedBy = (session.session as { impersonatedBy?: string | null }).impersonatedBy ?? undefined
+    /* an embedded review panel session reaches its canvas through a short
+       list of routes and nothing else (server/embed.ts) */
+    req.embed = embedGrantOf(session.session)
+    if (req.embed && !embedRouteAllowed(req.method, req.path))
+      return res.status(403).json({ error: 'not available in the review panel' })
     /* Viewing as someone else is read-only, full stop. Every doop mutation is
        a non-GET REST call — the websocket after `join` carries only cursor,
        editing and frame:drag — so this single rule covers the whole surface.
@@ -881,8 +901,13 @@ function requireCanvas(req: express.Request, res: express.Response, canvasId: st
   return checkRole(req, res, c, need) ? c : null
 }
 
+/** The caller's role on a canvas: an embed session's grant, else the account's. */
+function callerRole(req: express.Request, canvas: Canvas): CanvasRole | null {
+  return req.embed ? embedRole(req.embed, canvas) : canvasRole(req.user!.id, canvas)
+}
+
 function checkRole(req: express.Request, res: express.Response, canvas: Canvas, need: CanvasRole): boolean {
-  const role = canvasRole(req.user!.id, canvas)
+  const role = callerRole(req, canvas)
   if (!role) {
     res.status(403).json({ error: 'this canvas is private — ask the owner for access' })
     return false
@@ -1265,7 +1290,9 @@ app.post('/api/canvases/:id/duplicate', async (req, res) => {
 app.get('/api/canvases/:id', (req, res) => {
   const c = requireCanvas(req, res, req.params.id, 'view')
   /* the caller's own role rides along, so the editor knows to go read-only */
-  if (c) res.json({ ...c, role: canvasRole(req.user!.id, c) })
+  if (!c) return
+  /* a reviewer reads the canvas without its memory or member list */
+  res.json(req.embed ? { ...canvasForReviewer(c), role: callerRole(req, c) } : { ...c, role: callerRole(req, c) })
 })
 
 /* Community gallery listing — the owner's call alone, like link access.
@@ -2651,7 +2678,8 @@ wss.on('connection', (ws, upgradeReq) => {
         ws.close(4404, 'not found')
         return
       }
-      const role = canvasRole(session.user.id, canvas)
+      const embed = embedGrantOf(session.session)
+      const role = embed ? embedRole(embed, canvas) : canvasRole(session.user.id, canvas)
       if (!role) {
         ws.close(4403, 'no access')
         return
@@ -2666,21 +2694,25 @@ wss.on('connection', (ws, upgradeReq) => {
         activeFrameId: null,
       }
       const silent = !!(session.session as { impersonatedBy?: string | null }).impersonatedBy
-      conns.set(ws, { ws, canvasId: msg.canvasId, userId: session.user.id, presence, silent })
+      conns.set(ws, { ws, canvasId: msg.canvasId, userId: session.user.id, presence, silent, embed })
       const others = room(msg.canvasId)
         .filter((c) => c.ws !== ws && !c.silent)
         .map((c) => c.presence)
       const agents = [...(agentPresences.get(msg.canvasId)?.values() ?? [])]
       send(ws, {
         type: 'init',
-        canvas: { ...canvas, role },
-        presences: [...others, ...agents],
-        activity: actions.getActivity(msg.canvasId),
-        tasks: actions.getTasks(msg.canvasId),
-        feedback: actions.getFeedback(msg.canvasId),
+        canvas: embed ? { ...canvasForReviewer(canvas), role } : { ...canvas, role },
+        presences: embed ? [...others, ...agents].map(presenceForReviewer) : [...others, ...agents],
+        ...(embed
+          ? { activity: [], tasks: [], feedback: [], decisions: [], proposals: [] }
+          : {
+              activity: actions.getActivity(msg.canvasId),
+              tasks: actions.getTasks(msg.canvasId),
+              feedback: actions.getFeedback(msg.canvasId),
+              decisions: actions.getDecisions(msg.canvasId),
+              proposals: actions.getProposals(msg.canvasId),
+            }),
         comments: actions.getComments(msg.canvasId),
-        decisions: actions.getDecisions(msg.canvasId),
-        proposals: actions.getProposals(msg.canvasId),
         selfColor: presence.color,
         serverBuild: BUILD_ID,
       })

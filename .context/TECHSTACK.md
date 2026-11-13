@@ -656,6 +656,24 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   own record (`priorVerdicts`). Tests: `reviewVerdicts.test.ts`, `approvalHistory.test.ts`,
   `frameApprovalControl.test.tsx`, `canvasRole.test.ts`.
 
+- Embedded review panel sign-in (`server/embed.ts`): a host app signs its user in with an HS256
+  token (`iss` a key of `DOOP_EMBED_HOSTS`, `aud` "doop", `sub`, `name`, `canvas`, `role` view /
+  comment / review, at most five minutes, `jti` used once). `POST /api/auth/embed/session` is a
+  better-auth plugin endpoint (`embedPlugin`, behind `formCsrfMiddleware` as sign-in is) that
+  finds or creates a shadow user (`<hash>@<iss>.embed.invalid`, no password, no first canvas:
+  `letIn` in `auth.ts`) and starts an ordinary session whose grant lives on the session row
+  (`embed_canvas_id`, `embed_role`, migration 0049), for two hours. It answers `{ canvasId, role,
+hostOrigin, expiresAt, user: { name } }`. An embed session opens its one canvas at its one role
+  (`callerRole`, `connRole`), reaches only `EMBED_ROUTES` (the /api session gate answers 403
+  otherwise), and reads the canvas and its room through the reviewer filter: frames, pages,
+  comments, approvals and presence without status, not tasks, feedback, activity or memory
+  (`forReviewer`, `canvasForReviewer`). `embedHostOrigins()` lists the host pages for the panel's
+  `frame-ancestors`. Operator and admin user lists hide shadow reviewers unless `?all=1`. The
+  panel may live on its own hostname (its host-only cookie never replaces a person's own doop
+  session); that origin goes in `TRUSTED_ORIGINS`. Tests: `embed.test.ts` (a production-mode
+  server on a second hostname included; vitest's `TEST=true` turns better-auth's origin check off,
+  so that case clears it).
+
 - Bun 1.3.10 - package manager; lockfile at `bun.lock`, installed with `bun install
 --frozen-lockfile` in CI.
 - Vite 8 (Rolldown-based) - frontend build tool (`vite build`), with `@vitejs/plugin-react` 6.

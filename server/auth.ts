@@ -8,6 +8,7 @@ import { db } from './db/index.ts'
 import * as authSchema from './db/auth-schema.ts'
 import { store } from './store.ts'
 import * as demo from './demo.ts'
+import { embedPlugin } from './embed.ts'
 import { mailerConfigured, sendMail } from './mailer.ts'
 import { acceptInvites } from './workspaces.ts'
 import { purgeUserData } from './accountDeletion.ts'
@@ -27,6 +28,14 @@ const operatorCreation = new AsyncLocalStorage<true>()
 
 export function createdByOperator<T>(create: () => Promise<T>): Promise<T> {
   return operatorCreation.run(true, create)
+}
+
+/** Is this account being let in rather than signing up? The operator API
+ *  marks its calls with operatorCreation; the embed exchange is known by its
+ *  endpoint, since better-auth runs after-create hooks once the endpoint's
+ *  transaction ends, outside any scope set inside the handler. */
+function letIn(ctx: unknown): boolean {
+  return !!operatorCreation.getStore() || (ctx as { path?: string } | null)?.path === '/embed/session'
 }
 
 /**
@@ -491,11 +500,11 @@ function buildAuth() {
     databaseHooks: {
       user: {
         create: {
-          before: async (user) => {
-            if (!operatorCreation.getStore()) assertSignupDomainAllowed(user.email)
+          before: async (user, ctx) => {
+            if (!letIn(ctx)) assertSignupDomainAllowed(user.email)
           },
-          after: async (user) => {
-            if (!operatorCreation.getStore()) {
+          after: async (user, ctx) => {
+            if (!letIn(ctx)) {
               const first = (user.name || 'Your').split(/\s+/)[0]
               const canvas = store.createCanvas(`${first}'s first canvas`, user.id)
               demo.markPending(canvas.id)
@@ -537,6 +546,7 @@ function buildAuth() {
        so the gate's own default (matching, IdP-verified email) is what
        actually decides linking, as intended. */
     plugins: [
+      embedPlugin(),
       mcp({
         loginPage: '/',
         oidcConfig: { loginPage: '/', consentPage: '/oauth/consent', refreshTokenExpiresIn: MCP_REFRESH_TOKEN_TTL_S },

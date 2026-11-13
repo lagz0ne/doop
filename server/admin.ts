@@ -4,6 +4,7 @@ import { store } from './store.ts'
 import { isAdmin } from './access.ts'
 import { db } from './db/index.ts'
 import * as authSchema from './db/auth-schema.ts'
+import { isShadowEmail } from './embed.ts'
 import { listAgentFeedback } from './agentFeedback.ts'
 import { agentFeedback } from './db/schema.ts'
 
@@ -73,6 +74,8 @@ adminRouter.get('/users', async (req, res) => {
   }
   res.json(
     rows
+      /* the review panel's shadow reviewers only with ?all=1 */
+      .filter((u) => req.query.all === '1' || !isShadowEmail(u.email))
       .map((u) => ({ ...u, createdAt: u.createdAt.getTime(), canvasCount: owned.get(u.id) ?? 0 }))
       .sort((a, b) => b.createdAt - a.createdAt),
   )

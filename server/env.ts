@@ -126,6 +126,9 @@ const schema = {
   ADMIN_EMAILS: list({ default: [] }),
   /* unset = the operator API (server/operator.ts) does not exist */
   DOOP_ADMIN_TOKEN: secret({ default: undefined }),
+  /* JSON {"<host id>": {"secret": "<32+ chars>", "origin": "https://…"}};
+     unset = no embedded review panel (server/embed.ts) */
+  DOOP_EMBED_HOSTS: str({ default: undefined }),
   REQUIRE_EMAIL_VERIFICATION: bool({ default: true }),
   OIDC_ISSUER: str({ default: undefined }),
   OIDC_CLIENT_ID: str({ default: undefined }),
