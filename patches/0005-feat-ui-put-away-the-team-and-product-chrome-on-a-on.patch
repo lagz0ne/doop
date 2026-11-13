@@ -35,7 +35,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  src/pages/CanvasPage.tsx     |   5 +-
  src/pages/Home.tsx           |  45 ++++---
  src/pages/Settings.tsx       |  27 +++--
- 7 files changed, 244 insertions(+), 175 deletions(-)
+ tests/accountMenu.test.tsx   |  17 +++
+ 8 files changed, 261 insertions(+), 175 deletions(-)
  create mode 100644 src/lib/fullUi.ts
 
 diff --git a/src/components/AppRail.tsx b/src/components/AppRail.tsx
@@ -640,3 +641,58 @@ index 58d83f0..d66a5b8 100644
                <TabsTrigger value="account">
                  <UserIcon size="rail" /> {t('settings.accountTab')}
                </TabsTrigger>
+diff --git a/tests/accountMenu.test.tsx b/tests/accountMenu.test.tsx
+index cf626d8..4578ba3 100644
+--- a/tests/accountMenu.test.tsx
++++ b/tests/accountMenu.test.tsx
+@@ -3,11 +3,18 @@ import { act } from 'react'
+ import { createRoot, type Root } from 'react-dom/client'
+ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+ const shell = vi.hoisted(() => ({ desktop: false }))
++/* the patched build hides the product links unless the full UI is on (src/lib/fullUi.ts) */
++const ui = vi.hoisted(() => ({ full: false }))
+ vi.mock('../src/lib/auth', () => ({
+   authClient: { useSession: () => ({ data: { user: { id: 'alice', name: 'Alice Doe' } } }), signOut: vi.fn() },
+ }))
+ vi.mock('../src/lib/me', () => ({ useMe: () => null }))
+ vi.mock('../src/lib/shell', () => ({ isDesktopShell: () => shell.desktop }))
++vi.mock('../src/lib/fullUi', () => ({
++  get FULL_UI() {
++    return ui.full
++  },
++}))
+ import { AccountMenu } from '../src/components/DashShell'
+ ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+ 
+@@ -22,6 +29,7 @@ afterEach(() => {
+   act(() => root.unmount())
+   container.remove()
+   shell.desktop = false
++  ui.full = false
+ })
+ 
+ /* render the menu and open it from the keyboard, as Radix expects */
+@@ -37,14 +45,23 @@ async function openMenu(): Promise<Map<string, string | null>> {
+ }
+ 
+ it('links the desktop download and the website from the account menu', async () => {
++  ui.full = true
+   const links = await openMenu()
+   expect(links.get('Get desktop app')).toBe('https://doop.design/download')
+   expect(links.get('Doop website')).toBe('https://doop.design/?site')
+ })
+ 
+ it('offers no download inside the desktop app', async () => {
++  ui.full = true
+   shell.desktop = true
+   const links = await openMenu()
+   expect(links.has('Get desktop app')).toBe(false)
+   expect(links.get('Doop website')).toBe('https://doop.design/?site')
+ })
++
++it('keeps the download and the website out of the menu unless the full UI is on', async () => {
++  const links = await openMenu()
++  expect(links.has('Get desktop app')).toBe(false)
++  expect(links.has('Doop website')).toBe(false)
++  expect(links.get('Help & docs')).toBe('/docs')
++})
