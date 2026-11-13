@@ -54,6 +54,7 @@ in `.env.example`) and `local/` (notes, deploy log, hooks).
     bin/doop commit -m "…"     # git commit in build/doop (doop's lint-staged + commitlint run)
     bin/doop export            # build/doop's commits → patches/ (rewrites the series)
     bin/doop check [--test]    # vendor pristine, everything applies (--test: typecheck + vitest)
+    bin/doop check --browser  # --test plus the ~30 browser test files (Playwright's Chromium)
     bin/doop base              # build/base := pristine pin
     bin/doop serve [--base]    # local production doop on :4477 (patched) / :4478 (base), for perf
     bin/doop release [--push]  # tag <upstream>-<suffix>.<n>, move the release branch, push
