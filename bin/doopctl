@@ -26,7 +26,8 @@ const USAGE = `doopctl: users, sharing, canvas owners and agent keys on doop
 usage: doopctl [--url URL] [--connect ADDR] [--json] [--yes] <command> ...
 
 users
-  users                              list accounts
+  users [--all]                      list accounts (--all: include the review panel's
+                                     shadow reviewers, *.embed.invalid)
   users show <user>                  one account: canvases, agent keys
   users create <email> [--name N] [--password-stdin]
                                      new account (works while sign-up is closed);
@@ -277,7 +278,7 @@ const [group = 'help', sub, ...rest] = args
 
 async function users() {
   if (!sub || sub === 'list') {
-    return out(await api('/users'), (us) =>
+    return out(await api(opts.all ? '/users?all=1' : '/users'), (us) =>
       table(us, [
         ['email', (u) => u.email],
         ['name', (u) => u.name],
