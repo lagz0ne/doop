@@ -10,6 +10,7 @@ import { auth, createdByOperator } from './auth.ts'
 import { purgeUserData } from './accountDeletion.ts'
 import { createAgentKey, deleteAgentKey, listAgentKeys } from './agentKeys.ts'
 import { isLinkAccess } from '../shared/canvasRole.ts'
+import { setLinkPassword, validLinkPassword } from './shareLink.ts'
 import { isShadowEmail } from './embed.ts'
 import type { Canvas } from '../shared/types.ts'
 
@@ -316,6 +317,7 @@ export function operatorRouter(refreshRoomRoles: Refresh): express.Router {
       owner: c.ownerId ? person(c.ownerId) : null,
       members: (c.memberIds ?? []).map(person),
       linkAccess: c.linkAccess ?? 'none',
+      linkPassword: !!c.linkPassword,
       workspaceId: c.workspaceId ?? null,
     }
   }
@@ -353,10 +355,19 @@ export function operatorRouter(refreshRoomRoles: Refresh): express.Router {
     const c = canvasOr404(param(req, 'id'), res)
     if (!c) return
     const access: unknown = req.body?.access
-    if (!isLinkAccess(access)) return res.status(400).json({ error: 'access must be none, view, comment or edit' })
-    store.setLinkAccess(c.id, access)
+    const password: unknown = req.body?.password
+    if (access !== undefined && !isLinkAccess(access))
+      return res.status(400).json({ error: 'access must be none, view, comment, review or edit' })
+    /* a password string sets it, null takes it away, absent leaves it */
+    if (password !== undefined && password !== null && !validLinkPassword(password))
+      return res.status(400).json({ error: 'password must be 1-200 characters, or null' })
+    if (access === undefined && password === undefined)
+      return res.status(400).json({ error: 'give access, password or both' })
+    if (access !== undefined) store.setLinkAccess(c.id, access)
+    if (password !== undefined) await setLinkPassword(c.id, password)
     refreshRoomRoles(c.id)
-    audit(`link access of canvas ${c.id} = ${access}`)
+    if (access !== undefined) audit(`link access of canvas ${c.id} = ${access}`)
+    if (password !== undefined) audit(`link password of canvas ${c.id} ${password === null ? 'removed' : 'set'}`)
     res.json(await accessOf(c))
   })
 

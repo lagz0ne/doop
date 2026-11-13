@@ -61,6 +61,21 @@ export const canvas = {
 
   /* canvas not found */
   notFoundTitle: 'Canvas not found',
+  joinTitle: 'Join {name}',
+  joinTitleProtected: 'This canvas has a password',
+  joinBodyView: 'Say who you are to look around.',
+  joinBodyComment: 'Say who you are to look and comment.',
+  joinBodyReview: 'Say who you are to comment, approve and request changes.',
+  joinBodyEdit: 'Say who you are to work on it.',
+  joinName: 'Your name',
+  joinNamePlaceholder: 'How others will see you',
+  joinPassword: 'Password',
+  joinSubmit: 'Open the canvas',
+  joinJustLook: 'Just look, without a name',
+  joinSignIn: 'I have an account',
+  joinWrongPassword: 'That password is not right.',
+  joinTooMany: 'Too many tries. Wait a few minutes and try again.',
+  joinFailed: 'Could not open the canvas. Try again.',
   notFoundBody: '“{id}” doesn’t match a canvas we know about. It may have been deleted, or the link may be wrong.',
   backToCanvases: 'Back to your canvases',
 

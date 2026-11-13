@@ -26,6 +26,7 @@ import {
   ImportIcon,
   PlusIcon,
   PrototypeModeIcon,
+  ShareUpIcon,
   SlidersIcon,
   SparkIcon,
 } from './ui/icons'
@@ -62,6 +63,7 @@ export function CanvasDock({
   onConnect,
   inspector,
   onSettings,
+  onShare,
 }: {
   title: ReactNode
   idMenu: ReactNode
@@ -80,6 +82,8 @@ export function CanvasDock({
   onConnect: (() => void) | null
   inspector: { open: boolean; label: string; onToggle: () => void } | null
   onSettings: (() => void) | null
+  /** the owner's Share dialog (link level and password) */
+  onShare: (() => void) | null
 }) {
   const t = useT()
   const openThreads = useOpenThreadCount()
@@ -114,7 +118,7 @@ export function CanvasDock({
           </span>
         </span>
       </Tooltip>
-      {(onImport || onExport) && <ToolbarDivider />}
+      {(onImport || onExport || onShare) && <ToolbarDivider />}
       {onImport && (
         <ToolbarControl side={side} label={t('canvas.import')} onClick={onImport}>
           <ImportIcon />
@@ -123,6 +127,11 @@ export function CanvasDock({
       {onExport && (
         <ToolbarControl side={side} label={t('canvas.export')} onClick={onExport}>
           <ExportIcon />
+        </ToolbarControl>
+      )}
+      {onShare && (
+        <ToolbarControl side={side} label={t('canvas.share')} onClick={onShare}>
+          <ShareUpIcon />
         </ToolbarControl>
       )}
       {(onPanel || onConnect) && <ToolbarDivider />}

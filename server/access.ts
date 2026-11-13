@@ -1,5 +1,5 @@
 import type { Canvas, ClientMessage } from '../shared/types.ts'
-import { roleAllows, type CanvasRole } from '../shared/canvasRole.ts'
+import { roleAllows, storedLinkAccess, type CanvasRole } from '../shared/canvasRole.ts'
 import { hasRole, isWorkspaceMember } from './workspaces.ts'
 
 /**
@@ -7,7 +7,9 @@ import { hasRole, isWorkspaceMember } from './workspaces.ts'
  * access; invited members (canvas_members) always have access; so does
  * every member of the workspace a canvas lives in; everyone else gets in
  * only through the share link, at the level its owner set (linkAccess
- * 'view' | 'comment' | 'edit' — unset means 'none').
+ * 'view' | 'comment' | 'review' | 'edit' — unset means 'none'). A link with a
+ * password (canvas.linkPassword) admits nobody by itself: its visitors come
+ * in through the password, as link guests (server/shareLink.ts).
  * Ownerless (pre-auth/legacy) canvases stay open so they can be claimed.
  *
  * Every canvas-scoped surface — REST, the WS join, MCP tools — must gate
@@ -34,8 +36,15 @@ export function canvasRole(userId: string | undefined, canvas: Canvas): CanvasRo
   if (!canvas.ownerId) return 'edit'
   if (!userId) return null
   if (hasDurableCanvasAccess(userId, canvas)) return 'edit'
-  const link = canvas.linkAccess
-  return link === 'view' || link === 'comment' || link === 'edit' ? link : null
+  return openLinkLevel(canvas)
+}
+
+/** The share link's level for anyone holding the link, or null when the link
+ *  is off or asks for a password. */
+export function openLinkLevel(canvas: Canvas): CanvasRole | null {
+  if (canvas.linkPassword) return null
+  const link = storedLinkAccess(canvas.linkAccess)
+  return link ?? null
 }
 
 /** What a signed-out visitor may do: look, at most, and only at a canvas
@@ -45,8 +54,7 @@ export function canvasRole(userId: string | undefined, canvas: Canvas): CanvasRo
  *  need a session. */
 export function guestCanvasRole(canvas: Canvas): 'view' | null {
   if (!canvas.ownerId) return null
-  const link = canvas.linkAccess
-  return link === 'view' || link === 'comment' || link === 'edit' ? 'view' : null
+  return openLinkLevel(canvas) ? 'view' : null
 }
 
 /** May this user read the canvas (open it, join its room, see its frames)? */

@@ -80,7 +80,6 @@ import { addCanvasFont, uploadedFontResult } from './canvasFontUpload.ts'
 import { MAX_FONT_BYTES } from '../shared/fonts.ts'
 import { tokensCss, tokensMarkdown, tokensTailwind } from '../shared/designTokens.ts'
 import {
-  canEditCanvas,
   canManageCanvas,
   canvasRole,
   guestCanvasRole,
@@ -102,6 +101,14 @@ import {
   presenceForReviewer,
   type EmbedGrant,
 } from './embed.ts'
+import {
+  linkGrantOf,
+  linkRole,
+  linkRouteAllowed,
+  setLinkPassword,
+  validLinkPassword,
+  type LinkGrant,
+} from './shareLink.ts'
 import { serveEmbedPage } from './embedPage.ts'
 import { communityRouter, parseListing, publishableFrames } from './community.ts'
 import { automationsRouter, startScheduler } from './automations.ts'
@@ -266,6 +273,8 @@ interface Conn {
   /** an embedded review panel session: its role comes from the grant, and
    *  the room reaches it through forReviewer */
   embed?: EmbedGrant
+  /** a share-link guest: its role is the link's, read live (linkRole) */
+  linkGuest?: LinkGrant
 }
 
 /* What a signed-out guest is not sent: the team's conversation (comments,
@@ -318,6 +327,7 @@ function connRole(conn: Conn): CanvasRole | null {
   const canvas = store.getCanvas(conn.canvasId)
   if (!canvas) return null
   if (conn.embed) return embedRole(conn.embed, canvas)
+  if (conn.linkGuest) return linkRole(conn.linkGuest, canvas)
   return conn.userId ? canvasRole(conn.userId, canvas) : guestCanvasRole(canvas)
 }
 
@@ -901,6 +911,8 @@ declare global {
       impersonatedBy?: string
       /** an embedded review panel session: its one canvas and role */
       embed?: EmbedGrant
+      /** a share-link guest's session: its one canvas, at the link's level */
+      linkGuest?: LinkGrant
     }
   }
 }
@@ -920,6 +932,11 @@ app.use('/api', async (req, res, next) => {
     req.embed = embedGrantOf(session.session)
     if (req.embed && !embedRouteAllowed(req.method, req.path))
       return res.status(403).json({ error: 'not available in the review panel' })
+    /* a share-link guest reaches its canvas and nothing account-wide
+       (server/shareLink.ts) */
+    req.linkGuest = linkGrantOf(session.session)
+    if (req.linkGuest && !linkRouteAllowed(req.method, req.path, req.linkGuest))
+      return res.status(403).json({ error: 'not available to a guest of a shared link' })
     /* Viewing as someone else is read-only, full stop. Every doop mutation is
        a non-GET REST call — the websocket after `join` carries only cursor,
        editing and frame:drag — so this single rule covers the whole surface.
@@ -982,6 +999,8 @@ app.get('/api/me', async (req, res) => {
        outright, so everything else on this response describes the person
        being viewed, not the admin doing the viewing */
     impersonating: req.impersonatedBy ? { byName: (await getUserName(req.impersonatedBy)) ?? 'an admin' } : undefined,
+    /* a share-link guest: the one canvas this session opens */
+    linkGuest: req.linkGuest ? { canvasId: req.linkGuest.canvasId } : undefined,
   })
 })
 
@@ -1088,9 +1107,12 @@ function requireCanvas(req: express.Request, res: express.Response, canvasId: st
   return checkRole(req, res, c, need) ? c : null
 }
 
-/** The caller's role on a canvas: an embed session's grant, else the account's. */
+/** The caller's role on a canvas: an embed session's grant, a link guest's
+ *  link, else the account's. */
 function callerRole(req: express.Request, canvas: Canvas): CanvasRole | null {
-  return req.embed ? embedRole(req.embed, canvas) : canvasRole(req.user!.id, canvas)
+  if (req.embed) return embedRole(req.embed, canvas)
+  if (req.linkGuest) return linkRole(req.linkGuest, canvas)
+  return canvasRole(req.user!.id, canvas)
 }
 
 function checkRole(req: express.Request, res: express.Response, canvas: Canvas, need: CanvasRole): boolean {
@@ -1118,7 +1140,7 @@ const ROLE_DENIED: Record<CanvasRole, string> = {
    agent would make the edits the link withholds. Answers the 403 itself. */
 function refuseAgentMention(req: express.Request, res: express.Response, canvasId: string, text: string): boolean {
   const canvas = store.getCanvas(canvasId)
-  if (!mentionedRole(text, rosterFor(canvas)) || (canvas && canEditCanvas(req.user!.id, canvas))) return false
+  if (!mentionedRole(text, rosterFor(canvas)) || (canvas && roleAllows(callerRole(req, canvas), 'edit'))) return false
   res.status(403).json({ error: 'asking an agent to change the canvas needs edit access' })
   return true
 }
@@ -1694,16 +1716,20 @@ app.delete('/api/canvases/:id', (req, res) => {
   res.json({ ok: true })
 })
 
-app.patch('/api/canvases/:id', (req, res) => {
+app.patch('/api/canvases/:id', async (req, res) => {
   const c = requireCanvas(req, res, req.params.id, 'edit')
   if (!c) return
-  const { name, linkAccess } = req.body ?? {}
+  const { name, linkAccess, linkPassword } = req.body ?? {}
   /* the link policy is the owner's alone — collaborators can rename, not lock */
-  if (linkAccess !== undefined) {
+  if (linkAccess !== undefined || linkPassword !== undefined) {
     if (c.ownerId !== req.user!.id) return res.status(403).json({ error: 'only the owner can change link access' })
-    if (!isLinkAccess(linkAccess))
-      return res.status(400).json({ error: 'linkAccess must be "none", "view", "comment" or "edit"' })
-    store.setLinkAccess(c.id, linkAccess)
+    if (linkAccess !== undefined && !isLinkAccess(linkAccess))
+      return res.status(400).json({ error: 'linkAccess must be "none", "view", "comment", "review" or "edit"' })
+    /* a password string sets it, null or '' takes it away */
+    if (linkPassword !== undefined && linkPassword !== null && linkPassword !== '' && !validLinkPassword(linkPassword))
+      return res.status(400).json({ error: 'linkPassword must be a string of up to 200 characters, or null' })
+    if (linkAccess !== undefined) store.setLinkAccess(c.id, linkAccess)
+    if (linkPassword !== undefined) await setLinkPassword(c.id, linkPassword || null)
     refreshRoomRoles(c.id)
   }
   if (typeof name === 'string' && name.trim()) {
@@ -3429,7 +3455,9 @@ wss.on('connection', (ws, upgradeReq) => {
       }
       /* checked before loading, so a denied join never loads the canvas */
       const embed = embedGrantOf(session.session)
-      const roleOn = (c: Canvas) => (embed ? embedRole(embed, c) : canvasRole(session.user.id, c))
+      const linkGuest = linkGrantOf(session.session)
+      const roleOn = (c: Canvas) =>
+        embed ? embedRole(embed, c) : linkGuest ? linkRole(linkGuest, c) : canvasRole(session.user.id, c)
       if (!roleOn(canvas)) {
         ws.close(4403, 'no access')
         return
@@ -3460,7 +3488,7 @@ wss.on('connection', (ws, upgradeReq) => {
         activeFrameId: null,
       }
       const silent = !!(session.session as { impersonatedBy?: string | null }).impersonatedBy
-      conns.set(ws, { ws, canvasId: msg.canvasId, userId: session.user.id, presence, silent, embed })
+      conns.set(ws, { ws, canvasId: msg.canvasId, userId: session.user.id, presence, silent, embed, linkGuest })
       const others = room(msg.canvasId)
         .filter((c) => c.ws !== ws && !c.silent)
         .map((c) => c.presence)
