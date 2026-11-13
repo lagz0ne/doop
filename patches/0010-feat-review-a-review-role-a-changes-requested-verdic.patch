@@ -1,0 +1,842 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 02:07:03 +0000
+Subject: [PATCH 10/11] feat(review): a review role, a changes-requested
+ verdict and its event
+
+Human reviewers should look, comment and give a verdict, approve or send a
+frame back, without being able to change the design. Until now giving a
+verdict needed edit rights, and there was no way to say "not yet".
+
+- Roles rank view < comment < review < edit (shared/canvasRole.ts). review
+  is everything comment is, plus the verdict; every frame write, the room's
+  editing messages and the drawing tools still need edit. It is not a link
+  level, and nothing grants it yet beyond edit including it (the embedded
+  review panel will).
+- PUT /api/frames/:id/approval needs review and takes ready_for_dev,
+  changes_requested or draft. changes_requested is the same record as an
+  approval (who, when, which revision). setFrameApproval takes the verdict
+  instead of a boolean and writes "requested changes on ..." to activity.
+- A design edit after either verdict makes the frame needs_review, as it
+  already did after an approval.
+- Each verdict emits a frame.approval canvas event: a webhook event of the
+  same name ({ status, actor, frame }), listed in Settings (en, pt-BR).
+- Agents: MCP get_canvas filters approval_status=changes_requested, and the
+  MCP instructions, the guide and the resident agent's prompt say what it
+  means (read the comments, revise; the edit asks for another review).
+- Editor: the frame menu's verdict items (Mark ready for dev, and the new
+  Request changes) need review, lock/delete still need edit; the Inspector
+  has Request changes beside the approval switch; the badge reads "Changes
+  requested" with who and when (en, pt-BR).
+
+Tests: reviewVerdicts.test.ts (real server: a comment-link visitor is
+refused, an editor sends a frame back, the webhook delivery, needs_review
+after an edit, a new verdict on the new revision), frameApprovalControl
+(Request changes, the badge, a reviewer's menu without editing items),
+canvasRole (the ranking). approvalAutomations, frameApproval, webhooks,
+webhookRoutes, mcp-tools, i18n, shareLinkRoles, guestCanvas, access pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .context/TECHSTACK.md               | 11 ++++
+ server/actions.ts                   | 32 ++++++----
+ server/events.ts                    |  2 +
+ server/guide.ts                     |  8 ++-
+ server/index.ts                     | 10 ++--
+ server/mcp.ts                       |  7 ++-
+ server/resident.ts                  |  2 +-
+ server/store.ts                     |  5 +-
+ server/webhooks.ts                  |  6 ++
+ shared/canvasRole.ts                |  5 +-
+ shared/types.ts                     |  4 +-
+ shared/webhooks.ts                  |  2 +
+ src/components/FrameApproval.tsx    | 37 +++++++++---
+ src/components/FrameContextMenu.tsx | 33 +++++++++-
+ src/components/Webhooks.tsx         |  1 +
+ src/lib/api.ts                      |  6 +-
+ src/lib/frameApproval.ts            |  4 +-
+ src/lib/i18n/en/stage.ts            |  5 ++
+ src/lib/i18n/en/webhooks.ts         |  1 +
+ src/lib/i18n/pt-BR/stage.ts         |  5 ++
+ src/lib/i18n/pt-BR/webhooks.ts      |  1 +
+ src/lib/store.ts                    |  5 ++
+ tests/approvalAutomations.test.ts   |  6 +-
+ tests/canvasRole.test.ts            |  7 ++-
+ tests/frameApprovalControl.test.tsx | 51 ++++++++++++++++
+ tests/reviewVerdicts.test.ts        | 93 +++++++++++++++++++++++++++++
+ 26 files changed, 306 insertions(+), 43 deletions(-)
+ create mode 100644 tests/reviewVerdicts.test.ts
+
+diff --git a/.context/TECHSTACK.md b/.context/TECHSTACK.md
+index 90e52e9..625af8a 100644
+--- a/.context/TECHSTACK.md
++++ b/.context/TECHSTACK.md
+@@ -638,6 +638,17 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
+   the WebSocket room and MCP gate reads, comments and writes on it separately; spec in
+   `.context/specs/share-link-roles.md`.
+ 
++- Review verdicts (`shared/canvasRole.ts`, `server/actions.ts` `setFrameApproval`): roles rank
++  view < comment < review < edit; `review` comments and gives a frame its verdict but never
++  changes the design (every frame write still needs `edit`). `PUT /api/frames/:id/approval` takes
++  `ready_for_dev`, `changes_requested` or `draft` at `review`; a design edit after either verdict
++  makes it `needs_review`. Each verdict is a `frame.approval` canvas event (webhook event of the
++  same name) and an activity line; MCP `get_canvas` filters `approval_status=changes_requested`.
++  In the editor the frame menu's verdict items (Mark ready for dev, Request changes) need
++  `review`, the rest of its editing items `edit`; the Inspector's Development group has Request
++  changes beside the approval switch. Tests: `reviewVerdicts.test.ts`, `frameApprovalControl.test.tsx`,
++  `canvasRole.test.ts`.
++
+ - Bun 1.3.10 - package manager; lockfile at `bun.lock`, installed with `bun install
+ --frozen-lockfile` in CI.
+ - Vite 8 (Rolldown-based) - frontend build tool (`vite build`), with `@vitejs/plugin-react` 6.
+diff --git a/server/actions.ts b/server/actions.ts
+index 09cbe20..fb18fe5 100644
+--- a/server/actions.ts
++++ b/server/actions.ts
+@@ -1949,32 +1949,40 @@ export function restackFrames(canvasId: string, writes: StackWrite[], actor: Act
+ }
+ 
+ /** Sign-off is a human action, separate from ordinary frame editing. */
++export type ApprovalVerdict = 'ready_for_dev' | 'changes_requested' | 'draft'
++
+ export function setFrameApproval(
+   frameId: string,
+-  ready: boolean,
++  status: ApprovalVerdict,
+   user: { id: string; name: string },
+ ): Frame | undefined {
+   const current = store.getFrame(frameId)
+   if (!current) return undefined
+-  if (ready && current.approval?.status === 'ready_for_dev') return current
++  if (status !== 'draft' && current.approval?.status === status) return current
+   const actor = resolveActor({ name: user.name, kind: 'user' })
+-  const approval = ready
+-    ? {
+-        status: 'ready_for_dev' as const,
+-        approvedBy: user.name,
+-        approvedByUserId: user.id,
+-        approvedAt: Math.max(Date.now(), current.updatedAt + 1),
+-        approvedFrameUpdatedAt: current.updatedAt,
+-      }
+-    : null
++  const approval =
++    status === 'draft'
++      ? null
++      : {
++          status,
++          approvedBy: user.name,
++          approvedByUserId: user.id,
++          approvedAt: Math.max(Date.now(), current.updatedAt + 1),
++          approvedFrameUpdatedAt: current.updatedAt,
++        }
+   const frame = store.updateFrame(frameId, { approval }, user.name)!
+   broadcast(frame.canvasId, { type: 'frame:updated', frame, actor })
+   logActivity(
+     frame.canvasId,
+     actor,
+-    ready ? `marked “${frame.name}” ready for dev` : `moved “${frame.name}” back to draft`,
++    status === 'ready_for_dev'
++      ? `marked “${frame.name}” ready for dev`
++      : status === 'changes_requested'
++        ? `requested changes on “${frame.name}”`
++        : `moved “${frame.name}” back to draft`,
+     frameId,
+   )
++  emitCanvasEvent(frame.canvasId, { type: 'frame.approval', frame, status, actor })
+   return frame
+ }
+ 
+diff --git a/server/events.ts b/server/events.ts
+index 3119476..10a0f89 100644
+--- a/server/events.ts
++++ b/server/events.ts
+@@ -17,6 +17,8 @@ export type CanvasEvent =
+   /** the root of a thread (or a lone reply) was resolved; `by` is a display name */
+   | { type: 'comment.resolved'; comment: ElementComment; frame: Frame | undefined; by: string }
+   | { type: 'frame.created'; frame: Frame; actor: Actor }
++  /** a person set a frame's review verdict (ready_for_dev, changes_requested) or took it back (draft) */
++  | { type: 'frame.approval'; frame: Frame; status: 'ready_for_dev' | 'changes_requested' | 'draft'; actor: Actor }
+   /** a board card an agent finished — status tasks ending are not events */
+   | { type: 'task.completed'; task: AgentTask }
+   | { type: 'task.failed'; task: AgentTask; reason: string }
+diff --git a/server/guide.ts b/server/guide.ts
+index 4ce85ed..cf5db04 100644
+--- a/server/guide.ts
++++ b/server/guide.ts
+@@ -218,9 +218,11 @@ Viewers watch designs assemble live. Stream with append_frame_html:
+ ## Frames and HTML
+ 
+ - Human sign-off: get_canvas and get_frame expose approvalStatus (draft, ready_for_dev,
+-  needs_review) and approval attribution. Filter get_canvas with approval_status="ready_for_dev"
+-  to find approved screens, then re-read get_frame before implementing. HTML and size edits
+-  invalidate sign-off; needs_review requires another human approval. Approval alone does not
++  changes_requested, needs_review) and approval attribution. Filter get_canvas with
++  approval_status="ready_for_dev" to find approved screens, then re-read get_frame before
++  implementing. changes_requested is a reviewer sending the frame back: filter for it, read the
++  frame's comments and revise. HTML and size edits after either verdict make it needs_review,
++  which requires another human verdict. Approval alone does not
+   assign an implementation job — follow the human's request.
+ - A frame renders a complete HTML document in a sandboxed iframe. Inline <style> and
+   <script> work; Google Fonts via <link> work.
+diff --git a/server/index.ts b/server/index.ts
+index 8847358..cf00a3f 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -897,6 +897,7 @@ function checkRole(req: express.Request, res: express.Response, canvas: Canvas,
+ const ROLE_DENIED: Record<CanvasRole, string> = {
+   view: 'this canvas is private — ask the owner for access',
+   comment: 'you can view this canvas but not comment — ask the owner for access',
++  review: 'you can view this canvas but not review it — ask the owner for access',
+   edit: 'you can view this canvas but not edit it — ask the owner for edit access',
+ }
+ 
+@@ -2075,16 +2076,17 @@ app.patch('/api/frames/:id', (req, res) => {
+ })
+ 
+ app.put('/api/frames/:id/approval', (req, res) => {
+-  const current = requireFrame(req, res, req.params.id, 'edit', req.body?.expectedUpdatedAt)
++  /* review: a reviewer gives the verdict without being able to change the design */
++  const current = requireFrame(req, res, req.params.id, 'review', req.body?.expectedUpdatedAt)
+   if (!current) return
+   const { status, expectedUpdatedAt } = req.body ?? {}
+   if (expectedUpdatedAt === undefined)
+     return res.status(400).json({ error: 'expectedUpdatedAt is required to approve the reviewed version' })
+-  if (status !== 'ready_for_dev' && status !== 'draft')
+-    return res.status(400).json({ error: 'status must be ready_for_dev or draft' })
++  if (status !== 'ready_for_dev' && status !== 'changes_requested' && status !== 'draft')
++    return res.status(400).json({ error: 'status must be ready_for_dev, changes_requested or draft' })
+   if (status === 'ready_for_dev' && actions.isFrameStreaming(current.id))
+     return res.status(409).json({ error: 'Wait for the design to finish before approving it.' })
+-  res.json(actions.setFrameApproval(current.id, status === 'ready_for_dev', req.user!))
++  res.json(actions.setFrameApproval(current.id, status, req.user!))
+ })
+ 
+ app.post('/api/frames/:id/append', (req, res) => {
+diff --git a/server/mcp.ts b/server/mcp.ts
+index 441d02a..6134504 100644
+--- a/server/mcp.ts
++++ b/server/mcp.ts
+@@ -90,7 +90,8 @@ const INSTRUCTIONS = `Doop is a shared multiplayer design canvas: humans and AI
+ You MUST call get_guide({ topic: "doop-instructions" }) once before using other Doop tools. Call it again if a long conversation may have compressed or dropped the guide text.
+ 
+ - Context first: call get_canvas before adding or editing frames.
+-- Implementation handoff: get_canvas and get_frame expose approvalStatus (draft, ready_for_dev, needs_review) and human approval attribution. Use get_canvas with approval_status="ready_for_dev" to find approved screens. Re-read get_frame before implementing; only ready_for_dev is current sign-off. HTML or size edits invalidate approval. Approval does not automatically start an implementation task; follow the human's implementation request.
++- Implementation handoff: get_canvas and get_frame expose approvalStatus (draft, ready_for_dev, changes_requested, needs_review) and human approval attribution. Use get_canvas with approval_status="ready_for_dev" to find approved screens. Re-read get_frame before implementing; only ready_for_dev is current sign-off. HTML or size edits invalidate approval.
++- Review verdicts: changes_requested means a reviewer sent the frame back; its comments say what to change. Find those frames with get_canvas approval_status="changes_requested", read the comments, and revise. Your edit moves the frame to needs_review for another look; do not approve it yourself. Approval does not automatically start an implementation task; follow the human's implementation request.
+ - Element links: /c/<canvas_id>?frame=<frame_id>&element=<element_id> identifies one element: the one carrying data-doop-id="<element_id>" in that frame's HTML. Read get_canvas and get_frame and find that attribute before applying the feedback. If no element carries the id any more, ask for an updated reference.
+ - Keep data-doop-* attributes on every element you rewrite: data-doop-id is how comments and links point at an element, data-doop-on / data-doop-action carry prototype wiring, data-doop-locked a layer lock. Drop one only together with its element.
+ - Identity: pick an agent_name and reuse the SAME name on every call — your presence and edits are attributed live.
+@@ -529,13 +530,13 @@ export function buildMcpServer(
+       title: 'Get a canvas and its frames',
+       _meta: previewToolMeta('Reading the canvas…', 'Canvas loaded'),
+       description:
+-        "Get a canvas: its name, its pages (id, name, prototype start frame) and its frames with pageId, position, size, approvalStatus and human approval attribution (not the HTML — use get_frame for that). Pass page_id to see one page's frames only; filter approval_status to ready_for_dev to find screens approved for implementation. Use this to see the current layout before adding or editing frames. Pass your agent_name so the result can tell you when human feedback is waiting (claim it with get_feedback).",
++        "Get a canvas: its name, its pages (id, name, prototype start frame) and its frames with pageId, position, size, approvalStatus and human approval attribution (not the HTML — use get_frame for that). Pass page_id to see one page's frames only; filter approval_status to ready_for_dev to find screens approved for implementation, or to changes_requested to find screens a reviewer sent back. Use this to see the current layout before adding or editing frames. Pass your agent_name so the result can tell you when human feedback is waiting (claim it with get_feedback).",
+       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+       inputSchema: {
+         canvas_id: z.string(),
+         agent_name: agentName.optional(),
+         page_id: z.string().optional().describe("Only this page's frames (a page id from a previous get_canvas)"),
+-        approval_status: z.enum(['draft', 'ready_for_dev', 'needs_review']).optional(),
++        approval_status: z.enum(['draft', 'ready_for_dev', 'changes_requested', 'needs_review']).optional(),
+       },
+     },
+     async ({ canvas_id, agent_name, page_id, approval_status }) => {
+diff --git a/server/resident.ts b/server/resident.ts
+index b1a359a..10d0467 100644
+--- a/server/resident.ts
++++ b/server/resident.ts
+@@ -135,7 +135,7 @@ Rules:
+ - Queued cards are standalone work requests from the board. A card may be routed through several agents in turn — you own your stage of it and nothing else. If your specialty is to originate work: a new-asset card means create_frame sized for the job, a change request means editing the existing frame. One card, one deliverable.
+ - Later stages inherit whatever earlier stages left. Read the frame as it is now; never undo a previous agent's work because you would have done it differently.
+ - Resolve frame references against the numbered frame list in the request. A literal frame name wins; otherwise "Frame 1" means the first listed frame, and "the other frame" means the only remaining frame when there are two.
+-- Each frame includes human approval metadata. Only ready_for_dev means the current design is approved for implementation; draft and needs_review are not approved. Content or size edits invalidate sign-off. Approval is context, not a new assignment: do only the requested work, and re-read the frame's approval before using it for implementation.
++- Each frame includes human approval metadata. Only ready_for_dev means the current design is approved for implementation; draft, changes_requested (a reviewer sent it back; its comments say why) and needs_review are not approved. Content or size edits invalidate sign-off. Approval is context, not a new assignment: do only the requested work, and re-read the frame's approval before using it for implementation.
+ - Choose a size-aware strategy. For documents over 60,000 characters, call inspect_frame before reading HTML. Use get_frame_html with a query or bounded range only when markup is needed.
+ - For requests to copy, match, or borrow another frame's design: screenshot and inspect BOTH the target and reference before editing. Use the reference screenshot and computed design tokens as the source of visual truth. Read target HTML only when you need to preserve its content; do not load a large reference document just to learn its style. For a full redesign, use begin_frame_rewrite, append_frame_rewrite in chunks under 12,000 characters, and commit_frame_rewrite; then screenshot the changed frame.
+ - Element comments are pinned to ONE element (you get its data-doop-id and an HTML excerpt at comment time). Change that element or its immediate context — never rework unrelated parts of the frame because of an element comment.
+diff --git a/server/store.ts b/server/store.ts
+index b2282e8..3b76c52 100644
+--- a/server/store.ts
++++ b/server/store.ts
+@@ -873,7 +873,10 @@ class Store {
+     Object.assign(frame, patch)
+     if (patch.z !== undefined) c.frames.sort(byStack)
+     // All writers (including streams, sync and restores) invalidate sign-off.
+-    if (designChanged && frame.approval?.status === 'ready_for_dev') {
++    if (
++      designChanged &&
++      (frame.approval?.status === 'ready_for_dev' || frame.approval?.status === 'changes_requested')
++    ) {
+       frame.approval = { ...frame.approval, status: 'needs_review' }
+     }
+     // Also serves as the optimistic-save version, including writes in the same millisecond.
+diff --git a/server/webhooks.ts b/server/webhooks.ts
+index 225d3d8..19877c5 100644
+--- a/server/webhooks.ts
++++ b/server/webhooks.ts
+@@ -338,6 +338,12 @@ export function payloadFor(event: CanvasEvent): Record<string, unknown> {
+       }
+     case 'frame.created':
+       return { actor: { name: event.actor.name, kind: event.actor.kind }, frame: publicFrame(event.frame) }
++    case 'frame.approval':
++      return {
++        actor: { name: event.actor.name, kind: event.actor.kind },
++        status: event.status,
++        frame: publicFrame(event.frame),
++      }
+     case 'task.completed':
+       return { actor: { name: event.task.agentName, kind: 'agent' }, task: publicTask(event.task) }
+     case 'task.failed':
+diff --git a/shared/canvasRole.ts b/shared/canvasRole.ts
+index 6d727d8..740e1a7 100644
+--- a/shared/canvasRole.ts
++++ b/shared/canvasRole.ts
+@@ -6,11 +6,12 @@
+ export type LinkAccess = 'none' | 'view' | 'comment' | 'edit'
+ 
+ /** What one person may do on a canvas, from least to most. */
+-export type CanvasRole = 'view' | 'comment' | 'edit'
++export type CanvasRole = 'view' | 'comment' | 'review' | 'edit'
+ 
+ export const LINK_ACCESS_LEVELS: readonly LinkAccess[] = ['none', 'view', 'comment', 'edit']
+ 
+-const RANK: Record<CanvasRole, number> = { view: 0, comment: 1, edit: 2 }
++/* review: comment, plus setting a frame's approval; never a design change */
++const RANK: Record<CanvasRole, number> = { view: 0, comment: 1, review: 2, edit: 3 }
+ 
+ export function isLinkAccess(value: unknown): value is LinkAccess {
+   return typeof value === 'string' && (LINK_ACCESS_LEVELS as readonly string[]).includes(value)
+diff --git a/shared/types.ts b/shared/types.ts
+index d3e5b8a..7657beb 100644
+--- a/shared/types.ts
++++ b/shared/types.ts
+@@ -39,7 +39,9 @@ export interface Frame {
+ }
+ 
+ export interface FrameApproval {
+-  status: 'ready_for_dev' | 'needs_review'
++  /** ready_for_dev: approved; changes_requested: a reviewer sent it back;
++   *  needs_review: the design changed after either verdict */
++  status: 'ready_for_dev' | 'changes_requested' | 'needs_review'
+   approvedBy: string
+   approvedByUserId: string
+   approvedAt: number
+diff --git a/shared/webhooks.ts b/shared/webhooks.ts
+index 8dcc03f..12b6a4d 100644
+--- a/shared/webhooks.ts
++++ b/shared/webhooks.ts
+@@ -5,6 +5,7 @@ export const WEBHOOK_EVENTS = [
+   'comment.replied',
+   'comment.resolved',
+   'frame.created',
++  'frame.approval',
+   'task.completed',
+   'task.failed',
+ ] as const
+@@ -16,6 +17,7 @@ export const WEBHOOK_EVENT_LABELS: Record<WebhookEventType, string> = {
+   'comment.replied': 'A reply lands in a comment thread',
+   'comment.resolved': 'A comment thread is resolved',
+   'frame.created': 'A frame is created',
++  'frame.approval': 'A frame is approved, sent back with changes requested, or returned to draft',
+   'task.completed': 'An agent finishes a board card',
+   'task.failed': 'An agent fails a board card',
+ }
+diff --git a/src/components/FrameApproval.tsx b/src/components/FrameApproval.tsx
+index c23e853..581d7f3 100644
+--- a/src/components/FrameApproval.tsx
++++ b/src/components/FrameApproval.tsx
+@@ -1,19 +1,21 @@
+ import { useState } from 'react'
+ import type { Frame } from '../../shared/types'
+-import { setFramesApproval } from '../lib/frameApproval'
++import { setFramesApproval, type ApprovalVerdict } from '../lib/frameApproval'
+ import { useStore } from '../lib/store'
+ import { getLocale, useT, type Translate } from '../lib/i18n'
+ import { useFrameSaves } from '../lib/frameSaves'
+ import { Badge } from './ui/badge'
+ import { Button } from './ui/button'
+-import { CheckIcon, ClockIcon } from './ui/icons'
++import { CheckIcon, ClockIcon, MessageSquareIcon } from './ui/icons'
+ import { Switch } from './ui/switch'
+ import { Tooltip } from './ui/tooltip'
+ 
+-/** Who signed the frame off, and when; "previously" once it changed since. */
++/** Who gave the verdict, and when; "previously" once the design changed since. */
+ function approvalLine(t: Translate, approval: NonNullable<Frame['approval']>): string {
+   const vars = { name: approval.approvedBy, date: new Date(approval.approvedAt).toLocaleString(getLocale()) }
+-  return approval.status === 'ready_for_dev' ? t('stage.approvedByOn', vars) : t('stage.previouslyApprovedByOn', vars)
++  if (approval.status === 'ready_for_dev') return t('stage.approvedByOn', vars)
++  if (approval.status === 'changes_requested') return t('stage.changesRequestedByOn', vars)
++  return t('stage.previouslyApprovedByOn', vars)
+ }
+ 
+ export function FrameApprovalBadge({ frame, compact = false }: { frame: Frame; compact?: boolean }) {
+@@ -21,8 +23,9 @@ export function FrameApprovalBadge({ frame, compact = false }: { frame: Frame; c
+   const approval = frame.approval
+   if (!approval) return null
+   const ready = approval.status === 'ready_for_dev'
+-  const label = ready ? t('stage.readyForDev') : t('stage.needsReview')
+-  const Icon = ready ? CheckIcon : ClockIcon
++  const sentBack = approval.status === 'changes_requested'
++  const label = ready ? t('stage.readyForDev') : sentBack ? t('stage.changesRequested') : t('stage.needsReview')
++  const Icon = ready ? CheckIcon : sentBack ? MessageSquareIcon : ClockIcon
+   return (
+     <Badge
+       tone={ready ? 'success' : 'banned'}
+@@ -49,7 +52,8 @@ export function FrameApprovalControl({
+   const pendingSave = useFrameSaves((s) => !!s.pending[frame.id])
+   const awaitingChanges = streaming || pendingSave || hasUnsavedChanges
+   const ready = frame.approval?.status === 'ready_for_dev'
+-  async function save(status: 'ready_for_dev' | 'draft') {
++  const sentBack = frame.approval?.status === 'changes_requested'
++  async function save(status: ApprovalVerdict) {
+     setSaving(true)
+     try {
+       await setFramesApproval([frame], status)
+@@ -79,7 +83,13 @@ export function FrameApprovalControl({
+         </div>
+       )}
+       <p className="text-caption text-ink-faint">
+-        {ready ? t('stage.approvalReady') : frame.approval ? t('stage.approvalChanged') : t('stage.approvalPrompt')}
++        {ready
++          ? t('stage.approvalReady')
++          : sentBack
++            ? t('stage.approvalChangesRequested')
++            : frame.approval
++              ? t('stage.approvalChanged')
++              : t('stage.approvalPrompt')}
+       </p>
+       {saving && (
+         <p role="status" className="text-caption text-ink-faint">
+@@ -87,6 +97,17 @@ export function FrameApprovalControl({
+         </p>
+       )}
+       {!ready && awaitingChanges && <p className="text-caption text-ink-faint">{t('stage.approvalWait')}</p>}
++      {!sentBack && (
++        <Button
++          size="inline"
++          variant="bare"
++          className="self-start"
++          disabled={saving || awaitingChanges}
++          onClick={() => void save('changes_requested')}
++        >
++          {t('stage.requestChanges')}
++        </Button>
++      )}
+       {frame.approval && !ready && (
+         <Button
+           size="inline"
+diff --git a/src/components/FrameContextMenu.tsx b/src/components/FrameContextMenu.tsx
+index 331656e..d82dde3 100644
+--- a/src/components/FrameContextMenu.tsx
++++ b/src/components/FrameContextMenu.tsx
+@@ -6,7 +6,7 @@ import { writeCanvasClipboard } from '../lib/canvasClipboard'
+ import { copyFramePng } from '../lib/frameExport'
+ import { deleteFramesTracked } from '../lib/history'
+ import { isStackLocked, setFramesHidden, setFramesLocked } from '../lib/layerEdits'
+-import { canEditOpenCanvas, useStore } from '../lib/store'
++import { canEditOpenCanvas, canReviewOpenCanvas, useStore } from '../lib/store'
+ import { setFramesApproval } from '../lib/frameApproval'
+ import { useFrameSaves } from '../lib/frameSaves'
+ import { MOD_KEY } from '../lib/keys'
+@@ -52,6 +52,8 @@ export function FrameContextMenu({
+   const selectedIds = useStore((s) => s.selectedIds)
+   /* a view or comment link keeps the items that only read the frame */
+   const readOnly = useStore((s) => !canEditOpenCanvas(s))
++  /* a reviewer gives the verdict without the editing items */
++  const canReview = useStore(canReviewOpenCanvas)
+   const groupIds = selectedIds.includes(frame.id) ? selectedIds : [frame.id]
+   const groupSize = groupIds.length
+   const pendingSave = useFrameSaves((s) => groupIds.some((id) => !!s.pending[id]))
+@@ -85,6 +87,20 @@ export function FrameContextMenu({
+     const group = s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame]
+     return group.every((f) => f.approval?.status === 'ready_for_dev')
+   })
++  const allSentBack = useStore((s) => {
++    if (!open) return false
++    const ids = s.selectedIds.includes(frame.id) ? s.selectedIds : [frame.id]
++    const group = s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame]
++    return group.every((f) => f.approval?.status === 'changes_requested')
++  })
++  async function requestChanges() {
++    setSavingApproval(true)
++    try {
++      await setFramesApproval(groupFrames(), 'changes_requested')
++    } finally {
++      setSavingApproval(false)
++    }
++  }
+   async function changeApproval() {
+     setSavingApproval(true)
+     try {
+@@ -152,7 +168,7 @@ export function FrameContextMenu({
+         <ContextMenuItem onSelect={() => void copyImageUrl(frame)}>{t('stage.copyImageUrl')}</ContextMenuItem>
+         <ContextMenuItem onSelect={() => setExportFrames(groupFrames())}>{t('stage.exportEllipsis')}</ContextMenuItem>
+         <ContextMenuItem onSelect={() => setHistoryOpen(true)}>{t('stage.versionHistory')}</ContextMenuItem>
+-        {!readOnly && (
++        {canReview && (
+           <>
+             <ContextMenuSeparator />
+             <ContextMenuItem
+@@ -162,6 +178,19 @@ export function FrameContextMenu({
+               {allReady ? t('stage.moveToDraft') : t('stage.markReadyForDev')}
+               {groupSize > 1 && <MenuHint>{t('stage.framesCount', { count: groupSize })}</MenuHint>}
+             </ContextMenuItem>
++            {!allSentBack && (
++              <ContextMenuItem
++                disabled={savingApproval || pendingSave || streaming}
++                onSelect={() => void requestChanges()}
++              >
++                {t('stage.requestChanges')}
++                {groupSize > 1 && <MenuHint>{t('stage.framesCount', { count: groupSize })}</MenuHint>}
++              </ContextMenuItem>
++            )}
++          </>
++        )}
++        {!readOnly && (
++          <>
+             <ContextMenuSeparator />
+             <ContextMenuItem onSelect={() => setFramesLocked(groupFrames(), !allLocked)}>
+               {groupSize > 1
+diff --git a/src/components/Webhooks.tsx b/src/components/Webhooks.tsx
+index 404629c..050532c 100644
+--- a/src/components/Webhooks.tsx
++++ b/src/components/Webhooks.tsx
+@@ -29,6 +29,7 @@ const EVENT_LABELS: Record<WebhookEventType, PlainMessageKey> = {
+   'comment.replied': 'webhooks.eventCommentReplied',
+   'comment.resolved': 'webhooks.eventCommentResolved',
+   'frame.created': 'webhooks.eventFrameCreated',
++  'frame.approval': 'webhooks.eventFrameApproval',
+   'task.completed': 'webhooks.eventTaskCompleted',
+   'task.failed': 'webhooks.eventTaskFailed',
+ }
+diff --git a/src/lib/api.ts b/src/lib/api.ts
+index a100792..4f9a9a5 100644
+--- a/src/lib/api.ts
++++ b/src/lib/api.ts
+@@ -519,7 +519,11 @@ export const api = {
+     req<Frame[]>(`/api/canvases/${canvasId}/stack`, { method: 'PUT', body: JSON.stringify({ frames }) }),
+   deleteFrame: (frameId: string, expectedUpdatedAt?: number) =>
+     req('/api/frames/' + frameId, { method: 'DELETE', body: JSON.stringify({ expectedUpdatedAt, actor: actor() }) }),
+-  setFrameApproval: (frameId: string, status: 'ready_for_dev' | 'draft', expectedUpdatedAt: number) =>
++  setFrameApproval: (
++    frameId: string,
++    status: 'ready_for_dev' | 'changes_requested' | 'draft',
++    expectedUpdatedAt: number,
++  ) =>
+     req<Frame>(`/api/frames/${frameId}/approval`, {
+       method: 'PUT',
+       body: JSON.stringify({ status, expectedUpdatedAt }),
+diff --git a/src/lib/frameApproval.ts b/src/lib/frameApproval.ts
+index 8605574..2d92f35 100644
+--- a/src/lib/frameApproval.ts
++++ b/src/lib/frameApproval.ts
+@@ -4,7 +4,9 @@ import { useStore } from './store'
+ import { useFrameSaves } from './frameSaves'
+ 
+ /** Wait for server confirmation: a sign-off must never appear to succeed offline. */
+-export async function setFramesApproval(frames: Frame[], status: 'ready_for_dev' | 'draft'): Promise<void> {
++export type ApprovalVerdict = 'ready_for_dev' | 'changes_requested' | 'draft'
++
++export async function setFramesApproval(frames: Frame[], status: ApprovalVerdict): Promise<void> {
+   let saved = 0
+   let failure: string | undefined
+   for (const frame of frames) {
+diff --git a/src/lib/i18n/en/stage.ts b/src/lib/i18n/en/stage.ts
+index f5e008d..518385f 100644
+--- a/src/lib/i18n/en/stage.ts
++++ b/src/lib/i18n/en/stage.ts
+@@ -91,15 +91,20 @@ export const stage = {
+   versionHistory: 'Version history…',
+   markReadyForDev: 'Mark ready for dev',
+   moveToDraft: 'Move to draft',
++  requestChanges: 'Request changes',
+ 
+   /* approval */
+   readyForDev: 'Ready for dev',
+   needsReview: 'Needs review',
++  changesRequested: 'Changes requested',
++  changesRequestedByOn: 'Changes requested by {name} on {date}',
+   approvedByOn: 'Approved by {name} on {date}',
+   previouslyApprovedByOn: 'Previously approved by {name} on {date}',
+   markAsApproved: 'Mark as approved',
+   approvalReady: 'Agents can see this screen is approved for implementation.',
+   approvalChanged: 'This design changed after approval. Review it before marking it ready again.',
++  approvalChangesRequested:
++    'A reviewer asked for changes; their comments say what. Editing the design sends it back for review.',
+   approvalPrompt: 'Approve this screen to let your team and agents know it’s ready to build.',
+   saving: 'Saving…',
+   approvalWait: 'Wait for changes to finish saving before approving.',
+diff --git a/src/lib/i18n/en/webhooks.ts b/src/lib/i18n/en/webhooks.ts
+index 589e083..7daa89a 100644
+--- a/src/lib/i18n/en/webhooks.ts
++++ b/src/lib/i18n/en/webhooks.ts
+@@ -13,6 +13,7 @@ export const webhooks = {
+   eventCommentReplied: 'A reply lands in a comment thread',
+   eventCommentResolved: 'A comment thread is resolved',
+   eventFrameCreated: 'A frame is created',
++  eventFrameApproval: 'A frame is approved, sent back with changes, or returned to draft',
+   eventTaskCompleted: 'An agent finishes a board card',
+   eventTaskFailed: 'An agent fails a board card',
+ 
+diff --git a/src/lib/i18n/pt-BR/stage.ts b/src/lib/i18n/pt-BR/stage.ts
+index b7a8810..8866174 100644
+--- a/src/lib/i18n/pt-BR/stage.ts
++++ b/src/lib/i18n/pt-BR/stage.ts
+@@ -91,15 +91,20 @@ export const stage: Catalog['stage'] = {
+   versionHistory: 'Histórico de versões…',
+   markReadyForDev: 'Marcar como pronto para dev',
+   moveToDraft: 'Voltar para rascunho',
++  requestChanges: 'Solicitar alterações',
+ 
+   /* approval */
+   readyForDev: 'Pronto para dev',
+   needsReview: 'Precisa de revisão',
++  changesRequested: 'Alterações solicitadas',
++  changesRequestedByOn: 'Alterações solicitadas por {name} em {date}',
+   approvedByOn: 'Aprovado por {name} em {date}',
+   previouslyApprovedByOn: 'Aprovado anteriormente por {name} em {date}',
+   markAsApproved: 'Marcar como aprovado',
+   approvalReady: 'Os agentes podem ver que esta tela está aprovada para implementação.',
+   approvalChanged: 'Este design mudou depois da aprovação. Revise-o antes de marcá-lo como pronto de novo.',
++  approvalChangesRequested:
++    'Um revisor pediu alterações; os comentários dizem quais. Editar o design o envia de volta para revisão.',
+   approvalPrompt: 'Aprove esta tela para avisar sua equipe e os agentes que ela está pronta para ser construída.',
+   saving: 'Salvando…',
+   approvalWait: 'Aguarde as alterações terminarem de salvar antes de aprovar.',
+diff --git a/src/lib/i18n/pt-BR/webhooks.ts b/src/lib/i18n/pt-BR/webhooks.ts
+index 065fd2d..53b2ad0 100644
+--- a/src/lib/i18n/pt-BR/webhooks.ts
++++ b/src/lib/i18n/pt-BR/webhooks.ts
+@@ -14,6 +14,7 @@ export const webhooks: Catalog['webhooks'] = {
+   eventCommentReplied: 'Uma resposta chega em uma conversa de comentários',
+   eventCommentResolved: 'Uma conversa de comentários é resolvida',
+   eventFrameCreated: 'Um frame é criado',
++  eventFrameApproval: 'Um frame é aprovado, devolvido com alterações ou volta a rascunho',
+   eventTaskCompleted: 'Um agente conclui um card do quadro',
+   eventTaskFailed: 'Um agente falha em um card do quadro',
+ 
+diff --git a/src/lib/store.ts b/src/lib/store.ts
+index c7b7c39..74faf08 100644
+--- a/src/lib/store.ts
++++ b/src/lib/store.ts
+@@ -797,6 +797,11 @@ export function canEditOpenCanvas(s: Pick<State, 'canvas'>): boolean {
+ }
+ 
+ /** May the caller comment on the open canvas? */
++/** May the caller give a frame its verdict (approve, request changes)? */
++export function canReviewOpenCanvas(s: Pick<State, 'canvas'>): boolean {
++  return roleAllows(roleOf(s), 'review')
++}
++
+ export function canCommentOpenCanvas(s: Pick<State, 'canvas'>): boolean {
+   return roleAllows(roleOf(s), 'comment')
+ }
+diff --git a/tests/approvalAutomations.test.ts b/tests/approvalAutomations.test.ts
+index cfc8d96..bce8815 100644
+--- a/tests/approvalAutomations.test.ts
++++ b/tests/approvalAutomations.test.ts
+@@ -151,7 +151,7 @@ async function workflow(steps: Step[] = [slack()]): Promise<Automation> {
+   return result as Automation
+ }
+ function approve(frame = source) {
+-  return actions.setFrameApproval(frame.id, true, owner)!
++  return actions.setFrameApproval(frame.id, 'ready_for_dev', owner)!
+ }
+ async function runs(id: string) {
+   return (await listRuns(owner.id, id))!
+@@ -244,7 +244,7 @@ it('does not replay older approvals on setup or re-enable; Run now can process e
+   await runAutomation(a.id)
+   expect(sent).toHaveLength(1)
+   await updateAutomation(owner.id, a.id, { enabled: false })
+-  actions.setFrameApproval(source.id, false, owner)
++  actions.setFrameApproval(source.id, 'draft', owner)
+   approve()
+   source.approval!.approvedAt -= 500
+   await updateAutomation(owner.id, a.id, { enabled: true })
+@@ -334,7 +334,7 @@ it('gives separate approvals distinct identities even within the same millisecon
+     approve()
+     const first = source.approval!.approvedAt
+     await runAutomation(a.id)
+-    actions.setFrameApproval(source.id, false, owner)
++    actions.setFrameApproval(source.id, 'draft', owner)
+     approve()
+     expect(source.approval!.approvedAt).toBeGreaterThan(first)
+     await runAutomation(a.id)
+diff --git a/tests/canvasRole.test.ts b/tests/canvasRole.test.ts
+index 3bdb3cf..3125fdd 100644
+--- a/tests/canvasRole.test.ts
++++ b/tests/canvasRole.test.ts
+@@ -96,7 +96,12 @@ describe('room messages', () => {
+ })
+ 
+ describe('link access values', () => {
+-  it('ranks roles view < comment < edit', () => {
++  it('ranks roles view < comment < review < edit', () => {
++    expect(roleAllows('review', 'comment')).toBe(true)
++    expect(roleAllows('review', 'review')).toBe(true)
++    expect(roleAllows('review', 'edit')).toBe(false)
++    expect(roleAllows('comment', 'review')).toBe(false)
++    expect(roleAllows('edit', 'review')).toBe(true)
+     expect(roleAllows('edit', 'comment')).toBe(true)
+     expect(roleAllows('comment', 'comment')).toBe(true)
+     expect(roleAllows('comment', 'edit')).toBe(false)
+diff --git a/tests/frameApprovalControl.test.tsx b/tests/frameApprovalControl.test.tsx
+index 543dccd..4280d03 100644
+--- a/tests/frameApprovalControl.test.tsx
++++ b/tests/frameApprovalControl.test.tsx
+@@ -234,3 +234,54 @@ it('keeps approval disabled until every overlapping design request has settled',
+   })
+   expect(toggle().disabled).toBe(false)
+ })
++
++it('sends a frame back with changes requested and says so on the badge', async () => {
++  const sentBack: Frame = {
++    ...frame,
++    updatedAt: 12,
++    approval: {
++      status: 'changes_requested',
++      approvedBy: 'Reviewer',
++      approvedByUserId: 'reviewer',
++      approvedAt: 12,
++      approvedFrameUpdatedAt: 10,
++    },
++  }
++  const save = vi.spyOn(api, 'setFrameApproval').mockResolvedValueOnce(sentBack)
++  const request = () =>
++    [...container.querySelectorAll('button')].find((b) => b.textContent === 'Request changes') as
++      HTMLButtonElement | undefined
++  await act(async () => request()!.click())
++  expect(save).toHaveBeenCalledWith('f', 'changes_requested', 10)
++  expect(container.textContent).toContain('Changes requested')
++  expect(container.textContent).toContain('A reviewer asked for changes')
++  expect(request()).toBeUndefined()
++  expect(toggle().getAttribute('aria-checked')).toBe('false')
++})
++
++it('gives a reviewer the verdicts in the frame menu but none of the editing items', () => {
++  useStore
++    .getState()
++    .setCanvas({ id: 'c', name: 'Canvas', frames: [frame], createdAt: 1, updatedAt: 10, role: 'review' })
++  act(() =>
++    root.render(
++      <TooltipProvider>
++        <ContextMenu>
++          <ContextMenuTrigger>
++            <span data-test-menu>Frame</span>
++          </ContextMenuTrigger>
++          <FrameContextMenu frame={frame} at={{ current: { x: 0, y: 0 } }} />
++        </ContextMenu>
++      </TooltipProvider>,
++    ),
++  )
++  act(() =>
++    container
++      .querySelector('[data-test-menu]')!
++      .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, button: 2 })),
++  )
++  const items = [...document.querySelectorAll('[role="menuitem"]')].map((el) => el.textContent)
++  expect(items).toContain('Mark ready for dev')
++  expect(items).toContain('Request changes')
++  expect(items.some((i) => i?.startsWith('Lock') || i?.startsWith('Delete'))).toBe(false)
++})
+diff --git a/tests/reviewVerdicts.test.ts b/tests/reviewVerdicts.test.ts
+new file mode 100644
+index 0000000..e2a47ae
+--- /dev/null
++++ b/tests/reviewVerdicts.test.ts
+@@ -0,0 +1,93 @@
++import { createServer, type Server as HttpServer } from 'node:http'
++import { afterAll, beforeAll, describe, expect, it } from 'vitest'
++import { Client, freePort, startServer, type Server } from './harness.ts'
++
++/* Review verdicts on a real server: who may give one (review and up), the
++   changes_requested status, the frame.approval event, and an edit after a
++   verdict asking for another look. */
++
++let server: Server
++let owner: Client
++let commenter: Client
++let canvasId: string
++let frameId: string
++let hook: HttpServer
++const deliveries: Record<string, unknown>[] = []
++
++async function frameNow(): Promise<{ updatedAt: number; approval?: { status: string } | null }> {
++  const canvas = (await (await owner.get(`/api/canvases/${canvasId}`)).json()) as {
++    frames: { id: string; updatedAt: number; approval?: { status: string } | null }[]
++  }
++  return canvas.frames.find((f) => f.id === frameId)!
++}
++
++function verdict(client: Client, status: string, expectedUpdatedAt: number) {
++  return client.req(`/api/frames/${frameId}/approval`, {
++    method: 'PUT',
++    body: JSON.stringify({ status, expectedUpdatedAt }),
++  })
++}
++
++beforeAll(async () => {
++  const hookPort = await freePort()
++  hook = createServer((req, res) => {
++    let body = ''
++    req.on('data', (c) => (body += c))
++    req.on('end', () => {
++      deliveries.push(JSON.parse(body))
++      res.end('ok')
++    })
++  }).listen(hookPort, '127.0.0.1')
++  server = await startServer({ WEBHOOK_ALLOW_PRIVATE_URLS: 'true' })
++  owner = await new Client(server).signUp('owner@example.com', 'Olive Owner')
++  commenter = await new Client(server).signUp('commenter@example.com', 'Cal Commenter')
++  canvasId = ((await (await owner.post('/api/canvases', { name: 'Review' })).json()) as { id: string }).id
++  const created = await owner.post(`/api/canvases/${canvasId}/frames`, {
++    name: 'Home',
++    width: 400,
++    height: 300,
++    html: '<html><body><h1>Hi</h1></body></html>',
++  })
++  frameId = ((await created.json()) as { id: string }).id
++  await owner.patch(`/api/canvases/${canvasId}`, { linkAccess: 'comment' })
++  const wh = await owner.post('/api/webhooks', { url: `http://127.0.0.1:${hookPort}/`, events: ['frame.approval'] })
++  expect(wh.status, await wh.clone().text()).toBeLessThan(300)
++}, 90_000)
++
++afterAll(() => {
++  server?.stop()
++  hook?.close()
++})
++
++describe('review verdicts', () => {
++  it('lets an editor request changes, but not someone who may only comment', async () => {
++    const { updatedAt } = await frameNow()
++    expect((await verdict(commenter, 'changes_requested', updatedAt)).status).toBe(403)
++    expect((await verdict(owner, 'rejected', updatedAt)).status).toBe(400)
++    const res = await verdict(owner, 'changes_requested', updatedAt)
++    expect(res.status, await res.clone().text()).toBe(200)
++    expect(((await res.json()) as { approval: { status: string; approvedBy: string } }).approval).toMatchObject({
++      status: 'changes_requested',
++      approvedBy: 'Olive Owner',
++    })
++  })
++
++  it('reports the verdict to webhooks', async () => {
++    await expect.poll(() => deliveries.find((d) => d.type === 'frame.approval'), { timeout: 10_000 }).toBeTruthy()
++    expect(deliveries.find((d) => d.type === 'frame.approval')).toMatchObject({
++      status: 'changes_requested',
++      actor: { name: 'Olive Owner', kind: 'user' },
++      frame: { id: frameId },
++    })
++  })
++
++  it('asks for another review once the design changes after the verdict', async () => {
++    const edited = await owner.patch(`/api/frames/${frameId}`, { html: '<html><body><h1>Hi!</h1></body></html>' })
++    expect(edited.status).toBe(200)
++    expect((await frameNow()).approval?.status).toBe('needs_review')
++    /* and the verdict can be given again on the new revision */
++    const again = await verdict(owner, 'ready_for_dev', (await frameNow()).updatedAt)
++    expect(again.status).toBe(200)
++    expect((await frameNow()).approval?.status).toBe('ready_for_dev')
++  })
++})
