@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 05:02:39 +0000
-Subject: [PATCH 01/11] perf(canvas): keep live iframes only for frames near
+Subject: [PATCH 01/12] perf(canvas): keep live iframes only for frames near
  the camera
 
 A page of a few hundred frames kept a few hundred live documents: every

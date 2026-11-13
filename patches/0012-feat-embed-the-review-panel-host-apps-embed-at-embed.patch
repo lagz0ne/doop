@@ -1,0 +1,1897 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 02:50:05 +0000
+Subject: [PATCH 12/12] feat(embed): the review panel host apps embed, at
+ /embed
+
+The page a host app (host apps) puts in an iframe so its
+users review a doop canvas without ever going to doop: look at a frame,
+pin comments, reply and resolve, request changes or approve, compare a
+revision with the state the last verdict was given on.
+
+- A second Vite entry (embed.html, src/embed/) with its own bundle: React,
+  the frame runtime and its own files, about 270 KB of script and CSS over
+  the wire against the editor's 2 MB. Plain CSS in doop's white system.
+- Served at /embed only while DOOP_EMBED_HOSTS names a host, with
+  frame-ancestors listing the host origins, no-store and no-referrer;
+  /embed.html is a 404 so the file never goes out without those rules.
+- The token comes in the URL fragment, is read once and wiped from the
+  address, and is traded for the session with fetch (0011's exchange).
+- Frames are drawn by the editor's own sandboxed iframe and runtime, so a
+  comment is pinned on the element the runtime finds under the pointer
+  (selector, element id, origin), exactly as the editor pins one.
+- Request changes gives the verdict first and posts the pinned comment
+  after it: pinning may stamp an element id, which moves the frame's
+  version on, and the verdict belongs to the version that was looked at.
+- Compare shows the frame beside the version filed with its last verdict
+  (0010's history), at one scale, with the text runs that changed.
+- postMessage to the host page's origin only: doop:ready, doop:open,
+  doop:verdict (status, by, frameUpdatedAt, versionId), doop:comment,
+  doop:need-token; from it, only doop:token and doop:open.
+
+Checked end to end in a browser with a stand-in host app signing tokens
+(perf/embed-e2e.mjs in the patched build repo): the panel opens a frame,
+pins a comment on "Link works 7 days", requests changes (doop records the
+verdict and files the version), shows the agent's revision as "Revised
+since changes were requested", compares (Link works 7 days -> Link
+expires Wed 19 Nov), approves; the host page hears every step; the
+reviewer's own PATCH of the frame is refused (403). Tests:
+embedPage.test.ts, embedChanges.test.ts.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .context/TECHSTACK.md      |  23 ++
+ embed.html                 |  23 ++
+ server/embedPage.ts        |  28 ++
+ server/index.ts            |   4 +
+ src/embed/FrameDoc.tsx     | 116 +++++++
+ src/embed/changes.ts       |  71 ++++
+ src/embed/embed.css        | 466 +++++++++++++++++++++++++
+ src/embed/main.tsx         | 675 +++++++++++++++++++++++++++++++++++++
+ src/embed/session.ts       | 168 +++++++++
+ tests/embedChanges.test.ts |  69 ++++
+ tests/embedPage.test.ts    |  83 +++++
+ vite.config.ts             |  12 +-
+ 12 files changed, 1737 insertions(+), 1 deletion(-)
+ create mode 100644 embed.html
+ create mode 100644 server/embedPage.ts
+ create mode 100644 src/embed/FrameDoc.tsx
+ create mode 100644 src/embed/changes.ts
+ create mode 100644 src/embed/embed.css
+ create mode 100644 src/embed/main.tsx
+ create mode 100644 src/embed/session.ts
+ create mode 100644 tests/embedChanges.test.ts
+ create mode 100644 tests/embedPage.test.ts
+
+diff --git a/.context/TECHSTACK.md b/.context/TECHSTACK.md
+index c17e09d..114dc53 100644
+--- a/.context/TECHSTACK.md
++++ b/.context/TECHSTACK.md
+@@ -674,6 +674,29 @@ hostOrigin, expiresAt, user: { name } }`. An embed session opens its one canvas
+   server on a second hostname included; vitest's `TEST=true` turns better-auth's origin check off,
+   so that case clears it).
+ 
++- Embedded review panel (`embed.html`, `src/embed/`, served by `server/embedPage.ts`): what a host
++  app puts in an iframe, `/embed#token=<jwt>&frame=<id>`. A second Vite entry with its own bundle
++  (React, the frame runtime and its own files: about 270 KB of script and CSS against the editor's
++  2 MB; none of the editor, store, i18n or Tailwind). `/embed` answers 404 while
++  `DOOP_EMBED_HOSTS` is empty, else the page with `Content-Security-Policy: frame-ancestors` naming
++  the host origins, `no-store` and `no-referrer`; `/embed.html` is a 404 so the file is never
++  served without those rules. The page reads the token from the fragment once and wipes it
++  (`takeLaunchParams`), trades it for its session with `fetch` (`exchange`; the exchange's Origin
++  check refuses a cross-site form post), joins the canvas room for frames and comments, and draws
++  a frame with the editor's own sandboxed iframe and runtime (`FrameDoc`, whole-number CSS zoom
++  plus a transform, as the stage does), so a pinned comment carries the runtime's probe of the
++  element under the pointer (`selector`, `elementId`, `elementOrigin`). The reviewer comments,
++  replies, resolves, and with the `review` role requests changes (the verdict first, then the
++  pinned comment, since a stamp moves the frame's version on) or approves. Compare puts the frame
++  beside the version filed with its last verdict (`history.at(-1).versionId`, offered once the
++  status is `needs_review`) at one scale, with the text runs that changed (`textChanges`, an LCS
++  over `textRuns`). The host page hears `doop:ready`, `doop:open`, `doop:verdict` (frame, status,
++  by, `frameUpdatedAt`, `versionId`), `doop:comment` and `doop:need-token`, sent to its origin
++  only; it may send `doop:token` (a fresh token after the two-hour session ends) and `doop:open`,
++  read from that origin only (`readHostMessage`). English only for now. Tests:
++  `embedPage.test.ts`, `embedChanges.test.ts`; end to end in a browser with a stand-in host app:
++  `perf/embed-e2e.mjs` in the patched build repo.
++
+ - Bun 1.3.10 - package manager; lockfile at `bun.lock`, installed with `bun install
+ --frozen-lockfile` in CI.
+ - Vite 8 (Rolldown-based) - frontend build tool (`vite build`), with `@vitejs/plugin-react` 6.
+diff --git a/embed.html b/embed.html
+new file mode 100644
+index 0000000..7a8a564
+--- /dev/null
++++ b/embed.html
+@@ -0,0 +1,23 @@
++<!doctype html>
++<html lang="en">
++  <head>
++    <meta charset="UTF-8" />
++    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
++    <meta name="color-scheme" content="light" />
++    <!-- The review panel host apps embed (src/embed). Its own small bundle:
++         none of the editor ships here. server/index.ts serves it at /embed
++         with the hosts allowed to frame it. -->
++    <title>Doop review</title>
++    <meta name="robots" content="noindex" />
++    <link rel="preconnect" href="https://fonts.googleapis.com" />
++    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
++    <link
++      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap"
++      rel="stylesheet"
++    />
++  </head>
++  <body>
++    <div id="root"></div>
++    <script type="module" src="/src/embed/main.tsx"></script>
++  </body>
++</html>
+diff --git a/server/embedPage.ts b/server/embedPage.ts
+new file mode 100644
+index 0000000..29dbd67
+--- /dev/null
++++ b/server/embedPage.ts
+@@ -0,0 +1,28 @@
++import type { Express } from 'express'
++import path from 'node:path'
++import { embedHostOrigins } from './embed.ts'
++
++/**
++ * The review panel's page (embed.html, src/embed): what host apps put in an
++ * iframe. Served at /embed only while some host is configured, and only to
++ * be framed by those hosts: `frame-ancestors` names their origins, so no
++ * other site can wrap the panel to trick a reviewer into a click (the
++ * session it holds can comment and give verdicts). The page is not cached,
++ * so a host added or removed takes effect at once, and the raw file is not
++ * reachable under its own name without these headers.
++ */
++export function embedFrameAncestors(origins: readonly string[]): string {
++  return `frame-ancestors ${origins.join(' ')}`
++}
++
++export function serveEmbedPage(app: Express, dist: string): void {
++  app.get(['/embed.html'], (_req, res) => res.sendStatus(404))
++  app.get('/embed', (_req, res) => {
++    const origins = embedHostOrigins()
++    if (!origins.length) return res.sendStatus(404)
++    res.set('Content-Security-Policy', embedFrameAncestors(origins))
++    res.set('Cache-Control', 'no-store')
++    res.set('Referrer-Policy', 'no-referrer')
++    res.sendFile(path.join(dist, 'embed.html'))
++  })
++}
+diff --git a/server/index.ts b/server/index.ts
+index 2833c0f..f772037 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -55,6 +55,7 @@ import {
+   presenceForReviewer,
+   type EmbedGrant,
+ } from './embed.ts'
++import { serveEmbedPage } from './embedPage.ts'
+ import { communityRouter, parseListing, publishableFrames } from './community.ts'
+ import { automationsRouter, startScheduler } from './automations.ts'
+ import { startMcpTokenPrune } from './mcpTokens.ts'
+@@ -2604,6 +2605,9 @@ app.get('/sitemap.xml', (_req, res) => {
+ /* production: serve the built client */
+ if (env.isProduction) {
+   const dist = path.join(process.cwd(), 'dist')
++  /* the review panel host apps embed, ahead of the static files so its raw
++     file is never served without its framing rules (server/embedPage.ts) */
++  serveEmbedPage(app, dist)
+   app.use(express.static(dist))
+   /* a missing bundle or source map is a 404, not the app shell: HTML served
+      as a .js or .map breaks module loads and source map resolution */
+diff --git a/src/embed/FrameDoc.tsx b/src/embed/FrameDoc.tsx
+new file mode 100644
+index 0000000..fbefbf0
+--- /dev/null
++++ b/src/embed/FrameDoc.tsx
+@@ -0,0 +1,116 @@
++import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
++import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
++import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY } from '../lib/layoutZoom'
++
++/* One frame as a live document, drawn at `scale`, the way the editor draws it:
++   the same sandboxed iframe and frame runtime (src/lib/frameRuntime.ts), so a
++   reviewer sees exactly what the agents designed, scripts and fonts included,
++   and comments can be pinned to the element under the pointer.
++
++   Sharp at any scale: Chromium rasterizes an iframe at the CSS zoom of its
++   ancestors, so the document is laid out at a whole-number zoom at or above
++   the scale and a transform takes it the rest of the way down, as the
++   editor's stage does (src/lib/layoutZoom.ts). Elsewhere it is a transform. */
++
++export interface ProbeHit {
++  selector: string
++  elementId?: string
++  snippet: string
++  rect: { x: number; y: number; width: number; height: number }
++}
++
++export interface FrameDocHandle {
++  /** what lies under a design-px point, as the editor's comment tool reads it */
++  probe(x: number, y: number): Promise<ProbeHit | null>
++  /** an element's box in design px, or null when the document has none */
++  locate(selector: string): Promise<{ x: number; y: number; width: number; height: number } | null>
++}
++
++type Pending = (data: Record<string, unknown>) => void
++
++export const FrameDoc = forwardRef<
++  FrameDocHandle,
++  {
++    html: string
++    width: number
++    height: number
++    scale: number
++    /** the document has painted this html (its first render, then each change) */
++    onPainted?: () => void
++  }
++>(function FrameDoc({ html, width, height, scale, onPainted }, ref) {
++  const iframe = useRef<HTMLIFrameElement>(null)
++  const pending = useRef(new Map<number, Pending>())
++  const nextReq = useRef(1)
++  const [ready, setReady] = useState(false)
++  const painted = useRef(onPainted)
++  useEffect(() => {
++    painted.current = onPainted
++  }, [onPainted])
++
++  useEffect(() => {
++    function onMessage(ev: MessageEvent) {
++      if (ev.source !== iframe.current?.contentWindow) return
++      const d = ev.data as Record<string, unknown> | null
++      if (!d || typeof d.type !== 'string') return
++      if (d.type === 'doop:frame-ready') setReady(true)
++      else if (d.type === 'doop:shown') painted.current?.()
++      else if (typeof d.reqId === 'number') {
++        const resolve = pending.current.get(d.reqId)
++        pending.current.delete(d.reqId)
++        resolve?.(d)
++      }
++    }
++    window.addEventListener('message', onMessage)
++    return () => window.removeEventListener('message', onMessage)
++  }, [])
++
++  function request(msg: Record<string, unknown>): Promise<Record<string, unknown> | null> {
++    const win = iframe.current?.contentWindow
++    if (!win || !ready) return Promise.resolve(null)
++    const reqId = nextReq.current++
++    return new Promise((resolve) => {
++      pending.current.set(reqId, resolve)
++      win.postMessage({ ...msg, reqId }, '*')
++      window.setTimeout(() => {
++        if (pending.current.delete(reqId)) resolve(null)
++      }, 3000)
++    })
++  }
++
++  /* the runtime morphs the document in place, so a revision lands without a
++     reload or a white flash */
++  useEffect(() => {
++    if (!ready) return
++    void request({ type: 'doop:html', html }).then(() => painted.current?.())
++    // eslint-disable-next-line react-hooks/exhaustive-deps -- request reads refs; html and ready are what matter
++  }, [ready, html])
++
++  useImperativeHandle(ref, () => ({
++    async probe(x, y) {
++      const reply = await request({ type: 'doop:probe', x, y })
++      return (reply?.hit as ProbeHit | null | undefined) ?? null
++    },
++    async locate(selector) {
++      const reply = await request({ type: 'doop:locate', selector })
++      return (reply?.rect as { x: number; y: number; width: number; height: number } | null | undefined) ?? null
++    },
++  }))
++
++  const layout = FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY ? Math.max(1, Math.ceil(scale - 1e-3)) : 1
++  return (
++    <div className="doc" style={{ width: width * scale, height: height * scale }}>
++      <div style={{ transform: `scale(${scale / layout})`, transformOrigin: '0 0' }}>
++        <div style={{ zoom: layout }}>
++          <iframe
++            ref={iframe}
++            title="frame"
++            sandbox="allow-scripts"
++            srcDoc={FRAME_BOOTSTRAP}
++            style={{ width, height, border: 0, display: 'block', background: '#fff' }}
++          />
++        </div>
++      </div>
++    </div>
++  )
++})
+diff --git a/src/embed/changes.ts b/src/embed/changes.ts
+new file mode 100644
+index 0000000..dbf78c4
+--- /dev/null
++++ b/src/embed/changes.ts
+@@ -0,0 +1,71 @@
++import type { ApprovalHistoryEntry, Frame } from '../../shared/types'
++
++/* What the compare view needs to know about two states of a frame. */
++
++/** The frame's last verdict, if any: the state the reviewer decided on is
++ *  this entry's version (filed when the verdict was given, server/actions.ts).
++ *  Approvals from before verdict history have no entries. */
++export function lastVerdict(frame: Frame): ApprovalHistoryEntry | null {
++  return frame.approval?.history?.at(-1) ?? null
++}
++
++/** Is there a decided state to compare the frame with: a verdict with its
++ *  version, and a design change since? Only a design change turns a verdict
++ *  into needs_review (server/store.ts); updatedAt is no guide, since giving
++ *  the verdict itself writes the frame. */
++export function canCompare(frame: Frame): boolean {
++  return !!lastVerdict(frame)?.versionId && frame.approval?.status === 'needs_review'
++}
++
++/** The text a person reads in a document, one run per text node, in order. */
++export function textRuns(html: string): string[] {
++  const doc = new DOMParser().parseFromString(html, 'text/html')
++  for (const el of doc.querySelectorAll('script,style,template,noscript')) el.remove()
++  const runs: string[] = []
++  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
++  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
++    const text = (node.textContent ?? '').replace(/\s+/g, ' ').trim()
++    if (text) runs.push(text)
++  }
++  return runs
++}
++
++export interface TextChange {
++  removed: string[]
++  added: string[]
++}
++
++/** The runs that differ between two documents, grouped where they replace one
++ *  another: a longest-common-subsequence walk, so a line edited in place reads
++ *  as "this became that" rather than as a list of everything after it. */
++export function textChanges(before: readonly string[], after: readonly string[]): TextChange[] {
++  const n = before.length
++  const m = after.length
++  /* frames are a screen of text; past this the table is not worth its memory */
++  if (n * m > 4_000_000) return [{ removed: [...before], added: [...after] }]
++  const lcs: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0))
++  for (let i = n - 1; i >= 0; i--)
++    for (let j = m - 1; j >= 0; j--)
++      lcs[i]![j] = before[i] === after[j] ? lcs[i + 1]![j + 1]! + 1 : Math.max(lcs[i + 1]![j]!, lcs[i]![j + 1]!)
++  const changes: TextChange[] = []
++  let open: TextChange | null = null
++  let i = 0
++  let j = 0
++  const flush = () => {
++    if (open) changes.push(open)
++    open = null
++  }
++  while (i < n || j < m) {
++    if (i < n && j < m && before[i] === after[j]) {
++      flush()
++      i++
++      j++
++    } else if (j < m && (i === n || lcs[i]![j + 1]! >= lcs[i + 1]![j]!)) {
++      ;(open ??= { removed: [], added: [] }).added.push(after[j++]!)
++    } else {
++      ;(open ??= { removed: [], added: [] }).removed.push(before[i++]!)
++    }
++  }
++  flush()
++  return changes
++}
+diff --git a/src/embed/embed.css b/src/embed/embed.css
+new file mode 100644
+index 0000000..9625bfb
+--- /dev/null
++++ b/src/embed/embed.css
+@@ -0,0 +1,466 @@
++/* The review panel's own styles: doop's white system (.context/DESIGN.md) in
++   plain CSS, so the panel ships without the editor's Tailwind build. */
++:root {
++  --paper: #fdfdfd;
++  --stage: #f2f2f1;
++  --surface: #fff;
++  --ink: #111;
++  --ink-soft: #5f5e5b;
++  --ink-faint: #9c9b99;
++  --line: #dcdcdc;
++  --line-soft: #ececec;
++  --brand: #0177d3;
++  --ok: #1f7a45;
++  --ok-bg: #e8f4ec;
++  --warn: #9a5b00;
++  --warn-bg: #fdf1de;
++  --review: #6b4bd6;
++  --review-bg: #efeafd;
++}
++* {
++  box-sizing: border-box;
++  margin: 0;
++  padding: 0;
++}
++html,
++body,
++#root {
++  height: 100%;
++}
++body {
++  font:
++    400 12.5px/1.45 Inter,
++    system-ui,
++    sans-serif;
++  color: var(--ink);
++  background: var(--paper);
++  -webkit-font-smoothing: antialiased;
++  overflow: hidden;
++}
++button,
++input,
++textarea {
++  font: inherit;
++  color: inherit;
++}
++.muted {
++  color: var(--ink-soft);
++}
++.pad {
++  padding: 12px 14px;
++}
++.center {
++  height: 100%;
++  display: grid;
++  place-items: center;
++  text-align: center;
++  padding: 24px;
++}
++
++.panel {
++  position: relative;
++  height: 100%;
++  display: flex;
++}
++.list {
++  width: 220px;
++  flex: none;
++  border-right: 1px solid var(--line-soft);
++  overflow-y: auto;
++  padding: 6px;
++  background: var(--surface);
++}
++.list .row {
++  width: 100%;
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  padding: 7px 8px;
++  border: 0;
++  background: none;
++  border-radius: 7px;
++  text-align: left;
++  cursor: pointer;
++}
++.list .row.on,
++.list .row:hover {
++  background: #f0f0f0;
++}
++.list .nm {
++  flex: 1;
++  min-width: 0;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++.dot {
++  width: 7px;
++  height: 7px;
++  border-radius: 50%;
++  flex: none;
++  background: var(--ink-faint);
++}
++.dot.tone-approved {
++  background: var(--ok);
++}
++.dot.tone-requested {
++  background: var(--warn);
++}
++.dot.tone-pending {
++  background: var(--review);
++}
++
++.review {
++  flex: 1;
++  min-width: 0;
++  display: grid;
++  grid-template-columns: 1fr 340px;
++  grid-template-rows: 44px 1fr 52px;
++}
++.ph {
++  grid-column: 1 / -1;
++  display: flex;
++  align-items: center;
++  gap: 10px;
++  padding: 0 14px;
++  border-bottom: 1px solid var(--line-soft);
++  min-width: 0;
++}
++.crumb {
++  color: var(--ink-soft);
++  white-space: nowrap;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  min-width: 0;
++}
++.crumb b {
++  color: var(--ink);
++  font-weight: 600;
++}
++.badge {
++  flex: none;
++  font-size: 11.5px;
++  font-weight: 600;
++  border-radius: 999px;
++  padding: 3px 9px;
++  white-space: nowrap;
++  background: #f0f0f0;
++  color: var(--ink-soft);
++}
++.badge.tone-approved {
++  background: var(--ok-bg);
++  color: var(--ok);
++}
++.badge.tone-requested {
++  background: var(--warn-bg);
++  color: var(--warn);
++}
++.badge.tone-pending {
++  background: var(--review-bg);
++  color: var(--review);
++}
++.seg {
++  margin-left: auto;
++  display: flex;
++  background: #f0f0f0;
++  border-radius: 7px;
++  padding: 2px;
++  flex: none;
++}
++.seg button {
++  border: 0;
++  background: none;
++  padding: 4px 10px;
++  border-radius: 5px;
++  color: var(--ink-soft);
++  font-weight: 500;
++  cursor: pointer;
++}
++.seg button.on {
++  background: #fff;
++  color: var(--ink);
++  box-shadow: 0 0 0 1px var(--line);
++}
++.seg button:disabled {
++  opacity: 0.45;
++  cursor: default;
++}
++
++.stage {
++  background: var(--stage);
++  overflow: auto;
++  position: relative;
++  display: grid;
++  place-items: center;
++  padding: 24px;
++  min-height: 0;
++}
++.sheet {
++  position: relative;
++  box-shadow:
++    0 0 0 1px rgba(0, 0, 0, 0.06),
++    0 6px 20px -12px rgba(0, 0, 0, 0.35);
++  background: #fff;
++}
++.doc {
++  overflow: hidden;
++}
++.shield {
++  position: absolute;
++  inset: 0;
++}
++.shield.pinnable {
++  cursor: crosshair;
++}
++.pin {
++  position: absolute;
++  transform: translate(0, -24px);
++  width: 24px;
++  height: 24px;
++  border-radius: 12px 12px 12px 3px;
++  background: var(--brand);
++  color: #fff;
++  font-weight: 650;
++  font-size: 11.5px;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  box-shadow:
++    0 0 0 2px #fff,
++    0 3px 8px rgba(0, 0, 0, 0.25);
++  pointer-events: none;
++}
++.pin.draft {
++  background: var(--warn);
++}
++
++.side {
++  border-left: 1px solid var(--line-soft);
++  background: var(--surface);
++  overflow-y: auto;
++  min-height: 0;
++}
++.sh {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  padding: 12px 14px 6px;
++  font-weight: 600;
++}
++.sh .link {
++  margin-left: auto;
++}
++.cm {
++  margin: 6px 12px;
++  padding: 10px 12px;
++  border: 1px solid var(--line-soft);
++  border-radius: 10px;
++}
++.cm.done {
++  opacity: 0.7;
++}
++.cm .who {
++  display: flex;
++  align-items: center;
++  gap: 7px;
++  font-size: 12px;
++}
++.cm .who b {
++  font-weight: 600;
++}
++.cm .t {
++  margin-left: auto;
++}
++.cm p {
++  margin-top: 4px;
++  white-space: pre-wrap;
++  overflow-wrap: anywhere;
++}
++.cm .re {
++  margin-top: 9px;
++  padding-top: 9px;
++  border-top: 1px solid var(--line-soft);
++}
++.num {
++  font:
++    600 10.5px/1 'Geist Mono',
++    monospace;
++  color: #fff;
++  background: var(--brand);
++  border-radius: 4px;
++  padding: 3px 4px;
++}
++.ok {
++  display: inline-block;
++  margin-top: 8px;
++  font-size: 11.5px;
++  font-weight: 600;
++  color: var(--ok);
++}
++.reply {
++  display: flex;
++  gap: 8px;
++  margin-top: 9px;
++}
++.reply input {
++  flex: 1;
++  min-width: 0;
++  border: 1px solid var(--line);
++  border-radius: 7px;
++  padding: 5px 8px;
++}
++.link {
++  border: 0;
++  background: none;
++  color: var(--brand);
++  font-weight: 500;
++  cursor: pointer;
++}
++.link:disabled {
++  opacity: 0.5;
++}
++.compose {
++  padding: 14px;
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++}
++.compose textarea {
++  min-height: 110px;
++  resize: vertical;
++  border: 1px solid var(--line);
++  border-radius: 8px;
++  padding: 9px 10px;
++  outline: none;
++}
++.compose textarea:focus {
++  box-shadow: 0 0 0 3px #e6f0fa;
++  border-color: #9cc6ea;
++}
++.row-end {
++  display: flex;
++  justify-content: flex-end;
++  gap: 8px;
++}
++.history {
++  padding: 4px 0 14px;
++}
++.history .muted {
++  padding: 2px 14px;
++  font-size: 12px;
++}
++
++.pf {
++  grid-column: 1 / -1;
++  display: flex;
++  align-items: center;
++  gap: 10px;
++  padding: 0 14px;
++  border-top: 1px solid var(--line-soft);
++  background: var(--surface);
++}
++.pf .info {
++  flex: 1;
++  min-width: 0;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++.btn {
++  border: 0;
++  border-radius: 8px;
++  padding: 9px 14px;
++  font-weight: 500;
++  white-space: nowrap;
++  cursor: pointer;
++  background: #fff;
++  box-shadow:
++    0 0 0 1px var(--line),
++    0 1px 2px rgba(0, 0, 0, 0.05);
++}
++.btn.pri {
++  background: var(--ink);
++  color: #fff;
++  box-shadow: none;
++}
++.btn:disabled {
++  opacity: 0.4;
++  cursor: default;
++}
++
++.compare {
++  align-self: start;
++  justify-self: stretch;
++}
++.pair {
++  display: flex;
++  gap: 24px;
++  justify-content: center;
++}
++.pair figure {
++  box-shadow: none;
++}
++.pair figcaption {
++  font-size: 12px;
++  color: var(--ink-soft);
++  margin-bottom: 6px;
++}
++.pair figcaption b {
++  color: var(--ink);
++  font-weight: 600;
++}
++.pair .doc {
++  box-shadow:
++    0 0 0 1px rgba(0, 0, 0, 0.06),
++    0 6px 20px -12px rgba(0, 0, 0, 0.35);
++  background: #fff;
++}
++.changes {
++  margin: 18px auto 0;
++  max-width: 900px;
++  color: var(--ink-soft);
++}
++.changes b {
++  color: var(--ink);
++  font-weight: 600;
++}
++.changes ul {
++  margin-top: 6px;
++  padding-left: 18px;
++}
++.changes del {
++  color: #a1260d;
++  background: #fdecea;
++  text-decoration: line-through;
++  padding: 0 3px;
++  border-radius: 3px;
++}
++.changes ins {
++  color: var(--ok);
++  background: var(--ok-bg);
++  text-decoration: none;
++  padding: 0 3px;
++  border-radius: 3px;
++}
++
++.veil {
++  position: absolute;
++  inset: 0;
++  background: rgba(253, 253, 253, 0.7);
++  display: grid;
++  place-items: center;
++  z-index: 10;
++}
++.card {
++  background: #fff;
++  border-radius: 12px;
++  box-shadow:
++    0 0 0 1px var(--line),
++    0 18px 40px -14px rgba(0, 0, 0, 0.35);
++  padding: 18px;
++  width: 380px;
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++  align-items: flex-start;
++}
+diff --git a/src/embed/main.tsx b/src/embed/main.tsx
+new file mode 100644
+index 0000000..d7e9ab2
+--- /dev/null
++++ b/src/embed/main.tsx
+@@ -0,0 +1,675 @@
++import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
++import { createRoot } from 'react-dom/client'
++import { roleAllows } from '../../shared/canvasRole'
++import { elementCommentPosition, isFrameComment } from '../../shared/comments'
++import type { ApprovalVerdictStatus, Canvas, ElementComment, Frame, ServerMessage } from '../../shared/types'
++import { canCompare, lastVerdict, textChanges, textRuns, type TextChange } from './changes'
++import { FrameDoc, type FrameDocHandle, type ProbeHit } from './FrameDoc'
++import {
++  ConflictError,
++  ExpiredError,
++  connectRoom,
++  exchange,
++  readHostMessage,
++  rest,
++  takeLaunchParams,
++  tellHost,
++  type CommentAnchor,
++  type EmbedSession,
++} from './session'
++import './embed.css'
++
++/* The review panel a host app embeds: one canvas, looked at by one person the
++   host signed in, who may comment and give a verdict but never change a frame.
++   Small on purpose: React, the frame runtime and this file. */
++
++/* once, at load: a second read (React's development double effects) would
++   find the address already wiped */
++const LAUNCH = takeLaunchParams()
++
++type Phase =
++  | { kind: 'starting' }
++  | { kind: 'failed'; message: string }
++  | { kind: 'live'; session: EmbedSession }
++  | { kind: 'expired'; session: EmbedSession }
++
++interface Draft {
++  /** where the comment is pinned, in design px; none for a general note */
++  pin: { x: number; y: number; anchor: CommentAnchor; label: string } | null
++  text: string
++  /** sent together with a changes-requested verdict */
++  requestChanges: boolean
++}
++
++const fmtAgo = (at: number) => {
++  const s = Math.max(0, (Date.now() - at) / 1000)
++  if (s < 60) return 'just now'
++  if (s < 3600) return `${Math.round(s / 60)} min ago`
++  if (s < 86400) return `${Math.round(s / 3600)} h ago`
++  return new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
++}
++
++type Tone = 'draft' | 'approved' | 'requested' | 'pending'
++
++function statusOf(frame: Frame): { label: string; tone: Tone; note: string } {
++  const a = frame.approval
++  if (!a) return { label: 'Draft', tone: 'draft', note: 'Not reviewed yet' }
++  const when = fmtAgo(a.approvedAt)
++  if (a.status === 'ready_for_dev')
++    return { label: `Ready for dev · approved by ${a.approvedBy}`, tone: 'approved', note: `Approved ${when}` }
++  if (a.status === 'changes_requested')
++    return {
++      label: `Changes requested by ${a.approvedBy}`,
++      tone: 'requested',
++      note: `Waiting for a revision since ${when}`,
++    }
++  return a.verdict === 'changes_requested'
++    ? {
++        label: 'Revised since changes were requested',
++        tone: 'pending',
++        note: 'Revised: compare it with what you asked for',
++      }
++    : { label: 'Changed since it was approved', tone: 'pending', note: 'Changed after approval: review it again' }
++}
++
++function App() {
++  const [phase, setPhase] = useState<Phase>({ kind: 'starting' })
++  const [canvas, setCanvas] = useState<Canvas | null>(null)
++  const [comments, setComments] = useState<ElementComment[]>([])
++  const [epoch, setEpoch] = useState(0)
++
++  /* launch: trade the token for a session (read from the address at load) */
++  const [frameId, setFrameId] = useState<string | null>(LAUNCH.frameId)
++  const [hostPinned, setHostPinned] = useState(!!LAUNCH.frameId)
++  useEffect(() => {
++    const { token } = LAUNCH
++    if (!token) {
++      setPhase({ kind: 'failed', message: 'Open this review from the app it belongs to.' })
++      return
++    }
++    exchange(token).then(
++      (session) => setPhase({ kind: 'live', session }),
++      (e: Error) => setPhase({ kind: 'failed', message: e.message }),
++    )
++  }, [])
++
++  const session = phase.kind === 'live' || phase.kind === 'expired' ? phase.session : null
++
++  const sessionEnded = useCallback(() => {
++    setPhase((p) => {
++      if (p.kind !== 'live') return p
++      tellHost(p.session, { type: 'doop:need-token', reason: 'expired' })
++      return { kind: 'expired', session: p.session }
++    })
++  }, [])
++
++  /* the host page: a fresh token after the session ended, or another frame */
++  useEffect(() => {
++    if (!session) return
++    function onMessage(ev: MessageEvent) {
++      const msg = readHostMessage(ev, session!.hostOrigin)
++      if (!msg) return
++      if (msg.type === 'doop:open') {
++        setFrameId(msg.frameId)
++        setHostPinned(true)
++      } else
++        exchange(msg.token).then(
++          (next) => {
++            setPhase({ kind: 'live', session: next })
++            setEpoch((n) => n + 1)
++          },
++          () => setPhase({ kind: 'failed', message: 'This review link is no longer valid.' }),
++        )
++    }
++    window.addEventListener('message', onMessage)
++    return () => window.removeEventListener('message', onMessage)
++  }, [session])
++
++  /* the canvas room: frames and comments as they change */
++  const live = phase.kind === 'live' ? phase.session : null
++  useEffect(() => {
++    if (!live) return
++    return connectRoom(
++      live.canvasId,
++      live.user.name,
++      (msg: ServerMessage) => {
++        switch (msg.type) {
++          case 'init':
++            setCanvas(msg.canvas)
++            setComments(msg.comments)
++            break
++          case 'frame:created':
++          case 'frame:updated':
++            setCanvas((c) =>
++              c
++                ? {
++                    ...c,
++                    frames: c.frames.some((f) => f.id === msg.frame.id)
++                      ? c.frames.map((f) => (f.id === msg.frame.id ? msg.frame : f))
++                      : [...c.frames, msg.frame],
++                  }
++                : c,
++            )
++            break
++          case 'frame:deleted':
++            setCanvas((c) => (c ? { ...c, frames: c.frames.filter((f) => f.id !== msg.frameId) } : c))
++            break
++          case 'canvas:pages':
++            setCanvas((c) => (c ? { ...c, pages: msg.pages } : c))
++            break
++          case 'comment':
++            setComments((list) =>
++              list.some((x) => x.id === msg.comment.id)
++                ? list.map((x) => (x.id === msg.comment.id ? msg.comment : x))
++                : [...list, msg.comment],
++            )
++            break
++          case 'canvas:deleted':
++            setPhase({ kind: 'failed', message: 'This canvas was deleted.' })
++            break
++        }
++      },
++      sessionEnded,
++    )
++    // eslint-disable-next-line react-hooks/exhaustive-deps -- one room per session; epoch reconnects after a new token
++  }, [live?.canvasId, epoch, sessionEnded])
++
++  const frames = useMemo(() => (canvas?.frames ?? []).filter((f) => !f.hidden && f.html), [canvas])
++  const frame = frames.find((f) => f.id === frameId) ?? (hostPinned ? null : (frames[0] ?? null))
++
++  const announced = useRef(false)
++  useEffect(() => {
++    if (!live || !canvas || announced.current) return
++    announced.current = true
++    tellHost(live, { type: 'doop:ready', canvasId: canvas.id, frameId: frame?.id ?? null })
++  }, [live, canvas, frame])
++
++  if (phase.kind === 'starting' || (phase.kind === 'live' && !canvas))
++    return <div className="center muted">Opening the review…</div>
++  if (phase.kind === 'failed') return <div className="center muted">{phase.message}</div>
++  if (!canvas || !session) return null
++
++  return (
++    <div className="panel">
++      {!hostPinned && (
++        <FrameList
++          frames={frames}
++          current={frame?.id ?? null}
++          onPick={(id) => {
++            setFrameId(id)
++            tellHost(session, { type: 'doop:open', frameId: id })
++          }}
++        />
++      )}
++      {frame ? (
++        <Review
++          key={frame.id}
++          session={session}
++          canvas={canvas}
++          frame={frame}
++          comments={comments.filter((c) => c.frameId === frame.id)}
++          onExpired={sessionEnded}
++        />
++      ) : (
++        <div className="center muted">This frame is no longer on the canvas.</div>
++      )}
++      {phase.kind === 'expired' && (
++        <div className="veil">
++          <div className="card">
++            <b>Your review session ended</b>
++            <p className="muted">The panel asks {new URL(session.hostOrigin).host} for a fresh one; nothing is lost.</p>
++            <button
++              className="btn pri"
++              onClick={() => tellHost(session, { type: 'doop:need-token', reason: 'expired' })}
++            >
++              Continue reviewing
++            </button>
++          </div>
++        </div>
++      )}
++    </div>
++  )
++}
++
++function FrameList({
++  frames,
++  current,
++  onPick,
++}: {
++  frames: Frame[]
++  current: string | null
++  onPick: (id: string) => void
++}) {
++  return (
++    <nav className="list">
++      {frames.map((f) => (
++        <button key={f.id} className={f.id === current ? 'row on' : 'row'} onClick={() => onPick(f.id)}>
++          <span className="nm">{f.name}</span>
++          <span className={`dot tone-${statusOf(f).tone}`} />
++        </button>
++      ))}
++    </nav>
++  )
++}
++
++function useStageScale(el: HTMLElement | null, width: number, height: number, columns: number): number {
++  const [size, setSize] = useState({ width: 0, height: 0 })
++  useEffect(() => {
++    if (!el) return
++    const ro = new ResizeObserver(([entry]) => {
++      if (entry) setSize({ width: entry.contentRect.width, height: entry.contentRect.height })
++    })
++    ro.observe(el)
++    return () => ro.disconnect()
++  }, [el])
++  if (!size.width) return 0
++  const pad = 48
++  return Math.max(0.05, Math.min(1, (size.width / columns - pad) / width, (size.height - pad) / height))
++}
++
++function Review({
++  session,
++  canvas,
++  frame,
++  comments,
++  onExpired,
++}: {
++  session: EmbedSession
++  canvas: Canvas
++  frame: Frame
++  comments: ElementComment[]
++  onExpired: () => void
++}) {
++  const doc = useRef<FrameDocHandle>(null)
++  const [stage, setStage] = useState<HTMLDivElement | null>(null)
++  const [mode, setMode] = useState<'frame' | 'compare'>('frame')
++  const [draft, setDraft] = useState<Draft | null>(null)
++  const [busy, setBusy] = useState(false)
++  const [notice, setNotice] = useState<string | null>(null)
++  const [pins, setPins] = useState<Map<string, { x: number; y: number }>>(new Map())
++  const comparing = mode === 'compare' && canCompare(frame)
++  const scale = useStageScale(stage, frame.width, frame.height, comparing ? 2 : 1)
++
++  const mayComment = roleAllows(session.role, 'comment')
++  const mayDecide = roleAllows(session.role, 'review')
++  const roots = comments.filter((c) => !c.parentId).sort((a, b) => a.at - b.at)
++  const open = roots.filter((c) => !c.resolvedAt)
++  const page = canvas.pages?.find((p) => p.id === frame.pageId)
++  const status = statusOf(frame)
++
++  const fail = useCallback(
++    (e: unknown) => {
++      if (e instanceof ExpiredError) return onExpired()
++      if (e instanceof ConflictError)
++        return setNotice('This frame just changed. Look at the new version before deciding.')
++      setNotice(e instanceof Error ? e.message : 'Something went wrong.')
++    },
++    [onExpired],
++  )
++
++  /* pins: a frame comment sits at its point; an element comment follows its
++     element, wherever this revision put it */
++  const placePins = useCallback(async () => {
++    const next = new Map<string, { x: number; y: number }>()
++    for (const c of open) {
++      if (isFrameComment(c)) next.set(c.id, { x: c.x, y: c.y })
++      else if (c.elementId) {
++        const rect = await doc.current?.locate(`[data-doop-id="${CSS.escape(c.elementId)}"]`)
++        const at = elementCommentPosition(c, rect ? { x: rect.x, y: rect.y } : null)
++        if (at) next.set(c.id, at)
++      }
++    }
++    setPins(next)
++    // eslint-disable-next-line react-hooks/exhaustive-deps -- open is derived from comments
++  }, [comments])
++  useEffect(() => {
++    void placePins()
++  }, [placePins])
++
++  async function pinAt(e: React.MouseEvent<HTMLDivElement>) {
++    if (!mayComment || comparing || scale === 0) return
++    const box = e.currentTarget.getBoundingClientRect()
++    const x = (e.clientX - box.left) / scale
++    const y = (e.clientY - box.top) / scale
++    const hit: ProbeHit | null = (await doc.current?.probe(x, y)) ?? null
++    const anchor: CommentAnchor = hit
++      ? {
++          selector: hit.selector,
++          ...(hit.elementId ? { elementId: hit.elementId } : {}),
++          snippet: hit.snippet,
++          x,
++          y,
++          elementOrigin: { x: hit.rect.x, y: hit.rect.y },
++        }
++      : { x, y }
++    const label = hit ? describe(hit) : 'this spot'
++    setDraft((d) => ({ text: d?.text ?? '', requestChanges: d?.requestChanges ?? false, pin: { x, y, anchor, label } }))
++  }
++
++  async function send() {
++    if (!draft || !draft.text.trim()) return
++    setBusy(true)
++    setNotice(null)
++    try {
++      if (draft.requestChanges) await decide('changes_requested')
++      const comment = await rest.comment(frame.id, draft.text.trim(), draft.pin?.anchor ?? {})
++      tellHost(session, { type: 'doop:comment', frameId: frame.id, commentId: comment.id })
++      setDraft(null)
++    } catch (e) {
++      fail(e)
++    } finally {
++      setBusy(false)
++    }
++  }
++
++  async function decide(status: ApprovalVerdictStatus) {
++    const updated = await rest.verdict(frame, status)
++    const entry = updated.approval?.history?.at(-1)
++    tellHost(session, {
++      type: 'doop:verdict',
++      frameId: frame.id,
++      status,
++      by: session.user.name,
++      frameUpdatedAt: updated.approval?.approvedFrameUpdatedAt ?? frame.updatedAt,
++      ...(entry?.versionId ? { versionId: entry.versionId } : {}),
++    })
++  }
++
++  async function approve() {
++    setBusy(true)
++    setNotice(null)
++    try {
++      await decide('ready_for_dev')
++    } catch (e) {
++      fail(e)
++    } finally {
++      setBusy(false)
++    }
++  }
++
++  const numbers = new Map(roots.map((c, i) => [c.id, i + 1]))
++
++  return (
++    <section className="review">
++      <header className="ph">
++        <span className="crumb">
++          {canvas.name}
++          {page ? ` › ${page.name}` : ''} › <b>{frame.name}</b>
++        </span>
++        <span className={`badge tone-${status.tone}`}>{status.label}</span>
++        <div className="seg">
++          <button className={mode === 'frame' ? 'on' : ''} onClick={() => setMode('frame')}>
++            Frame
++          </button>
++          <button
++            className={comparing ? 'on' : ''}
++            disabled={!canCompare(frame)}
++            title={canCompare(frame) ? 'Side by side with the version you last decided on' : 'Nothing to compare yet'}
++            onClick={() => setMode('compare')}
++          >
++            Compare
++          </button>
++        </div>
++      </header>
++
++      <div className="stage" ref={setStage}>
++        {scale > 0 &&
++          (comparing ? (
++            <Compare frame={frame} scale={scale} onError={fail} />
++          ) : (
++            <div className="sheet" style={{ width: frame.width * scale, height: frame.height * scale }}>
++              <FrameDoc
++                ref={doc}
++                html={frame.html}
++                width={frame.width}
++                height={frame.height}
++                scale={scale}
++                onPainted={() => void placePins()}
++              />
++              <div className={mayComment ? 'shield pinnable' : 'shield'} onClick={(e) => void pinAt(e)}>
++                {open.map((c) => {
++                  const at = pins.get(c.id)
++                  return at ? (
++                    <span key={c.id} className="pin" style={{ left: at.x * scale, top: at.y * scale }}>
++                      {numbers.get(c.id)}
++                    </span>
++                  ) : null
++                })}
++                {draft?.pin && (
++                  <span className="pin draft" style={{ left: draft.pin.x * scale, top: draft.pin.y * scale }}>
++                    +
++                  </span>
++                )}
++              </div>
++            </div>
++          ))}
++      </div>
++
++      <aside className="side">
++        {draft ? (
++          <div className="compose">
++            <b>{draft.requestChanges ? 'Request changes' : 'New comment'}</b>
++            <p className="muted">
++              {draft.pin
++                ? `On ${draft.pin.label}.`
++                : 'Click the frame to pin it to what should change, or write a general note.'}
++            </p>
++            <textarea
++              autoFocus
++              value={draft.text}
++              placeholder={draft.requestChanges ? 'What should change, and why?' : 'Write a comment'}
++              onChange={(e) => setDraft({ ...draft, text: e.target.value })}
++            />
++            <div className="row-end">
++              <button className="btn" onClick={() => setDraft(null)} disabled={busy}>
++                Cancel
++              </button>
++              <button className="btn pri" onClick={() => void send()} disabled={busy || !draft.text.trim()}>
++                {draft.requestChanges ? 'Request changes' : 'Comment'}
++              </button>
++            </div>
++          </div>
++        ) : (
++          <>
++            <div className="sh">
++              Comments <span className="muted">{open.length}</span>
++              {mayComment && (
++                <button className="link" onClick={() => setDraft({ text: '', pin: null, requestChanges: false })}>
++                  Add
++                </button>
++              )}
++            </div>
++            {roots.length === 0 && <p className="muted pad">No comments on this frame.</p>}
++            {roots.map((c) => (
++              <Thread
++                key={c.id}
++                root={c}
++                number={numbers.get(c.id)!}
++                replies={comments.filter((r) => r.parentId === c.id).sort((a, b) => a.at - b.at)}
++                mayComment={mayComment}
++                onError={fail}
++              />
++            ))}
++            <History frame={frame} />
++          </>
++        )}
++      </aside>
++
++      <footer className="pf">
++        <span className="muted info">{notice ?? status.note}</span>
++        {mayDecide && (
++          <>
++            <button
++              className="btn"
++              disabled={busy || !!draft || frame.approval?.status === 'changes_requested'}
++              onClick={() => setDraft({ text: '', pin: null, requestChanges: true })}
++            >
++              Request changes
++            </button>
++            <button
++              className="btn pri"
++              disabled={busy || !!draft || frame.approval?.status === 'ready_for_dev'}
++              onClick={() => void approve()}
++            >
++              {frame.approval?.status === 'ready_for_dev' ? 'Approved' : 'Approve'}
++            </button>
++          </>
++        )}
++      </footer>
++    </section>
++  )
++}
++
++function describe(hit: ProbeHit): string {
++  const text = hit.snippet
++    .replace(/<[^>]*>/g, ' ')
++    .replace(/\s+/g, ' ')
++    .trim()
++  return text ? `“${text.length > 48 ? `${text.slice(0, 47)}…` : text}”` : 'this element'
++}
++
++function Thread({
++  root,
++  number,
++  replies,
++  mayComment,
++  onError,
++}: {
++  root: ElementComment
++  number: number
++  replies: ElementComment[]
++  mayComment: boolean
++  onError: (e: unknown) => void
++}) {
++  const [reply, setReply] = useState('')
++  const [busy, setBusy] = useState(false)
++  async function run(fn: () => Promise<unknown>) {
++    setBusy(true)
++    try {
++      await fn()
++    } catch (e) {
++      onError(e)
++    } finally {
++      setBusy(false)
++    }
++  }
++  return (
++    <div className={root.resolvedAt ? 'cm done' : 'cm'}>
++      {[root, ...replies].map((c, i) => (
++        <div key={c.id} className={i ? 're' : ''}>
++          <div className="who">
++            {i === 0 && <span className="num">{number}</span>}
++            <b>{c.from}</b>
++            <span className="muted t">{fmtAgo(c.at)}</span>
++          </div>
++          <p>{c.text}</p>
++        </div>
++      ))}
++      {root.resolvedAt ? (
++        <span className="ok">Resolved{root.resolvedBy ? ` by ${root.resolvedBy}` : ''}</span>
++      ) : (
++        mayComment && (
++          <div className="reply">
++            <input
++              value={reply}
++              placeholder="Reply"
++              onChange={(e) => setReply(e.target.value)}
++              onKeyDown={(e) => {
++                if (e.key === 'Enter' && reply.trim())
++                  void run(() => rest.reply(root.id, reply.trim())).then(() => setReply(''))
++              }}
++            />
++            <button className="link" disabled={busy} onClick={() => void run(() => rest.resolve(root.id))}>
++              Resolve
++            </button>
++          </div>
++        )
++      )}
++    </div>
++  )
++}
++
++function History({ frame }: { frame: Frame }) {
++  const history = frame.approval?.history ?? []
++  if (!history.length) return null
++  return (
++    <div className="history">
++      <div className="sh">History</div>
++      {[...history].reverse().map((h) => (
++        <div key={`${h.at}-${h.status}`} className="muted">
++          {h.status === 'ready_for_dev' ? 'Approved' : 'Changes requested'} by {h.by} · {fmtAgo(h.at)}
++        </div>
++      ))}
++    </div>
++  )
++}
++
++/** The frame now beside the state the last verdict was given on, at the same
++ *  scale, scrolling together, with the text that changed between them. */
++function Compare({ frame, scale, onError }: { frame: Frame; scale: number; onError: (e: unknown) => void }) {
++  const last = lastVerdict(frame)
++  const [before, setBefore] = useState<{ html: string } | 'gone' | null>(null)
++  useEffect(() => {
++    if (!last?.versionId) return
++    let stale = false
++    rest.version(frame.id, last.versionId).then(
++      (v) => !stale && setBefore({ html: v.html }),
++      (e: unknown) => {
++        if (stale) return
++        if (e instanceof Error && /not found/.test(e.message)) setBefore('gone')
++        else onError(e)
++      },
++    )
++    return () => {
++      stale = true
++    }
++  }, [frame.id, last?.versionId, onError])
++  const changes: TextChange[] = useMemo(
++    () => (before && before !== 'gone' ? textChanges(textRuns(before.html), textRuns(frame.html)) : []),
++    [before, frame.html],
++  )
++  if (!last) return null
++  if (before === 'gone') return <p className="muted pad">That version is no longer kept.</p>
++  if (!before) return <p className="muted pad">Loading the version you decided on…</p>
++  const label = last.status === 'ready_for_dev' ? 'approved' : 'changes requested'
++  return (
++    <div className="compare">
++      <div className="pair">
++        <figure>
++          <figcaption>
++            <b>Then</b> · {label} by {last.by}, {fmtAgo(last.at)}
++          </figcaption>
++          <FrameDoc html={before.html} width={frame.width} height={frame.height} scale={scale} />
++        </figure>
++        <figure>
++          <figcaption>
++            <b>Now</b> · {fmtAgo(frame.updatedAt)}
++          </figcaption>
++          <FrameDoc html={frame.html} width={frame.width} height={frame.height} scale={scale} />
++        </figure>
++      </div>
++      <div className="changes">
++        <b>Text that changed</b>
++        {changes.length === 0 ? (
++          <span className="muted"> · none; the change is in layout or style.</span>
++        ) : (
++          <ul>
++            {changes.slice(0, 12).map((c, i) => (
++              <li key={i}>
++                {c.removed.length > 0 && <del>{c.removed.join(' ')}</del>}
++                {c.removed.length > 0 && c.added.length > 0 && ' → '}
++                {c.added.length > 0 && <ins>{c.added.join(' ')}</ins>}
++              </li>
++            ))}
++          </ul>
++        )}
++      </div>
++    </div>
++  )
++}
++
++createRoot(document.getElementById('root')!).render(
++  <StrictMode>
++    <App />
++  </StrictMode>,
++)
+diff --git a/src/embed/session.ts b/src/embed/session.ts
+new file mode 100644
+index 0000000..69c02e7
+--- /dev/null
++++ b/src/embed/session.ts
+@@ -0,0 +1,168 @@
++import type { CanvasRole } from '../../shared/canvasRole'
++import type { ApprovalVerdictStatus, ElementComment, Frame, ServerMessage } from '../../shared/types'
++
++/* The review panel's connection to doop and to the page that embeds it.
++
++   A host app (host apps) loads /embed#token=<jwt>&frame=<id>
++   in an iframe. The token is the host's word for who is reviewing which
++   canvas (server/embed.ts); the panel trades it once for a session cookie,
++   wipes it from the address bar and from then on is an ordinary doop client
++   with a narrow grant: REST for comments and verdicts, the canvas room for
++   everything live.
++
++   The host page hears what happened through postMessage, to its own origin
++   only (the exchange names it), and can hand the panel a fresh token or tell
++   it to open another frame. Nothing from any other window is read. */
++
++export interface EmbedSession {
++  canvasId: string
++  role: CanvasRole
++  hostOrigin: string
++  expiresAt: number
++  user: { name: string }
++}
++
++/** What the panel says to the host page. */
++export type PanelMessage =
++  | { type: 'doop:ready'; canvasId: string; frameId: string | null }
++  | { type: 'doop:open'; frameId: string }
++  | {
++      type: 'doop:verdict'
++      frameId: string
++      status: ApprovalVerdictStatus
++      by: string
++      frameUpdatedAt: number
++      versionId?: string
++    }
++  | { type: 'doop:comment'; frameId: string; commentId: string }
++  | { type: 'doop:need-token'; reason: 'expired' | 'refused' }
++
++/** What the host page may say to the panel. */
++export type HostMessage = { type: 'doop:token'; token: string } | { type: 'doop:open'; frameId: string }
++
++/** A message from the host page, or null for anything else: the wrong
++ *  sender, the wrong shape, or a field that is not what it claims. */
++export function readHostMessage(ev: { origin: string; data: unknown }, hostOrigin: string): HostMessage | null {
++  if (ev.origin !== hostOrigin) return null
++  const d = ev.data as { type?: unknown; token?: unknown; frameId?: unknown } | null
++  if (!d || typeof d !== 'object') return null
++  if (d.type === 'doop:token' && typeof d.token === 'string' && d.token.length < 8192)
++    return { type: 'doop:token', token: d.token }
++  if (d.type === 'doop:open' && typeof d.frameId === 'string' && /^[\w-]{1,64}$/.test(d.frameId))
++    return { type: 'doop:open', frameId: d.frameId }
++  return null
++}
++
++export function tellHost(session: EmbedSession, msg: PanelMessage): void {
++  if (window.parent === window) return
++  window.parent.postMessage(msg, session.hostOrigin)
++}
++
++/** The token and the frame to open, read from the address once and wiped from
++ *  it at once: a fragment never reaches a server or a log, and replacing it
++ *  keeps the token out of history and out of anything the page shares. */
++export function takeLaunchParams(): { token: string | null; frameId: string | null } {
++  const params = new URLSearchParams(location.hash.slice(1))
++  const token = params.get('token')
++  const frameId = params.get('frame')
++  history.replaceState(null, '', location.pathname + (frameId ? `#frame=${encodeURIComponent(frameId)}` : ''))
++  return { token, frameId }
++}
++
++export class SessionError extends Error {}
++
++/** Trade a host token for a session. fetch() from this page: the exchange
++ *  checks the request's Origin, which a form posted from another site fails. */
++export async function exchange(token: string): Promise<EmbedSession> {
++  const res = await fetch('/api/auth/embed/session', {
++    method: 'POST',
++    credentials: 'same-origin',
++    headers: { 'content-type': 'application/json' },
++    body: JSON.stringify({ token }),
++  })
++  if (!res.ok) throw new SessionError('This review link is no longer valid.')
++  return (await res.json()) as EmbedSession
++}
++
++export class ExpiredError extends Error {}
++export class ConflictError extends Error {}
++
++async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
++  const res = await fetch(`/api${path}`, {
++    method,
++    credentials: 'same-origin',
++    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
++    body: body === undefined ? undefined : JSON.stringify(body),
++  })
++  if (res.status === 401) throw new ExpiredError('session ended')
++  if (res.status === 409) throw new ConflictError('the frame changed')
++  if (!res.ok) {
++    const err = (await res.json().catch(() => null)) as { error?: string } | null
++    throw new Error(err?.error ?? `request failed (${res.status})`)
++  }
++  return (await res.json()) as T
++}
++
++export interface CommentAnchor {
++  selector?: string
++  elementId?: string
++  snippet?: string
++  x?: number
++  y?: number
++  elementOrigin?: { x: number; y: number }
++}
++
++export const rest = {
++  /** The verdict first and the comment after it: pinning a comment may stamp
++   *  an element id into the frame, which moves its version on, and the
++   *  verdict must be given on the version the reviewer looked at. */
++  verdict: (frame: Frame, status: ApprovalVerdictStatus) =>
++    api<Frame>('PUT', `/frames/${frame.id}/approval`, { status, expectedUpdatedAt: frame.updatedAt }),
++  comment: (frameId: string, text: string, anchor: CommentAnchor) =>
++    api<ElementComment>('POST', `/frames/${frameId}/comments`, { text, ...anchor }),
++  reply: (commentId: string, text: string) => api<ElementComment>('POST', `/comments/${commentId}/replies`, { text }),
++  resolve: (commentId: string) => api<unknown>('POST', `/comments/${commentId}/resolve`, {}),
++  version: (frameId: string, versionId: string) =>
++    api<{ html: string; savedAt: number }>('GET', `/frames/${frameId}/versions/${versionId}`),
++}
++
++/** The canvas room: the panel's live copy of frames and comments. It reports
++ *  every message it is sent, and how it ended: a refused or expired session
++ *  (4401 / 4403) needs a fresh token from the host, anything else reconnects. */
++export function connectRoom(
++  canvasId: string,
++  name: string,
++  onMessage: (msg: ServerMessage) => void,
++  onRefused: () => void,
++): () => void {
++  let ws: WebSocket | null = null
++  let stopped = false
++  let retry = 0
++  let timer = 0
++  const clientId = `embed-${crypto.randomUUID()}`
++  function open() {
++    ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`)
++    ws.onopen = () => {
++      retry = 0
++      ws?.send(JSON.stringify({ type: 'join', canvasId, clientId, name, kind: 'human' }))
++    }
++    ws.onmessage = (ev) => {
++      try {
++        onMessage(JSON.parse(String(ev.data)) as ServerMessage)
++      } catch {
++        /* a message this panel cannot read is not one it needs */
++      }
++    }
++    ws.onclose = (ev) => {
++      if (stopped) return
++      if (ev.code === 4401 || ev.code === 4403) return onRefused()
++      timer = window.setTimeout(open, Math.min(15_000, 500 * 2 ** retry++))
++    }
++  }
++  open()
++  return () => {
++    stopped = true
++    window.clearTimeout(timer)
++    ws?.close()
++  }
++}
+diff --git a/tests/embedChanges.test.ts b/tests/embedChanges.test.ts
+new file mode 100644
+index 0000000..c1d417f
+--- /dev/null
++++ b/tests/embedChanges.test.ts
+@@ -0,0 +1,69 @@
++// @vitest-environment happy-dom
++import { describe, expect, it } from 'vitest'
++import { canCompare, lastVerdict, textChanges, textRuns } from '../src/embed/changes.ts'
++import type { Frame } from '../shared/types.ts'
++
++/* The review panel's compare view: which state the last verdict was given on,
++   and what text changed since. */
++
++describe('textRuns', () => {
++  it('reads the text a person sees, in order, without styles or scripts', () => {
++    const html =
++      '<html><head><style>p{color:red}</style></head><body><h1>Invite</h1><p>Link works\n 7 days</p>' +
++      '<script>var x = "no"</script><button>Open</button></body></html>'
++    expect(textRuns(html)).toEqual(['Invite', 'Link works 7 days', 'Open'])
++  })
++})
++
++describe('textChanges', () => {
++  it('pairs a line edited in place as one change', () => {
++    expect(
++      textChanges(
++        ['Viet invited you', 'Link works 7 days', 'Open'],
++        ['Viet invited you', 'Link expires Wed 19 Nov', 'Open'],
++      ),
++    ).toEqual([{ removed: ['Link works 7 days'], added: ['Link expires Wed 19 Nov'] }])
++  })
++
++  it('reports runs added and removed on their own', () => {
++    expect(textChanges(['a', 'b'], ['a', 'b', 'c'])).toEqual([{ removed: [], added: ['c'] }])
++    expect(textChanges(['a', 'b', 'c'], ['a', 'c'])).toEqual([{ removed: ['b'], added: [] }])
++  })
++
++  it('finds nothing when only layout or style changed', () => {
++    expect(textChanges(textRuns('<p style="color:red">Hi</p>'), textRuns('<p style="color:blue">Hi</p>'))).toEqual([])
++  })
++})
++
++describe('what to compare against', () => {
++  const frame = (approval: Frame['approval'], updatedAt: number) => ({ id: 'f', updatedAt, approval }) as Frame
++  const entry = {
++    status: 'changes_requested' as const,
++    by: 'Duc',
++    byUserId: 'u',
++    at: 1,
++    frameUpdatedAt: 10,
++    versionId: 'v1',
++  }
++  const approval = {
++    status: 'needs_review' as const,
++    approvedBy: 'Duc',
++    approvedByUserId: 'u',
++    approvedAt: 1,
++    approvedFrameUpdatedAt: 10,
++    verdict: 'changes_requested' as const,
++    history: [entry],
++  }
++
++  it('is the version filed with the last verdict, once the design changed after it', () => {
++    expect(lastVerdict(frame(approval, 12))).toEqual(entry)
++    expect(canCompare(frame(approval, 12))).toBe(true)
++  })
++
++  it('is nothing before a design change (the verdict itself writes the frame), without a filed version, or without a verdict', () => {
++    expect(canCompare(frame({ ...approval, status: 'changes_requested' }, 11))).toBe(false)
++    expect(canCompare(frame({ ...approval, history: [{ ...entry, versionId: undefined }] }, 12))).toBe(false)
++    expect(canCompare(frame(null, 12))).toBe(false)
++    expect(lastVerdict(frame(null, 12))).toBe(null)
++  })
++})
+diff --git a/tests/embedPage.test.ts b/tests/embedPage.test.ts
+new file mode 100644
+index 0000000..3f78a5a
+--- /dev/null
++++ b/tests/embedPage.test.ts
+@@ -0,0 +1,83 @@
++import express from 'express'
++import { mkdtempSync, writeFileSync } from 'node:fs'
++import type { AddressInfo } from 'node:net'
++import { tmpdir } from 'node:os'
++import path from 'node:path'
++import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
++
++/* The review panel's page (server/embedPage.ts): served only while a host app
++   is configured, framable only by those hosts, never cached, and its raw file
++   is not reachable without those rules. */
++
++const hosts = vi.hoisted(() => ({ origins: [] as string[] }))
++vi.mock('../server/embed.ts', () => ({ embedHostOrigins: () => hosts.origins }))
++
++import { embedFrameAncestors, serveEmbedPage } from '../server/embedPage.ts'
++import { readHostMessage } from '../src/embed/session.ts'
++
++let base = ''
++let close: () => void = () => {}
++beforeAll(async () => {
++  const dist = mkdtempSync(path.join(tmpdir(), 'doop-embed-page-'))
++  writeFileSync(path.join(dist, 'embed.html'), '<!doctype html><title>Doop review</title>')
++  const app = express()
++  serveEmbedPage(app, dist)
++  app.use(express.static(dist))
++  const server = app.listen(0)
++  await new Promise((r) => server.once('listening', r))
++  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
++  close = () => server.close()
++})
++afterAll(() => close())
++
++describe('the /embed page', () => {
++  it('is not there while no host app is configured', async () => {
++    hosts.origins = []
++    expect((await fetch(`${base}/embed`)).status).toBe(404)
++  })
++
++  it('may be framed by the configured hosts only, and is not cached', async () => {
++    hosts.origins = ['https://app.example.com', 'https://wiki.example.com']
++    const res = await fetch(`${base}/embed`)
++    expect(res.status).toBe(200)
++    expect(res.headers.get('content-security-policy')).toBe(
++      'frame-ancestors https://app.example.com https://wiki.example.com',
++    )
++    expect(res.headers.get('cache-control')).toBe('no-store')
++    expect(res.headers.get('referrer-policy')).toBe('no-referrer')
++    expect(await res.text()).toContain('Doop review')
++  })
++
++  it('is not served under its file name, where those rules would not apply', async () => {
++    hosts.origins = ['https://app.example.com']
++    expect((await fetch(`${base}/embed.html`)).status).toBe(404)
++  })
++
++  it('writes one frame-ancestors directive', () => {
++    expect(embedFrameAncestors(['https://a.example'])).toBe('frame-ancestors https://a.example')
++  })
++})
++
++describe('messages from the host page', () => {
++  const host = 'https://app.example.com'
++  it('reads a fresh token or a frame to open from the host origin', () => {
++    expect(readHostMessage({ origin: host, data: { type: 'doop:token', token: 'abc' } }, host)).toEqual({
++      type: 'doop:token',
++      token: 'abc',
++    })
++    expect(readHostMessage({ origin: host, data: { type: 'doop:open', frameId: 'AngBH82LGm' } }, host)).toEqual({
++      type: 'doop:open',
++      frameId: 'AngBH82LGm',
++    })
++  })
++
++  it('ignores every other window, and anything malformed', () => {
++    expect(readHostMessage({ origin: 'https://evil.example', data: { type: 'doop:token', token: 'x' } }, host)).toBe(
++      null,
++    )
++    expect(readHostMessage({ origin: host, data: { type: 'doop:open', frameId: '../x' } }, host)).toBe(null)
++    expect(readHostMessage({ origin: host, data: { type: 'doop:token', token: 42 } }, host)).toBe(null)
++    expect(readHostMessage({ origin: host, data: 'doop:token' }, host)).toBe(null)
++    expect(readHostMessage({ origin: host, data: { type: 'doop:verdict' } }, host)).toBe(null)
++  })
++})
+diff --git a/vite.config.ts b/vite.config.ts
+index 03ce1da..49c7fb4 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -37,7 +37,17 @@ export default defineConfig({
+   /* Error tracking resolves minified stack frames through the .map next to
+      each bundle. The source is public (AGPL), so the maps are too; browsers
+      only fetch them when devtools open. */
+-  build: { sourcemap: true },
++  /* two pages: the app, and the review panel host apps embed (embed.html,
++     src/embed), which ships without the editor */
++  build: {
++    sourcemap: true,
++    rollupOptions: {
++      input: {
++        main: fileURLToPath(new URL('./index.html', import.meta.url)),
++        embed: fileURLToPath(new URL('./embed.html', import.meta.url)),
++      },
++    },
++  },
+   /* mupdf finds its .wasm next to its own module through `import.meta.url`;
+      pre-bundling would move the module and lose the file */
+   optimizeDeps: { exclude: ['mupdf'] },

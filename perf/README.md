@@ -25,6 +25,8 @@ seed the 188-frame stress page from `canvas.json` (uses `../host-app/scripts/can
 | `boot.mjs <prefix> [page] [zoom]` | what a frame shows while its document boots (screencast of one frame after a click): finds the white flash |
 | `fonts.mts [n]` | are a frame's web fonts in place when the server captures it? Runs the server's own `loadFramePage` (`TREE=base` for upstream); run from `build/doop` with tsx, see its header |
 | `formats.mjs` | bytes and encode time of a preview per scale and format (jpeg/webp/png) |
+| `embed-host.mjs [port]` | a stand-in host app for the review panel: signs the review token as the host's server would (HS256, `HOST_SECRET`, `CANVAS`) and embeds `/embed`; answers `doop:need-token`, logs every panel message. Also the reference for the host side |
+| `embed-e2e.mjs <frameId>` | the review flow end to end in a browser against `bin/doop serve` started with `DOOP_EMBED_HOSTS` naming `http://localhost:4499`: request changes with a pinned comment, an edit as the agent, compare, approve, and a reviewer edit refused |
 | `diff.mjs`, `crop.mjs` | compare a screenshot region with a reference (mean pixel difference); cut and enlarge a region |
 | `fit.mjs`, `pancheck.mjs`, `layers.mjs`, `wake.mjs`, `oop.mjs` | single-question probes (fit stall, pan, layer count, frame wake-up, out-of-process frames on :4478) |
 
