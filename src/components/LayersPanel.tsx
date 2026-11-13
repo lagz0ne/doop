@@ -215,11 +215,23 @@ function visibleRows(frames: Frame[], query: string, expanded: Set<string>): Vis
 /** The Layers rail: every frame on the canvas, opening into the element tree
  *  of its HTML. Selection runs both ways — a row selects the element in the
  *  frame, a click in the frame highlights its row. */
+/* the reviewer layout folds the Layers section under the pages by default;
+   whether it is open is this browser's choice (CanvasDock.tsx) */
+const LAYERS_SECTION_KEY = 'doop:layers-section'
+function readLayersSection(): boolean {
+  try {
+    return localStorage.getItem(LAYERS_SECTION_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
 export function LayersPanel({
   onAddFrame,
   surface = 'floating',
   onClose,
   resize,
+  foldLayers = false,
 }: {
   onAddFrame: () => void
   /* 'inline' when the panel is filling a mobile Sheet rather than floating */
@@ -227,7 +239,22 @@ export function LayersPanel({
   /** inline only: the sheet's close, in the collapse control's place */
   onClose?: () => void
   resize?: PanelResize
+  /** the reviewer layout: the Layers section can fold away under the pages,
+   *  and starts folded, since someone reviewing moves between pages and
+   *  frames rather than through a frame's layers */
+  foldLayers?: boolean
 }) {
+  const [sectionOpen, setSectionOpen] = useState(readLayersSection)
+  const layersShown = !foldLayers || sectionOpen
+  function toggleSection() {
+    const next = !sectionOpen
+    setSectionOpen(next)
+    try {
+      localStorage.setItem(LAYERS_SECTION_KEY, next ? '1' : '0')
+    } catch {
+      /* the choice holds for this visit */
+    }
+  }
   /* a row's pointerleave never fires if the panel goes away under it */
   useEffect(() => () => useStore.getState().setHoveredLayer(null), [])
   /* which of the panel's two faces shows: the layer tree, or the design
@@ -523,7 +550,9 @@ export function LayersPanel({
       surface={surface}
       resize={resize}
       className={cn(
-        surface === 'floating' && 'top-2.5 bottom-3.5 left-3.5 w-[264px]',
+        surface === 'floating' && 'top-2.5 left-3.5 w-[264px]',
+        /* folded, the panel is as tall as its pages, not the window */
+        surface === 'floating' && (layersShown || tab !== 'layers' ? 'bottom-3.5' : 'max-h-[calc(100%-24px)]'),
         surface === 'docked' && 'left-0 w-[264px] border-r',
       )}
     >
@@ -565,8 +594,38 @@ export function LayersPanel({
           {/* Figma's order: the pages at the top, the frames of the active page
           under them, the search at the bottom within thumb's reach */}
           <PagesPanel />
+          {!layersShown && (
+            <Button
+              variant="bare"
+              className="mx-2 mt-1 mb-2 h-9 flex-none justify-start gap-2 rounded-[7px] border-t border-line-soft px-2 font-medium text-ink hover:bg-paper-deep"
+              aria-expanded={false}
+              onClick={toggleSection}
+            >
+              <LayersIcon className="size-3.5 text-ink-faint" />
+              {t('panels.layersTitle')}
+              <ChevronRightIcon className="ml-auto size-3.5 text-ink-faint" />
+            </Button>
+          )}
+        </>
+      )}
+      {tab === 'layers' && layersShown && (
+        <>
           <div className={cn('mt-1.5 flex h-6 flex-none items-center justify-between pr-2.5 pl-3.5', sectionHeading)}>
-            <span data-slot="frame-section-heading" className={sectionHeading}>
+            <span data-slot="frame-section-heading" className={cn(sectionHeading, 'flex items-center gap-1')}>
+              {foldLayers && (
+                <Tooltip label={t('panels.layersHideSection')} side="bottom" align="start">
+                  <Button
+                    variant="bare"
+                    size="icon-sm"
+                    className={cn(sectionBtn, '-ml-1.5')}
+                    aria-label={t('panels.layersHideSection')}
+                    aria-expanded
+                    onClick={toggleSection}
+                  >
+                    <ChevronDownIcon className="size-3.5" />
+                  </Button>
+                </Tooltip>
+              )}
               {t('panels.layersTitle')}
             </span>
             <span className="flex gap-1">

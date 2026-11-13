@@ -3,6 +3,8 @@ import type { Catalog } from '..'
 export const panels: Catalog['panels'] = {
   layersTitle: 'Camadas',
   layersCollapsePanel: 'Recolher painel',
+  layersShowSection: 'Mostrar camadas',
+  layersHideSection: 'Ocultar camadas',
   layersExpandPanel: 'Expandir painel',
   layersCollapseAll: 'Recolher tudo',
   layersNewFrame: 'Novo frame',

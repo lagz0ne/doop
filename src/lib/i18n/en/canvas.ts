@@ -14,6 +14,8 @@ export const canvas = {
   /* top bar */
   untitled: 'Untitled',
   allCanvases: 'All canvases',
+  dock: 'Canvas dock',
+  aiActivity: 'AI activity',
   readOnlyBadgeTitle: 'Your share link lets you look around but not change the design',
   canComment: 'Can comment',
   viewOnly: 'View only',

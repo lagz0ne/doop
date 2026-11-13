@@ -3,6 +3,8 @@
 export const stage = {
   /* the tool rail */
   canvasTools: 'Canvas tools',
+  moreTools: 'More tools',
+  modePrototypeShort: 'Prototype mode',
   toolTooltip: '{label} ({key})',
   canvasMode: 'Canvas mode',
   modeEdit: 'Edit mode',

@@ -7,7 +7,7 @@ import type { Frame } from '../../shared/types'
 import { usePageCanvas, currentPageCanvas } from '../lib/pages'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
-import { flushSync } from 'react-dom'
+import { createPortal, flushSync } from 'react-dom'
 import { FrameSlot, HiddenFrameView } from './FrameView'
 import { CanvasComments, type CanvasComposeAt } from './CanvasComments'
 import { placeComposer } from '../lib/composerPlacement'
@@ -155,7 +155,7 @@ function zoomCentered(el: HTMLElement, next: number) {
   })
 }
 
-const TOOL_ICONS: Record<Tool, React.ReactNode> = {
+export const TOOL_ICONS: Record<Tool, React.ReactNode> = {
   select: <CursorIcon />,
   hand: <HandIcon />,
   zoom: <ZoomInIcon />,
@@ -209,6 +209,8 @@ export function Stage({
   insets = NO_INSETS,
   bounds,
   docked = false,
+  toolsElsewhere = false,
+  zoomSlot = null,
 }: {
   onAddFrame: () => void
   /** px the top bar, floating panels and islands cover at each of the
@@ -220,6 +222,12 @@ export function Stage({
   bounds?: StageInsets
   /** the panels are docked, so the tool rail is a full-height column too */
   docked?: boolean
+  /** the reviewer layout draws the tools in its dock (CanvasDock.tsx): no
+   *  tool rail here */
+  toolsElsewhere?: boolean
+  /** where the zoom control goes when it is part of the dock rather than
+   *  floating over the canvas */
+  zoomSlot?: HTMLElement | null
 }) {
   const ref = useRef<HTMLDivElement>(null)
   /* read by the fit callbacks, which outlive a render */
@@ -1416,7 +1424,7 @@ export function Stage({
             'absolute bottom-[calc(8px+env(safe-area-inset-bottom))] left-1/2 z-[35] -translate-x-1/2 sm:bottom-4',
             'md:top-[calc(var(--chrome-top,0px)+10px)] md:bottom-auto md:left-[var(--rail-left,14px)] md:translate-x-0 md:transition-[left] md:duration-150',
             docked && 'md:top-[var(--chrome-top,0px)] md:bottom-0',
-            uiHidden && 'hidden',
+            (uiHidden || toolsElsewhere) && 'hidden',
           )}
         >
           {isDrawingTool(tool) && (
@@ -1483,15 +1491,22 @@ export function Stage({
           </Toolbar>
         </div>
 
-        <ZoomControls
-          labelRef={zoomLabelRef}
-          hidden={uiHidden}
-          onZoomIn={() => ref.current && zoomCentered(ref.current, useStore.getState().viewport.zoom * 1.25)}
-          onZoomOut={() => ref.current && zoomCentered(ref.current, useStore.getState().viewport.zoom / 1.25)}
-          onZoomTo={(zoom) => ref.current && zoomCentered(ref.current, zoom)}
-          onFit={fit}
-          onFitSelection={fitSelection}
-        />
+        {(() => {
+          /* the zoom keeps its handlers here, wherever it is drawn */
+          const zoom = (
+            <ZoomControls
+              labelRef={zoomLabelRef}
+              hidden={uiHidden}
+              inline={!!zoomSlot}
+              onZoomIn={() => ref.current && zoomCentered(ref.current, useStore.getState().viewport.zoom * 1.25)}
+              onZoomOut={() => ref.current && zoomCentered(ref.current, useStore.getState().viewport.zoom / 1.25)}
+              onZoomTo={(zoom) => ref.current && zoomCentered(ref.current, zoom)}
+              onFit={fit}
+              onFitSelection={fitSelection}
+            />
+          )
+          return zoomSlot ? createPortal(zoom, zoomSlot) : zoom
+        })()}
 
         {canvas && (
           <ContextMenuContent>

@@ -139,6 +139,17 @@ export async function openBrowser(): Promise<TestBrowser> {
   return {
     async newPage() {
       const page = await context.newPage()
+      /* the tests drive the editor's full layout (the top bar, the tool rail,
+         the select tool first), which is what they were written against; this
+         build's reviewer layout (FULL_UI off, CanvasDock.tsx) has its own test,
+         which sets doop:full-ui to off before the page loads */
+      await page.evaluateOnNewDocument(() => {
+        try {
+          if (localStorage.getItem('doop:full-ui') === null) localStorage.setItem('doop:full-ui', 'on')
+        } catch {
+          /* no storage on this page */
+        }
+      })
       page.setDefaultTimeout(STEP_TIMEOUT_MS)
       page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
       /* files running side by side each have a window in the one browser, and

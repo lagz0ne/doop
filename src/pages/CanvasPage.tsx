@@ -49,6 +49,7 @@ import { ConnectModal } from '../components/ConnectModal'
 import { LimitWall, isResidentLimit } from '../components/TeamAllowance'
 import { WorkingNow } from '../components/WorkingNow'
 import { MobilePanelTabs, SideRail } from '../components/SideRail'
+import { CanvasDock } from '../components/CanvasDock'
 import { LayersPanel, LayersRailToggle } from '../components/LayersPanel'
 import { Onboarding } from '../components/Onboarding'
 import { AccessBanner } from '../components/AccessBanner'
@@ -176,6 +177,8 @@ const DOCKED_BAR_H = 44
 const FLOAT_GAP = 10
 /* the narrowest stage docked panels squeeze it to, while their minimums allow */
 const DOCKED_STAGE_MIN = 320
+/* the reviewer layout's dock: its height and the gaps above and below it */
+const DOCK_CLEAR = 66
 const AGENTS_W = 280
 const PANEL_WIDTH_KEY = 'doop:canvas-panel-widths'
 
@@ -291,7 +294,10 @@ export function CanvasPage({
   /* open on desktop for anyone signed in: an editor gets the Agents panel,
      a viewer or commenter its Comments tab alone (ActivityPanel). A guest has
      no panel at all — the team's conversation is not sent to them. */
-  const [showActivity, setShowActivity] = useState(() => !guest && !window.matchMedia('(max-width: 900px)').matches)
+  /* the reviewer layout (FULL_UI off) keeps it closed until the dock opens it */
+  const [showActivity, setShowActivity] = useState(
+    () => FULL_UI && !guest && !window.matchMedia('(max-width: 900px)').matches,
+  )
   /* ?connect=1 (the "connect your agent" email) lands on the Connect AI
      modal; the flag comes off the URL once the page is up so a reload or a
      copied link does not reopen it */
@@ -727,6 +733,16 @@ export function CanvasPage({
   /* docked panels: the stage sits between the columns, under a solid bar */
   const docked = usePanelLayout() === 'docked' && !isMobile
   const panelSurface = docked ? 'docked' : 'floating'
+  /* The reviewer layout (FULL_UI off, a desktop, floating panels): no top
+     bar, no tool rail, no side rail; one dock along the bottom holds them
+     (CanvasDock.tsx), the Layers section folds under the pages, the right
+     panel starts closed and the Hand is the first tool. Present stays at the
+     top right. Phones and the docked layout keep their own. */
+  const reviewerLayout = !FULL_UI && !isMobile && !docked
+  const [zoomSlot, setZoomSlot] = useState<HTMLElement | null>(null)
+  useEffect(() => {
+    if (reviewerLayout) useStore.getState().setTool('hand')
+  }, [canvasId, reviewerLayout])
   /* docked, the rulers sit on the stage's own edges inside the columns, so
      nothing steps in past them */
   const rulerInset = rulersShown && !docked ? RULER_PX : 0
@@ -785,19 +801,23 @@ export function CanvasPage({
   }, [rulers, uiHidden, hideUiActive, layersOpen, showActivity, hasSelection])
   useEffect(() => () => syncViewMenu(NO_CANVAS), [])
   const chromeVars = {
-    '--chrome-top': isMobile ? '0px' : `${(docked ? DOCKED_BAR_H : BAR_H) + rulerInset}px`,
+    '--chrome-top': isMobile ? '0px' : `${(reviewerLayout ? 0 : docked ? DOCKED_BAR_H : BAR_H) + rulerInset}px`,
     '--rail-left': `${chrome.toolRail + rulerInset}px`,
     /* what floats over the canvas (the zoom pill, toasts) keeps clear of a
        docked column's edge */
     '--chrome-left': `${chrome.left + (docked ? FLOAT_GAP : 0)}px`,
-    '--chrome-right': `${chrome.right + (docked ? FLOAT_GAP : 0)}px`,
+    '--chrome-right': `${reviewerLayout ? chrome.island : chrome.right + (docked ? FLOAT_GAP : 0)}px`,
+    /* what floats at the bottom (the onboarding card) keeps clear of the dock */
+    '--chrome-bottom': reviewerLayout ? `${DOCK_CLEAR}px` : '0px',
   } as CSSProperties
   /* what the bar and the floating chrome cover of the stage, which spans the
      whole window; phones open their panels as sheets over everything */
   const stageInsets: StageInsets =
     isMobile || uiHidden || docked
       ? NO_INSETS
-      : { top: BAR_H + rulerInset, right: chrome.right, bottom: 0, left: chrome.left + rulerInset }
+      : reviewerLayout
+        ? { top: rulerInset, right: chrome.island, bottom: DOCK_CLEAR, left: chrome.toolRail + rulerInset }
+        : { top: BAR_H + rulerInset, right: chrome.right, bottom: 0, left: chrome.left + rulerInset }
   /* docked, the stage is the gap between the bar and the columns; ⌘. gives
      it the whole window back */
   const stageBounds: StageInsets | undefined =
@@ -829,6 +849,50 @@ export function CanvasPage({
     )
   }
 
+  /* Present: in the top bar, or on its own at the top right in the reviewer layout */
+  const presentButton = (
+    <Tooltip
+      label={
+        selectedId
+          ? `${t('canvas.presentFromFrame')} · ${PRESENT_SHORTCUT_HINT}`
+          : playFrom
+            ? `${t('canvas.presentPrototype')} · ${PRESENT_SHORTCUT_HINT}`
+            : t('canvas.addFrameToPresent')
+      }
+      side="bottom"
+    >
+      <span className="inline-flex">
+        <Button
+          variant="bare"
+          size="icon-sm"
+          className={barPillIconBtn}
+          aria-label={t('canvas.presentPrototypeLabel')}
+          disabled={!playFrom}
+          onClick={() => setPresenting(playFrom)}
+        >
+          <PlayIcon className="size-3.5" />
+        </Button>
+      </span>
+    </Tooltip>
+  )
+  /* the right-hand panels end above the dock rather than under it */
+  const belowDock: CSSProperties = reviewerLayout ? { bottom: DOCK_CLEAR } : {}
+  /* the properties slot (frame Inspector, element panel or Page panel): the
+     side rail's sliders, and the dock's in the reviewer layout */
+  function toggleProperties() {
+    const s = useStore.getState()
+    if (!selectedFrame) {
+      s.setPagePanelOpen(!s.pagePanelOpen)
+      return
+    }
+    if (propertiesShown) {
+      /* the element panel and the inspector share the slot —
+         hiding it closes whichever is showing */
+      s.setElementPanelOpen(false)
+      s.setInspectorOpen(false)
+    } else s.setInspectorOpen(true)
+  }
+
   return (
     /* --app-inset is 0 normally; the impersonation shell raises it so this
        fixed layer starts below the banner instead of under it */
@@ -845,7 +909,7 @@ export function CanvasPage({
           bar's pills float below it */}
       <TopBar
         variant={docked ? 'docked' : 'canvas'}
-        className={cn(uiHidden && 'hidden')}
+        className={cn((uiHidden || reviewerLayout) && 'hidden')}
         style={rulerInset ? { top: rulerInset, left: rulerInset } : undefined}
       >
         <div className="flex min-w-0 items-center gap-2 max-xs:basis-full">
@@ -924,29 +988,7 @@ export function CanvasPage({
                 {t('canvas.share')}
               </Button>
             )}
-            <Tooltip
-              label={
-                selectedId
-                  ? `${t('canvas.presentFromFrame')} · ${PRESENT_SHORTCUT_HINT}`
-                  : playFrom
-                    ? `${t('canvas.presentPrototype')} · ${PRESENT_SHORTCUT_HINT}`
-                    : t('canvas.addFrameToPresent')
-              }
-              side="bottom"
-            >
-              <span className="inline-flex">
-                <Button
-                  variant="bare"
-                  size="icon-sm"
-                  className={barPillIconBtn}
-                  aria-label={t('canvas.presentPrototypeLabel')}
-                  disabled={!playFrom}
-                  onClick={() => setPresenting(playFrom)}
-                >
-                  <PlayIcon className="size-3.5" />
-                </Button>
-              </span>
-            </Tooltip>
+            {presentButton}
           </BarPill>
           {/* the bar's one black action — it opens the MCP connection modal;
               an agent connected through a view or comment link could not
@@ -1001,7 +1043,14 @@ export function CanvasPage({
           edge; the floating chrome gets its own layer that starts below the
           bar, so every panel offset stays measured from there */}
       <div className="absolute inset-0 overflow-hidden" style={chromeVars}>
-        <Stage onAddFrame={addFrame} insets={stageInsets} bounds={stageBounds} docked={docked} />
+        <Stage
+          onAddFrame={addFrame}
+          insets={stageInsets}
+          bounds={stageBounds}
+          docked={docked}
+          toolsElsewhere={reviewerLayout}
+          zoomSlot={reviewerLayout ? zoomSlot : null}
+        />
         <div
           className={cn(
             'pointer-events-none absolute inset-x-0 bottom-0 top-[50px] max-md:top-14 max-xs:top-[100px]',
@@ -1009,7 +1058,7 @@ export function CanvasPage({
           )}
           /* panel offsets are measured from this layer, so moving it past
              the rulers moves every panel with it */
-          style={rulerInset || docked ? { top: 'var(--chrome-top)', left: rulerInset } : undefined}
+          style={rulerInset || docked || reviewerLayout ? { top: 'var(--chrome-top)', left: rulerInset } : undefined}
         >
           <div className="pointer-events-none absolute top-3.5 right-[var(--chrome-right)] z-30 flex flex-col items-end gap-2 transition-[right] duration-150 [&>*]:pointer-events-auto max-md:top-[56px] max-md:right-2 max-md:left-2">
             {pendingProposal && mutedProposal !== pendingProposal.id && !(showActivity && panelTab === 'memory') && (
@@ -1065,6 +1114,7 @@ export function CanvasPage({
               <LayersPanel
                 onAddFrame={addFrame}
                 surface={panelSurface}
+                foldLayers={reviewerLayout}
                 resize={{
                   label: t('canvas.resizeLayers'),
                   edge: 'right',
@@ -1096,19 +1146,25 @@ export function CanvasPage({
               frame={selectedFrame}
               selector={panelElement.selector}
               surface={panelSurface}
-              style={{ right: chrome.properties }}
+              style={{ right: chrome.properties, ...belowDock }}
             />
           )}
           {!isMobile && !readOnly && selectedFrame && inspectorOpen && !panelElement && !deferPanel && (
-            <Inspector frame={selectedFrame} surface={panelSurface} style={{ right: chrome.properties }} />
+            <Inspector
+              frame={selectedFrame}
+              surface={panelSurface}
+              style={{ right: chrome.properties, ...belowDock }}
+            />
           )}
-          {!isMobile && pageShown && <PagePanel surface={panelSurface} style={{ right: chrome.properties }} />}
+          {!isMobile && pageShown && (
+            <PagePanel surface={panelSurface} style={{ right: chrome.properties, ...belowDock }} />
+          )}
           {!isMobile && showActivity && (
             <ActivityPanel
               canvasId={canvasId}
               onClose={() => setShowActivity(false)}
               surface={panelSurface}
-              style={{ right: docked ? 0 : EDGE }}
+              style={{ right: docked ? 0 : EDGE, ...belowDock }}
               resize={{
                 label: t('canvas.resizeAgents'),
                 edge: 'left',
@@ -1120,7 +1176,7 @@ export function CanvasPage({
               }}
             />
           )}
-          {!isMobile && (
+          {!isMobile && !reviewerLayout && (
             <SideRail
               style={{ right: chrome.island }}
               docked={docked}
@@ -1129,23 +1185,51 @@ export function CanvasPage({
               inspectorOpen={propertiesShown}
               inspectorAvailable={!readOnly}
               inspectTarget={selectedFrame ? 'frame' : 'page'}
-              onToggleInspector={() => {
-                const s = useStore.getState()
-                if (!selectedFrame) {
-                  s.setPagePanelOpen(!s.pagePanelOpen)
-                  return
-                }
-                if (propertiesShown) {
-                  /* the element panel and the inspector share the slot —
-                     hiding it closes whichever is showing */
-                  s.setElementPanelOpen(false)
-                  s.setInspectorOpen(false)
-                } else s.setInspectorOpen(true)
-              }}
+              onToggleInspector={toggleProperties}
               me={meFace}
               onRenameSelf={() => setRenaming(true)}
               guest={guest}
             />
+          )}
+          {reviewerLayout && (
+            <>
+              <BarPill className="pointer-events-auto absolute top-2.5 right-[var(--chrome-right)] z-[38] transition-[right] duration-150">
+                {presentButton}
+              </BarPill>
+              <CanvasDock
+                title={<CanvasName readOnly={readOnly} />}
+                idMenu={<CanvasIdMenu canvasId={canvasId} onCopied={showToast} compact />}
+                onBack={guest ? null : () => navigate('/')}
+                zoomSlot={setZoomSlot}
+                me={meFace}
+                others={others}
+                onRenameSelf={guest ? null : () => setRenaming(true)}
+                onImport={!guest && !readOnly ? () => setShowImport(true) : null}
+                onExport={guest ? null : openExport}
+                panelTab={panelTab}
+                panelOpen={showActivity}
+                onPanel={
+                  guest
+                    ? null
+                    : (tab) => {
+                        if (showActivity && panelTab === tab) return setShowActivity(false)
+                        useStore.getState().setPanelTab(tab)
+                        setShowActivity(true)
+                      }
+                }
+                onConnect={readOnly ? null : openConnect}
+                inspector={
+                  readOnly
+                    ? null
+                    : {
+                        open: propertiesShown,
+                        label: selectedFrame ? t('canvas.inspectFrame') : t('canvas.pageSettings'),
+                        onToggle: toggleProperties,
+                      }
+                }
+                onSettings={guest ? null : () => navigate('/settings')}
+              />
+            </>
           )}
         </div>
       </div>
@@ -2349,7 +2433,16 @@ function GithubSection({
 
 /* The id badge in the bar opens a menu that copies the id (what agents hand
    the MCP tools) or the canvas link. */
-function CanvasIdMenu({ canvasId, onCopied }: { canvasId: string; onCopied: (msg: string) => void }) {
+function CanvasIdMenu({
+  canvasId,
+  onCopied,
+  compact = false,
+}: {
+  canvasId: string
+  onCopied: (msg: string) => void
+  /** the dock's form: a # that shows the id on hover, the menu above it */
+  compact?: boolean
+}) {
   const t = useT()
   async function copy(text: string, msg: string) {
     try {
@@ -2368,13 +2461,17 @@ function CanvasIdMenu({ canvasId, onCopied }: { canvasId: string; onCopied: (msg
           layout="inline"
           focus="ring"
           aria-label={t('canvas.canvasIdMenu')}
-          title={t('canvas.canvasIdTitle')}
-          className={cn(badgeVariants({ interactive: true }), 'max-md:hidden data-[state=open]:bg-current/10')}
+          title={compact ? `${canvasId} · ${t('canvas.canvasIdTitle')}` : t('canvas.canvasIdTitle')}
+          className={
+            compact
+              ? 'grid size-7 place-items-center rounded-[7px] font-mono text-[13px] text-ink-soft hover:bg-paper-deep hover:text-ink data-[state=open]:bg-paper-deep'
+              : cn(badgeVariants({ interactive: true }), 'max-md:hidden data-[state=open]:bg-current/10')
+          }
         >
-          {canvasId}
+          {compact ? '#' : canvasId}
         </Pressable>
       </DropdownMenuTrigger>
-      <DropdownMenuContent side="bottom" align="start" width="sm">
+      <DropdownMenuContent side={compact ? 'top' : 'bottom'} align="start" width="sm">
         <DropdownMenuItem onSelect={() => void copy(canvasId, t('canvas.idCopied'))}>
           <CopyIcon size="rail" />
           {t('canvas.copyId')}

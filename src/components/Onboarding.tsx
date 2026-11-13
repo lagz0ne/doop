@@ -190,7 +190,7 @@ export function Onboarding({ canvasId }: { canvasId: string }) {
        card always sits past it */
     <div
       className={cn(
-        'pointer-events-auto absolute bottom-3.5 z-40 flex w-[340px] flex-col gap-3 rounded-panel bg-surface px-5 pt-4 pb-5 shadow-pop transition-[left] duration-150 max-md:right-4 max-md:bottom-4 max-md:left-auto',
+        'pointer-events-auto absolute bottom-[calc(var(--chrome-bottom,0px)+14px)] z-40 flex w-[340px] flex-col gap-3 rounded-panel bg-surface px-5 pt-4 pb-5 shadow-pop transition-[left] duration-150 max-md:right-4 max-md:bottom-4 max-md:left-auto',
         docked
           ? 'left-[var(--chrome-left,14px)]'
           : 'left-[var(--rail-left,14px)] md:[@media(max-height:599px)]:left-[var(--chrome-left,14px)]',
