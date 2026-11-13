@@ -1,5 +1,8 @@
 /* The review panel's own styles: doop's white system (.context/DESIGN.md) in
-   plain CSS, so the panel ships without the editor's Tailwind build. */
+   plain CSS, so the panel ships without the editor's Tailwind build. Its
+   layout is the editor's reviewer layout (CanvasDock.tsx): the stage takes
+   the window, a dock floats along the bottom, the comments float at the
+   right. */
 :root {
   --paper: #fdfdfd;
   --stage: #f2f2f1;
@@ -33,7 +36,7 @@ body {
     system-ui,
     sans-serif;
   color: var(--ink);
-  background: var(--paper);
+  background: var(--stage);
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
@@ -62,13 +65,28 @@ textarea {
   height: 100%;
   display: flex;
 }
+.island {
+  position: absolute;
+  background: var(--surface);
+  border-radius: 14px;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.07),
+    0 8px 24px -12px rgba(0, 0, 0, 0.28);
+}
+
+/* the frames of the canvas, when the host app did not pick one */
 .list {
   width: 220px;
   flex: none;
-  border-right: 1px solid var(--line-soft);
+  margin: 14px 0 76px 14px;
   overflow-y: auto;
   padding: 6px;
   background: var(--surface);
+  border-radius: 14px;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.07),
+    0 8px 24px -12px rgba(0, 0, 0, 0.28);
+  z-index: 5;
 }
 .list .row {
   width: 100%;
@@ -113,87 +131,25 @@ textarea {
 .review {
   flex: 1;
   min-width: 0;
-  display: grid;
-  grid-template-columns: 1fr 340px;
-  grid-template-rows: 44px 1fr 52px;
+  position: relative;
 }
-.ph {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 14px;
-  border-bottom: 1px solid var(--line-soft);
-  min-width: 0;
-}
-.crumb {
-  color: var(--ink-soft);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-}
-.crumb b {
-  color: var(--ink);
-  font-weight: 600;
-}
-.badge {
-  flex: none;
-  font-size: 11.5px;
-  font-weight: 600;
-  border-radius: 999px;
-  padding: 3px 9px;
-  white-space: nowrap;
-  background: #f0f0f0;
-  color: var(--ink-soft);
-}
-.badge.tone-approved {
-  background: var(--ok-bg);
-  color: var(--ok);
-}
-.badge.tone-requested {
-  background: var(--warn-bg);
-  color: var(--warn);
-}
-.badge.tone-pending {
-  background: var(--review-bg);
-  color: var(--review);
-}
-.seg {
-  margin-left: auto;
-  display: flex;
-  background: #f0f0f0;
-  border-radius: 7px;
-  padding: 2px;
-  flex: none;
-}
-.seg button {
-  border: 0;
-  background: none;
-  padding: 4px 10px;
-  border-radius: 5px;
-  color: var(--ink-soft);
-  font-weight: 500;
-  cursor: pointer;
-}
-.seg button.on {
-  background: #fff;
-  color: var(--ink);
-  box-shadow: 0 0 0 1px var(--line);
-}
-.seg button:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
 .stage {
+  position: absolute;
+  inset: 0;
   background: var(--stage);
   overflow: auto;
-  position: relative;
   display: grid;
   place-items: center;
-  padding: 24px;
-  min-height: 0;
+  padding: 24px 24px 90px;
+}
+.stage.grab {
+  cursor: grab;
+}
+.stage.grab:active {
+  cursor: grabbing;
+}
+.stage.grab .shield {
+  cursor: inherit;
 }
 .sheet {
   position: relative;
@@ -234,24 +190,64 @@ textarea {
   background: var(--warn);
 }
 
+/* the comments, floating at the right above the dock */
 .side {
-  border-left: 1px solid var(--line-soft);
-  background: var(--surface);
-  overflow-y: auto;
-  min-height: 0;
+  right: 14px;
+  top: 14px;
+  bottom: 76px;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 5;
 }
-.sh {
+.tabs {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 14px 6px;
-  font-weight: 600;
+  gap: 4px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line-soft);
+  flex: none;
 }
-.sh .link {
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--ink-soft);
+  font-weight: 500;
+  cursor: pointer;
+}
+.tab.on {
+  background: #f0f0f0;
+  color: var(--ink);
+}
+.tabs .close {
   margin-left: auto;
 }
+.threads,
+.history {
+  overflow-y: auto;
+  min-height: 0;
+  padding-bottom: 8px;
+}
+.history {
+  padding-top: 8px;
+}
+.history .muted {
+  padding: 3px 14px;
+  font-size: 12px;
+}
+.threads .add {
+  display: block;
+  margin: 10px 14px 2px;
+}
 .cm {
-  margin: 6px 12px;
+  margin: 8px 12px;
   padding: 10px 12px;
   border: 1px solid var(--line-soft);
   border-radius: 10px;
@@ -315,6 +311,7 @@ textarea {
   color: var(--brand);
   font-weight: 500;
   cursor: pointer;
+  text-align: left;
 }
 .link:disabled {
   opacity: 0.5;
@@ -342,29 +339,118 @@ textarea {
   justify-content: flex-end;
   gap: 8px;
 }
-.history {
-  padding: 4px 0 14px;
-}
-.history .muted {
-  padding: 2px 14px;
-  font-size: 12px;
-}
 
-.pf {
-  grid-column: 1 / -1;
+/* the dock: the editor's bar, along the bottom */
+.dock {
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  height: 48px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 14px;
-  border-top: 1px solid var(--line-soft);
-  background: var(--surface);
+  gap: 2px;
+  padding: 0 7px;
+  white-space: nowrap;
+  z-index: 6;
+  max-width: calc(100% - 28px);
 }
-.pf .info {
-  flex: 1;
-  min-width: 0;
+.dock .title {
+  font-weight: 600;
+  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
+  padding: 0 6px;
+}
+.dock .sep {
+  width: 1px;
+  height: 22px;
+  background: var(--line-soft);
+  margin: 0 5px;
+  flex: none;
+}
+.dock .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.dock .btn + .btn {
+  margin-left: 6px;
+}
+.icon {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: #2b2b2a;
+  cursor: pointer;
+  flex: none;
+}
+.icon:hover {
+  background: #f5f5f4;
+}
+.icon.on {
+  background: #f0f0f0;
+  color: var(--ink);
+}
+.icon:disabled {
+  opacity: 0.35;
+  cursor: default;
+  background: none;
+}
+.zoom {
+  border: 0;
+  background: none;
+  min-width: 44px;
+  height: 34px;
+  border-radius: 8px;
+  font:
+    500 12px 'Geist Mono',
+    monospace;
+  cursor: pointer;
+}
+.zoom:hover {
+  background: #f5f5f4;
+}
+.badge-dot {
+  position: absolute;
+  right: 2px;
+  top: 2px;
+  min-width: 15px;
+  height: 15px;
+  border-radius: 8px;
+  background: var(--brand);
+  color: #fff;
+  font:
+    600 9.5px/15px 'Geist Mono',
+    monospace;
+  text-align: center;
+  padding: 0 3px;
+}
+.badge {
+  flex: none;
+  font-size: 11.5px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 3px 9px;
   white-space: nowrap;
+  background: #f0f0f0;
+  color: var(--ink-soft);
+}
+.badge.tone-approved {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+.badge.tone-requested {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+.badge.tone-pending {
+  background: var(--review-bg);
+  color: var(--review);
 }
 .btn {
   border: 0;
@@ -387,18 +473,30 @@ textarea {
   opacity: 0.4;
   cursor: default;
 }
+.notice {
+  position: absolute;
+  left: 50%;
+  bottom: 74px;
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: #fff;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  z-index: 7;
+  max-width: 80%;
+}
 
+/* compare: the two versions side by side, the changed text under them */
 .compare {
   align-self: start;
   justify-self: stretch;
+  padding-top: 8px;
 }
 .pair {
   display: flex;
   gap: 24px;
   justify-content: center;
-}
-.pair figure {
-  box-shadow: none;
 }
 .pair figcaption {
   font-size: 12px;

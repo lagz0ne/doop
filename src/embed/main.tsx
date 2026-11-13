@@ -41,6 +41,12 @@ interface Draft {
   requestChanges: boolean
 }
 
+const cn = (...names: (string | false | null | undefined)[]) => names.filter(Boolean).join(' ')
+
+/* the dock: its height and the gaps above and below it (as in the editor) */
+const DOCK_CLEAR = 66
+const PANEL_W = 340
+
 const fmtAgo = (at: number) => {
   const s = Math.max(0, (Date.now() - at) / 1000)
   if (s < 60) return 'just now'
@@ -252,7 +258,14 @@ function FrameList({
   )
 }
 
-function useStageScale(el: HTMLElement | null, width: number, height: number, columns: number): number {
+function useStageScale(
+  el: HTMLElement | null,
+  width: number,
+  height: number,
+  columns: number,
+  /** what the floating comments panel covers at the right */
+  right: number,
+): number {
   const [size, setSize] = useState({ width: 0, height: 0 })
   useEffect(() => {
     if (!el) return
@@ -264,7 +277,10 @@ function useStageScale(el: HTMLElement | null, width: number, height: number, co
   }, [el])
   if (!size.width) return 0
   const pad = 48
-  return Math.max(0.05, Math.min(1, (size.width / columns - pad) / width, (size.height - pad) / height))
+  /* the dock covers the bottom 66px of the stage */
+  const w = (size.width - right) / columns - pad
+  const h = size.height - DOCK_CLEAR - pad
+  return Math.max(0.05, Math.min(1, w / width, h / height))
 }
 
 function Review({
@@ -287,13 +303,18 @@ function Review({
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [pins, setPins] = useState<Map<string, { x: number; y: number }>>(new Map())
-  const comparing = mode === 'compare' && canCompare(frame)
-  const scale = useStageScale(stage, frame.width, frame.height, comparing ? 2 : 1)
-
   const mayComment = roleAllows(session.role, 'comment')
   const mayDecide = roleAllows(session.role, 'review')
   const roots = comments.filter((c) => !c.parentId).sort((a, b) => a.at - b.at)
   const open = roots.filter((c) => !c.resolvedAt)
+  /* the editor's layout (CanvasDock.tsx there): the Hand first, Comment to pin;
+     the comments panel starts open when there is something to read */
+  const [tool, setTool] = useState<'hand' | 'comment'>('hand')
+  const [panel, setPanel] = useState<'comments' | 'history' | null>(() => (open.length ? 'comments' : null))
+  const [zoom, setZoom] = useState<number | null>(null)
+  const comparing = mode === 'compare' && canCompare(frame)
+  const fit = useStageScale(stage, frame.width, frame.height, comparing ? 2 : 1, panel ? PANEL_W + 28 : 0)
+  const scale = zoom ?? fit
   const page = canvas.pages?.find((p) => p.id === frame.pageId)
   const status = statusOf(frame)
 
@@ -327,7 +348,7 @@ function Review({
   }, [placePins])
 
   async function pinAt(e: React.MouseEvent<HTMLDivElement>) {
-    if (!mayComment || comparing || scale === 0) return
+    if (!mayComment || comparing || scale === 0 || tool !== 'comment') return
     const box = e.currentTarget.getBoundingClientRect()
     const x = (e.clientX - box.left) / scale
     const y = (e.clientY - box.top) / scale
@@ -389,30 +410,36 @@ function Review({
 
   const numbers = new Map(roots.map((c, i) => [c.id, i + 1]))
 
+  /* the Hand drags the stage around; a press with Comment pins */
+  const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null)
+  function onStageDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (tool !== 'hand' || !stage) return
+    drag.current = { x: e.clientX, y: e.clientY, left: stage.scrollLeft, top: stage.scrollTop }
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  function onStageMove(e: React.PointerEvent<HTMLDivElement>) {
+    const d = drag.current
+    if (!d || !stage) return
+    stage.scrollLeft = d.left - (e.clientX - d.x)
+    stage.scrollTop = d.top - (e.clientY - d.y)
+  }
+  const step = (factor: number) => setZoom(Math.min(4, Math.max(0.1, (zoom ?? fit) * factor)))
+  function startDraft(requestChanges: boolean) {
+    setDraft({ text: '', pin: null, requestChanges })
+    setPanel('comments')
+    if (mayComment) setTool('comment')
+  }
+
   return (
     <section className="review">
-      <header className="ph">
-        <span className="crumb">
-          {canvas.name}
-          {page ? ` › ${page.name}` : ''} › <b>{frame.name}</b>
-        </span>
-        <span className={`badge tone-${status.tone}`}>{status.label}</span>
-        <div className="seg">
-          <button className={mode === 'frame' ? 'on' : ''} onClick={() => setMode('frame')}>
-            Frame
-          </button>
-          <button
-            className={comparing ? 'on' : ''}
-            disabled={!canCompare(frame)}
-            title={canCompare(frame) ? 'Side by side with the version you last decided on' : 'Nothing to compare yet'}
-            onClick={() => setMode('compare')}
-          >
-            Compare
-          </button>
-        </div>
-      </header>
-
-      <div className="stage" ref={setStage}>
+      <div
+        className={cn('stage', tool === 'hand' && !comparing && 'grab')}
+        ref={setStage}
+        onPointerDown={onStageDown}
+        onPointerMove={onStageMove}
+        onPointerUp={() => (drag.current = null)}
+        style={{ paddingRight: panel ? PANEL_W + 28 : undefined }}
+      >
         {scale > 0 &&
           (comparing ? (
             <Compare frame={frame} scale={scale} onError={fail} />
@@ -426,7 +453,7 @@ function Review({
                 scale={scale}
                 onPainted={() => void placePins()}
               />
-              <div className={mayComment ? 'shield pinnable' : 'shield'} onClick={(e) => void pinAt(e)}>
+              <div className={tool === 'comment' ? 'shield pinnable' : 'shield'} onClick={(e) => void pinAt(e)}>
                 {open.map((c) => {
                   const at = pins.get(c.id)
                   return at ? (
@@ -445,65 +472,124 @@ function Review({
           ))}
       </div>
 
-      <aside className="side">
-        {draft ? (
-          <div className="compose">
-            <b>{draft.requestChanges ? 'Request changes' : 'New comment'}</b>
-            <p className="muted">
-              {draft.pin
-                ? `On ${draft.pin.label}.`
-                : 'Click the frame to pin it to what should change, or write a general note.'}
-            </p>
-            <textarea
-              autoFocus
-              value={draft.text}
-              placeholder={draft.requestChanges ? 'What should change, and why?' : 'Write a comment'}
-              onChange={(e) => setDraft({ ...draft, text: e.target.value })}
-            />
-            <div className="row-end">
-              <button className="btn" onClick={() => setDraft(null)} disabled={busy}>
-                Cancel
-              </button>
-              <button className="btn pri" onClick={() => void send()} disabled={busy || !draft.text.trim()}>
-                {draft.requestChanges ? 'Request changes' : 'Comment'}
-              </button>
-            </div>
+      {panel && (
+        <aside className="island side">
+          <div className="tabs">
+            <button className={panel === 'comments' ? 'tab on' : 'tab'} onClick={() => setPanel('comments')}>
+              <Icon name="comment" />
+              Comments {open.length > 0 && <span className="num">{open.length}</span>}
+            </button>
+            <button className={panel === 'history' ? 'tab on' : 'tab'} onClick={() => setPanel('history')}>
+              History
+            </button>
+            <button className="icon close" aria-label="Close" title="Close" onClick={() => setPanel(null)}>
+              <Icon name="close" />
+            </button>
           </div>
-        ) : (
-          <>
-            <div className="sh">
-              Comments <span className="muted">{open.length}</span>
+          {panel === 'history' ? (
+            <History frame={frame} />
+          ) : draft ? (
+            <div className="compose">
+              <b>{draft.requestChanges ? 'Request changes' : 'New comment'}</b>
+              <p className="muted">
+                {draft.pin ? `On ${draft.pin.label}.` : 'Click the frame where the change is, or write a general note.'}
+              </p>
+              <textarea
+                autoFocus
+                value={draft.text}
+                placeholder={draft.requestChanges ? 'What should change, and why?' : 'Write a comment'}
+                onChange={(e) => setDraft({ ...draft, text: e.target.value })}
+              />
+              <div className="row-end">
+                <button className="btn" onClick={() => setDraft(null)} disabled={busy}>
+                  Cancel
+                </button>
+                <button className="btn pri" onClick={() => void send()} disabled={busy || !draft.text.trim()}>
+                  {draft.requestChanges ? 'Request changes' : 'Comment'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="threads">
               {mayComment && (
-                <button className="link" onClick={() => setDraft({ text: '', pin: null, requestChanges: false })}>
-                  Add
+                <button className="link add" onClick={() => startDraft(false)}>
+                  + Add a comment
                 </button>
               )}
+              {roots.length === 0 && <p className="muted pad">No comments on this frame.</p>}
+              {roots.map((c) => (
+                <Thread
+                  key={c.id}
+                  root={c}
+                  number={numbers.get(c.id)!}
+                  replies={comments.filter((r) => r.parentId === c.id).sort((a, b) => a.at - b.at)}
+                  mayComment={mayComment}
+                  onError={fail}
+                />
+              ))}
             </div>
-            {roots.length === 0 && <p className="muted pad">No comments on this frame.</p>}
-            {roots.map((c) => (
-              <Thread
-                key={c.id}
-                root={c}
-                number={numbers.get(c.id)!}
-                replies={comments.filter((r) => r.parentId === c.id).sort((a, b) => a.at - b.at)}
-                mayComment={mayComment}
-                onError={fail}
-              />
-            ))}
-            <History frame={frame} />
-          </>
-        )}
-      </aside>
+          )}
+        </aside>
+      )}
 
-      <footer className="pf">
-        <span className="muted info">{notice ?? status.note}</span>
+      {notice && <div className="notice">{notice}</div>}
+
+      <nav className="island dock" aria-label="Review dock">
+        <span className="title" title={`${canvas.name}${page ? ` › ${page.name}` : ''} › ${frame.name}`}>
+          {frame.name}
+        </span>
+        <span className={`badge tone-${status.tone}`} title={status.note}>
+          {status.label}
+        </span>
+        <span className="sep" />
+        <DockButton label="Hand (drag to move around)" on={tool === 'hand'} onClick={() => setTool('hand')}>
+          <Icon name="hand" />
+        </DockButton>
+        {mayComment && (
+          <DockButton
+            label="Comment (click the frame to pin one)"
+            on={tool === 'comment'}
+            onClick={() => setTool('comment')}
+          >
+            <Icon name="comment" />
+          </DockButton>
+        )}
+        <span className="sep" />
+        <DockButton label="Zoom out" onClick={() => step(1 / 1.25)}>
+          <Icon name="minus" />
+        </DockButton>
+        <button className="zoom" title="Fit the frame" onClick={() => setZoom(null)}>
+          {Math.round(scale * 100)}%
+        </button>
+        <DockButton label="Zoom in" onClick={() => step(1.25)}>
+          <Icon name="plus" />
+        </DockButton>
+        <span className="sep" />
+        <DockButton
+          label={canCompare(frame) ? 'Compare with the version you decided on' : 'Nothing to compare yet'}
+          on={comparing}
+          disabled={!canCompare(frame)}
+          onClick={() => setMode(comparing ? 'frame' : 'compare')}
+        >
+          <Icon name="compare" />
+        </DockButton>
+        <DockButton
+          label={open.length ? `Comments (${open.length} open)` : 'Comments'}
+          on={!!panel}
+          onClick={() => setPanel(panel ? null : 'comments')}
+        >
+          <Icon name="comment" />
+          {open.length > 0 && <span className="badge-dot">{open.length}</span>}
+        </DockButton>
         {mayDecide && (
           <>
+            <span className="sep" />
             <button
               className="btn"
               disabled={busy || !!draft || frame.approval?.status === 'changes_requested'}
-              onClick={() => setDraft({ text: '', pin: null, requestChanges: true })}
+              onClick={() => startDraft(true)}
             >
+              <Icon name="undo" />
               Request changes
             </button>
             <button
@@ -511,12 +597,70 @@ function Review({
               disabled={busy || !!draft || frame.approval?.status === 'ready_for_dev'}
               onClick={() => void approve()}
             >
+              <Icon name="check" />
               {frame.approval?.status === 'ready_for_dev' ? 'Approved' : 'Approve'}
             </button>
           </>
         )}
-      </footer>
+      </nav>
     </section>
+  )
+}
+
+function DockButton({
+  label,
+  on = false,
+  disabled = false,
+  onClick,
+  children,
+}: {
+  label: string
+  on?: boolean
+  disabled?: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      className={on ? 'icon on' : 'icon'}
+      aria-label={label}
+      aria-pressed={on}
+      title={label}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  )
+}
+
+/* the few glyphs the panel draws, as Lucide draws them (the editor's set) */
+const ICONS = {
+  hand: 'M18 11V6a2 2 0 0 0-4 0 M14 10V4a2 2 0 0 0-4 0v2 M10 10.5V6a2 2 0 0 0-4 0v8 M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15',
+  comment: 'M7.9 20A9 9 0 1 0 4 16.1L2 22Z',
+  minus: 'M5 12h14',
+  plus: 'M5 12h14 M12 5v14',
+  compare: 'M3 4h7v16H3z M14 4h7v16h-7z',
+  undo: 'M9 14 4 9l5-5 M4 9h10.5a5.5 5.5 0 0 1 0 11H11',
+  check: 'M20 6 9 17l-5-5',
+  close: 'M18 6 6 18 M6 6l12 12',
+} as const
+
+function Icon({ name }: { name: keyof typeof ICONS }) {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d={ICONS[name]} />
+    </svg>
   )
 }
 
@@ -591,10 +735,9 @@ function Thread({
 
 function History({ frame }: { frame: Frame }) {
   const history = frame.approval?.history ?? []
-  if (!history.length) return null
+  if (!history.length) return <p className="muted pad">No verdict on this frame yet.</p>
   return (
     <div className="history">
-      <div className="sh">History</div>
       {[...history].reverse().map((h) => (
         <div key={`${h.at}-${h.status}`} className="muted">
           {h.status === 'ready_for_dev' ? 'Approved' : 'Changes requested'} by {h.by} · {fmtAgo(h.at)}
