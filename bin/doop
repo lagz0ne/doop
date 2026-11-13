@@ -203,7 +203,7 @@ cmd_serve() {
 
 cmd_release() {
   local push=0; [ "${1:-}" = --push ] && push=1
-  [ -z "$(git -C "$ROOT" status --porcelain)" ] || die "commit the project first (patches, transforms, pin): a release must be reproducible from a commit"
+  [ -z "$(git -C "$ROOT" status --porcelain -- patches transforms vendor .gitmodules bin/doop)" ] || die "commit the project first (patches, transforms, pin): a release must be reproducible from a commit"
   cmd_check
   git -C "$V" fetch -q "$FORK" --tags || say "could not fetch $FORK tags; numbering from local tags"
   local up head last n tag
