@@ -23,6 +23,13 @@ in `.env.example`) and `local/` (notes, deploy log, hooks).
   (see `transforms/README.md`).
 - `build/doop` is **generated** (git-ignored, a worktree of vendor): pin + patches + transforms.
   Work happens there, but only what you `export` survives. `bin/doop apply` rebuilds it from scratch.
+- A side worktree of vendor (`build/<name>`, for work in parallel) is a scratch tree too: commit
+  there in patch form (one conventional commit per patch), then bring the commits into build/doop
+  (`bin/doop edit`, `git cherry-pick`), `bin/doop export` and `bin/doop check --test`. Never
+  release, deploy or hand anyone a build from a side tree. `bin/doop status` lists every side tree
+  holding work that is not in `patches/` yet.
+- Every session working on doop follows this. A change that is not a patch in `patches/` (or a
+  transform) does not exist: it is not reviewed, not released and lost on the next rebuild.
 
 ## Layout
 

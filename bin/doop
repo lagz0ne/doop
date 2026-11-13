@@ -54,12 +54,13 @@ vendor_check() {
   Move the change into a patch (bin/doop edit), then: git -C vendor/doop checkout -- . && git -C vendor/doop clean -fd"
 }
 
-# Commits in build/doop that are not in patches/ yet (by patch-id).
+# Commits in build/doop (or the tree given) that are not in patches/ yet (by patch-id).
 unexported() {
-  [ -e "$B/.git" ] || return 0
+  local t=${1:-$B}
+  [ -e "$t/.git" ] || return 0
   local have want
-  have=$(git -C "$B" rev-list --reverse "$(pin)..HEAD" 2>/dev/null | while read -r c; do
-    is_transform "$c" || git -C "$B" show "$c" | git patch-id --stable | cut -d' ' -f1; done)
+  have=$(git -C "$t" rev-list --reverse "$(pin)..HEAD" 2>/dev/null | while read -r c; do
+    is_transform "$c" || git -C "$t" show "$c" | git patch-id --stable | cut -d' ' -f1; done)
   want=$(patches | while read -r f; do [ -n "$f" ] && git patch-id --stable < "$f" | cut -d' ' -f1; done)
   comm -23 <(sort <<<"$have" | sed '/^$/d') <(sort <<<"$want" | sed '/^$/d')
 }
@@ -125,6 +126,15 @@ cmd_status() {
   else
     echo "build      (none; bin/doop apply)"
   fi
+  # Other trees of vendor (side worktrees under build/): fine for trying things, but a
+  # change only exists once it is a commit exported to patches/. Say what is not, yet.
+  local w un2 d2
+  while read -r w; do
+    case "$w" in "$B"|"$BASE"|"$V"|*/.git/modules/*) continue ;; esac
+    d2=$(git -C "$w" status --porcelain | wc -l); un2=$(unexported "$w" | sed '/^$/d' | wc -l)
+    [ "$d2" -gt 0 ] || [ "$un2" -gt 0 ] || continue
+    echo "side       ${w#"$ROOT"/}: $d2 uncommitted file(s), $un2 commit(s) not in patches/ (not a patch yet)"
+  done < <(git -C "$V" worktree list --porcelain | sed -n 's/^worktree //p')
   local last; last=$(git -C "$V" tag -l "$(upstream)-$SUFFIX.*" --sort=-v:refname | head -1)
   echo "released   ${last:-none for $(upstream)}"
   # what is deployed is the deployment's business: DOOP_DEPLOYED_CMD prints a line about it
