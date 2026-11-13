@@ -175,9 +175,16 @@ export const TOOL_ICONS: Record<Tool, React.ReactNode> = {
   frame: <FrameIcon />,
 }
 
-/** How many frame documents may start booting in one animation frame (see the
- *  culling effect in Stage). */
+/** At most this many frame documents start booting in one animation frame
+ *  (see the culling effect in Stage)… */
 const BOOTS_PER_FRAME = 2
+/** …and only one while the frames that carry them come late. A boot costs the
+ *  editor's main thread 12-17 ms on a loaded machine (a FrameView's first
+ *  render, plus the iframe's initial empty document, made in this process
+ *  before its real one starts in the frames'), so two of them were a 30 ms
+ *  task: a dropped frame for each pair, up to a dozen in a row as the
+ *  camera came to rest. A frame is late past this many ms since the last. */
+const BOOT_FRAME_BUDGET_MS = 20
 
 const sendCursor = throttle((x: number, y: number) => sendWs({ type: 'cursor', x, y }), 50)
 /* the camera is shared so others can follow it — same cadence as the cursor */
@@ -452,6 +459,8 @@ export function Stage({
     const elements = new Set(frames.filter((f) => f.element).map((f) => f.id))
     let timer = 0
     let pump = 0
+    /* the animation frame the last batch of boots went out in (see admit) */
+    let lastBatch: number | null = null
     /* The previews' resolution follows the camera too (setPreviews), but
        only a camera at rest. A page that has just opened is about to be
        fitted or put back where it was, and its zoom until then is the last
@@ -469,19 +478,24 @@ export function Stage({
        it. Pins and canvas elements (no preview to wait behind) are admitted
        at once; what is already live and still wanted stays. (Tearing the
        departed ones down a few per frame was measured too: no gain.) */
-    function admit(wanted: ReadonlySet<string>, pinned: ReadonlySet<string>) {
+    function admit(wanted: ReadonlySet<string>, pinned: ReadonlySet<string>, frameTime?: number) {
       window.cancelAnimationFrame(pump)
       const live = useLiveFrames.getState()
       const next = new Set<string>()
+      /* the first batch is one document; the next ones are two each as long
+         as the frame after a batch comes on time (BOOT_FRAME_BUDGET_MS) */
+      const onTime = frameTime !== undefined && lastBatch !== null && frameTime - lastBatch <= BOOT_FRAME_BUDGET_MS
+      const batch = onTime ? BOOTS_PER_FRAME : 1
+      lastBatch = frameTime ?? null
       let booting = 0
       for (const id of wanted) {
         const settled = live.ids?.has(id) || pinned.has(id) || elements.has(id)
-        if (!settled && booting >= BOOTS_PER_FRAME) continue
+        if (!settled && booting >= batch) continue
         if (!settled) booting++
         next.add(id)
       }
       live.set(next)
-      if (next.size < wanted.size) pump = window.requestAnimationFrame(() => admit(wanted, pinned))
+      if (next.size < wanted.size) pump = window.requestAnimationFrame((t) => admit(wanted, pinned, t))
     }
     function compute() {
       const el = ref.current
