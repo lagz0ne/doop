@@ -100,6 +100,23 @@ describe('canvas access model', () => {
     }
   })
 
+  it('names the configured origin on the public host, whatever scheme a proxy reports', async () => {
+    /* a proxy in front may speak http to us and set X-Forwarded-Proto to
+       either scheme; on BETTER_AUTH_URL's host the documents still name
+       BETTER_AUTH_URL (here http://localhost:<port>), never the proxy's guess */
+    const headers = { 'X-Forwarded-Proto': 'https' }
+    for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']) {
+      const meta = await (await fetch(`${BASE}${path}`, { headers })).json()
+      expect(meta.resource, path).toBe(`${BASE}/mcp`)
+    }
+    const mcp = await fetch(`${BASE}/mcp`, { method: 'POST', body: '{}', headers })
+    expect(mcp.headers.get('www-authenticate')).toContain(`"${BASE}/.well-known/oauth-protected-resource/mcp"`)
+    /* any other host (a dev port, an alias) is still echoed from the request */
+    const alias = BASE.replace('localhost', '127.0.0.1')
+    const meta = await (await fetch(`${alias}/.well-known/oauth-protected-resource`)).json()
+    expect(meta.resource).toBe(`${alias}/mcp`)
+  })
+
   it('publishes authorization-server metadata a ChatGPT connector can consume', async () => {
     /* ChatGPT reads either well-known name, needs PKCE S256, and registers
        itself through dynamic client registration; the issuer must equal the

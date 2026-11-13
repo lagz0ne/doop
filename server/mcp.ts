@@ -2,6 +2,7 @@ import { env } from './env.ts'
 import { resolveAgentBrand } from '../shared/agentBrand.ts'
 import { MAX_DECISION_CHARS } from '../shared/designDecisions.ts'
 import packageJson from '../package.json' with { type: 'json' }
+import { requestOrigin } from './requestOrigin.ts'
 import { createHash } from 'node:crypto'
 import { eq } from 'drizzle-orm'
 import { db } from './db/index.ts'
@@ -2787,7 +2788,7 @@ export async function handleMcpRequest(req: Request, res: Response) {
      those two (and ping) answer anonymously; tools stay behind the gate. */
   const anonymous = !session && isAnonymousDiscovery(req.body)
   if (!session && !anonymous) {
-    const origin = `${req.protocol}://${req.get('host')}`
+    const origin = requestOrigin(req)
     /* RFC 6750 §3.1: no error attribute when no token was presented; with a
        token that did not validate, invalid_token tells ChatGPT to re-link
        rather than retry. Both the header and `_meta` carry the challenge —
