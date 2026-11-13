@@ -15,7 +15,7 @@ await p.evaluate((c) => localStorage.setItem("doop:cull", c), cull);
 const cdp = await b.target().createCDPSession();
 const mark = (n) => p.evaluate((n) => performance.mark(n), n);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const zoomNow = () => p.evaluate(() => Number(getComputedStyle(document.querySelector(".stage")).getPropertyValue("--zoom")));
+const zoomNow = () => p.evaluate(() => Number(getComputedStyle(document.querySelector("[data-stage-labels]") || document.querySelector(".stage")).getPropertyValue("--zoom")));
 async function zoomTo(target) { // ctrl+wheel like a person, until the camera crosses the target
   for (let i = 0; i < 80; i++) { const z = await zoomNow(); if (Math.abs(z - target) / target < 0.08) break; const dir = z < target ? -1 : 1; await p.keyboard.down("Control"); await p.mouse.wheel({ deltaY: dir * Math.min(100, 25 + 200 * Math.abs(Math.log(z / target))) }); await p.keyboard.up("Control"); await sleep(50); }
   return zoomNow();
@@ -46,7 +46,7 @@ await mark("S4-click:end"); res.click = await frames(); if (process.env.SHOT) aw
 await mark("S5-zoomout:start");
 await p.keyboard.press("Escape"); await p.keyboard.press("Escape"); await p.keyboard.down("Shift"); await p.keyboard.press("Digit1"); await p.keyboard.up("Shift"); await sleep(300); res.z5 = await zoomNow();
 await sleep(4000); await mark("S5-zoomout:end"); res.zoomout = await frames();
-res.zoom = await p.evaluate(() => getComputedStyle(document.querySelector(".stage")).getPropertyValue("--zoom"));
+res.zoom = await p.evaluate(() => getComputedStyle(document.querySelector("[data-stage-labels]") || document.querySelector(".stage")).getPropertyValue("--zoom"));
 const done = new Promise((r) => cdp.once("Tracing.tracingComplete", r));
 await cdp.send("Tracing.end");
 const { stream } = await done;

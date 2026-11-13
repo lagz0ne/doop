@@ -8,7 +8,7 @@ await p.goto(L + "/", { waitUntil: "domcontentloaded" });
 await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); }, { email: loc.email, password: loc.password });
 await p.goto(`${L}/c/${loc.canvas}?page=stress`, { waitUntil: "domcontentloaded" }); await sleep(5000);
 const css = process.argv[2]; if (css) await p.addStyleTag({ content: css });
-const zoomNow = () => p.evaluate(() => Number(getComputedStyle(document.querySelector(".stage")).getPropertyValue("--zoom")));
+const zoomNow = () => p.evaluate(() => Number(getComputedStyle(document.querySelector("[data-stage-labels]") || document.querySelector(".stage")).getPropertyValue("--zoom")));
 await p.evaluate(() => { window.__gaps = []; let last = performance.now(); const tick = () => { const n = performance.now(); window.__gaps.push(n - last); last = n; requestAnimationFrame(tick); }; requestAnimationFrame(tick); window.__lt = []; new PerformanceObserver((l) => { for (const e of l.getEntries()) window.__lt.push(Math.round(e.duration)); }).observe({ type: "longtask" }); });
 const res = [];
 for (let run = 0; run < 3; run++) {

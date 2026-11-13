@@ -14,7 +14,7 @@ await p.goto(L + "/", { waitUntil: "domcontentloaded" });
 await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); }, { email: loc.email, password: loc.password });
 await p.goto(`${L}/c/${loc.canvas}?page=${pageId}`, { waitUntil: "domcontentloaded" });
 await p.waitForSelector(".world", { timeout: 30000 }); await sleep(4000);
-const zoomNow = () => p.evaluate(() => Number(getComputedStyle(document.querySelector(".stage")).getPropertyValue("--zoom")));
+const zoomNow = () => p.evaluate(() => Number(getComputedStyle(document.querySelector("[data-stage-labels]") || document.querySelector(".stage")).getPropertyValue("--zoom")));
 await p.mouse.move(800, 500);
 for (let i = 0; i < 80; i++) { const z = await zoomNow(); if (Math.abs(z - zoom) / zoom < 0.04) break; await p.keyboard.down("Control"); await p.mouse.wheel({ deltaY: (z < zoom ? -1 : 1) * Math.min(100, 12 + 200 * Math.abs(Math.log(z / zoom))) }); await p.keyboard.up("Control"); await sleep(50); }
 await sleep(4000);

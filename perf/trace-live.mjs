@@ -20,7 +20,7 @@ if (process.env.LS) await p.evaluate((kv) => { for (const [k, v] of Object.entri
 const cdp = await b.target().createCDPSession();
 const mark = (n) => p.evaluate((n) => performance.mark(n), n);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const zoomNow = () => p.evaluate(() => Number(getComputedStyle(document.querySelector(".stage")).getPropertyValue("--zoom")));
+const zoomNow = () => p.evaluate(() => Number(getComputedStyle(document.querySelector("[data-stage-labels]") || document.querySelector(".stage")).getPropertyValue("--zoom")));
 let steps = 0;
 async function zoomTo(target) { for (let i = 0; i < 80; i++) { const z = await zoomNow(); if (Math.abs(z - target) / target < 0.08) break; const dir = z < target ? -1 : 1; await p.keyboard.down("Control"); await p.mouse.wheel({ deltaY: dir * Math.min(100, 25 + 200 * Math.abs(Math.log(z / target))) }); await p.keyboard.up("Control"); steps++; await sleep(50); } return zoomNow(); }
 async function pinchTo(target, cap = 5, wait = 30) { for (let i = 0; i < 200; i++) { const z = await zoomNow(); const r = Math.log(target / z); if (Math.abs(r) < 0.01) break; await p.keyboard.down("Control"); await p.mouse.wheel({ deltaY: -Math.sign(r) * Math.min(cap, 100 * Math.abs(r)) }); await p.keyboard.up("Control"); steps++; await sleep(wait); } return zoomNow(); }

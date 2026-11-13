@@ -19,7 +19,7 @@ await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method:
 if (process.env.CULL) await p.evaluate((c) => localStorage.setItem("doop:cull", c), process.env.CULL); // CULL=off: every frame live, the reference picture
 await p.goto(`${L}/c/${loc.canvas}?page=${pageId}`, { waitUntil: "domcontentloaded" });
 await p.waitForSelector(".world", { timeout: 30000 });
-const zoomNow = () => p.evaluate(() => Number(getComputedStyle(document.querySelector(".stage")).getPropertyValue("--zoom")));
+const zoomNow = () => p.evaluate(() => Number(getComputedStyle(document.querySelector("[data-stage-labels]") || document.querySelector(".stage")).getPropertyValue("--zoom")));
 async function zoomTo(target) {
   for (let i = 0; i < 80; i++) { const z = await zoomNow(); if (Math.abs(z - target) / target < 0.04) break; const dir = z < target ? -1 : 1; await p.keyboard.down("Control"); await p.mouse.wheel({ deltaY: dir * Math.min(100, 12 + 200 * Math.abs(Math.log(z / target))) }); await p.keyboard.up("Control"); await sleep(50); }
   return zoomNow();

@@ -8,7 +8,8 @@ name=$1 A=$2 B=$3 runs=${4:-4}
 export CHROME_PATH=${CHROME_PATH:-$(ls -d ~/.cache/ms-playwright/chromium_headless_shell-*/*/chrome-headless-shell | tail -1)}
 txt=out/ab-$name.txt json=out/ab-$name.jsonl; : > "$txt"; : > "$json"
 for i in $(seq 1 "$runs"); do
-  for side in A B; do
+  order="A B"; [ $((i % 2)) = 0 ] && order="B A"   # alternate who goes first: load drifts within a pair
+  for side in $order; do
     url=$A; [ $side = B ] && url=$B
     echo "load $(cut -d' ' -f1-3 /proc/loadavg)" >> "$txt"
     DOOP=$url NAME="$side $i" JSON_OUT=$json node bench.mjs >> "$txt" 2>&1 || echo "run $side $i failed" >> "$txt"
