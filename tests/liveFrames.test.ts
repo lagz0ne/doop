@@ -62,11 +62,21 @@ describe('computeLiveFrames', () => {
     expect(live.has('f399')).toBe(false)
   })
 
+  it('boots the frames on screen, not their neighbours beyond the edge', () => {
+    const frames = grid(64)
+    // the view shows world x 0..1400, y 0..900: f0 fills it. Its neighbours start 200 px past the
+    // right edge (f1) and the bottom edge (f8), beyond the 0.1-viewport entry margin (140 and 90 px)
+    const live = computeLiveFrames(frames, { x: 0, y: 0, zoom: 1 }, stage, none, none)
+    expect([...live]).toEqual(['f0'])
+    // one of them a sliver into view is wanted
+    expect(computeLiveFrames(frames, { x: -300, y: 0, zoom: 1 }, stage, none, none).has('f1')).toBe(true)
+  })
+
   it('keeps a live frame alive a little past the edge it entered at (no flicker)', () => {
     const frames = grid(16)
-    // the view shows world x 900..2300; f2 starts at x=3200: outside the 0.5-viewport entry
-    // margin (200..3000), inside the 1-viewport keep margin (-500..3700)
-    const camera = { x: -900, y: 0, zoom: 1 }
+    // the view shows world x 1300..2700; f2 starts at x=3200: outside the 0.1-viewport entry
+    // margin (1160..2840), inside the 0.5-viewport keep margin (600..3400)
+    const camera = { x: -1300, y: 0, zoom: 1 }
     const entered = computeLiveFrames(frames, camera, stage, none, none)
     expect(entered.has('f2')).toBe(false)
     const kept = computeLiveFrames(frames, camera, stage, none, new Set(['f2']))
