@@ -126,11 +126,17 @@ const PRESSABLE = 'button, [role="button"], [role="switch"], [role="checkbox"], 
    events, not the selection. Counted, since two fingers can pan at once.
    Returns the release for when the drag ends. */
 let selectionLocks = 0
+function refuseSelection(e: Event) {
+  e.preventDefault()
+}
+/* The lock refuses the selection where it starts (selectstart) instead of
+   switching user-select off on the root: that property is inherited, so
+   setting it restyled every element of the page, panels included, on the
+   press and again on the release of each drag (twice ~1900 elements on a
+   page of 188 frames, with the Hand tool on every press). */
 function lockTextSelection(): () => void {
-  const root = document.documentElement
   if (selectionLocks++ === 0) {
-    root.style.userSelect = 'none'
-    root.style.webkitUserSelect = 'none'
+    document.addEventListener('selectstart', refuseSelection, true)
     window.getSelection()?.removeAllRanges()
   }
   let released = false
@@ -138,8 +144,7 @@ function lockTextSelection(): () => void {
     if (released) return
     released = true
     if (--selectionLocks > 0) return
-    root.style.removeProperty('user-select')
-    root.style.removeProperty('-webkit-user-select')
+    document.removeEventListener('selectstart', refuseSelection, true)
   }
 }
 
@@ -306,6 +311,10 @@ export function Stage({
   const t = useT()
   const setTool = useStore((s) => s.setTool)
   const [panning, setPanning] = useState(false)
+  /* a pan by mouse or pen shows the closed hand through a cover over the
+     stage (see below); a finger has no cursor, and a second finger must
+     still land on whatever is under it */
+  const [panCover, setPanCover] = useState(false)
   /* the selection rectangle being dragged out, in world coordinates */
   /* Z held down: the tool to go back to on release */
   const zoomHeld = useRef<{ previous: Tool } | null>(null)
@@ -1177,6 +1186,7 @@ export function Stage({
   function startPan(e: React.PointerEvent, isBackground: boolean) {
     e.currentTarget.setPointerCapture(e.pointerId)
     setPanning(true)
+    setPanCover(e.pointerType !== 'touch')
     const unlockSelection = lockTextSelection()
     let last = { x: e.clientX, y: e.clientY }
     let moved = false
@@ -1203,6 +1213,7 @@ export function Stage({
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onCancel)
       setPanning(false)
+      setPanCover(false)
       unlockSelection()
     }
     function onUp() {
@@ -1359,8 +1370,12 @@ export function Stage({
            attached to it — everything visual is in the utilities beside it. */
             className={cn(
               'stage absolute inset-0 touch-none',
+              /* A pan changes the stage's own cursor and nothing under it:
+                 swapping the descendant rule too ([&_*]) restyled every
+                 element on the canvas at the press and at the release. The
+                 closed hand over the frames comes from the cover below. */
               panning
-                ? 'cursor-grabbing! [&_*]:cursor-grabbing!'
+                ? cn('cursor-grabbing!', (panMode || tool === 'hand') && '[&_*]:cursor-grab!')
                 : panMode || tool === 'hand'
                   ? 'cursor-grab! [&_*]:cursor-grab!'
                   : tool === 'zoom'
@@ -1434,6 +1449,10 @@ export function Stage({
               ref={pixelGridRef}
             />
             {showRulers && <Rulers stage={ref} />}
+            {/* While a pan lasts, the closed hand is this one element's cursor
+                (doubled class: it has to win over the Hand tool's descendant
+                rule), shown and hidden without touching anything else. */}
+            <div hidden={!panCover} data-pan-cover="" className="absolute inset-0 z-50 [&&]:cursor-grabbing!" />
           </div>
         </ContextMenuTrigger>
         <FollowFrame />
