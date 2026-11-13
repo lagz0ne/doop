@@ -65,6 +65,16 @@ frames 5 → 0); leaving a neighbourhood and coming back 435 → 183 ms, its fra
 documents after 602 → 329 ms; live documents at 60% 12 → 4-6. Pan at fit, zoom 8→60% and the fit
 jump are unchanged within the noise.
 
+With the wheel events of a pinch sent one per animation frame from inside the page (`bench.mjs`
+"pinch 60>95>60%", five interleaved runs at load 20-40), a zoom over live frames went 2080 →
+1460 ms of editor main thread, and its style time 950 → 265 ms. The stepped zoom scenario
+understates 0015 on a loaded machine: its steps then come more than 120 ms apart, so each one
+counts as a camera at rest and the chrome's zoom is rewritten at every step, as before the patch.
+Screenshots of both builds at rest (fit, a frame selected, 20%, 45%, 90%, after a pan) are
+identical pixel for pixel (`perf/look.mjs`, `perf/diff.mjs`); mid-pan they differ as intended:
+the frames a long pan brings in show their pictures, where the old build showed live documents
+that had not painted yet. Released as v0.14.0-patched.3.
+
 Tests for 0015-0019: `bin/doop check --test` 2234 pass, 2 fail, 382 skipped (that run has no
 browser, so the browser files are skipped); the two failures are server tests that time out
 under load (`oidc`, `rate-limit-wiring`; both pass alone, and `rate-limit-wiring` fails the same
