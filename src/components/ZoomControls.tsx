@@ -31,6 +31,7 @@ export function ZoomControls({
   onZoomTo,
   onFit,
   onFitSelection,
+  inline = false,
 }: {
   labelRef: RefObject<HTMLSpanElement>
   /** ⌘. has hidden the chrome: display:none, so the label ref stays mounted */
@@ -40,6 +41,9 @@ export function ZoomControls({
   onZoomTo: (zoom: number) => void
   onFit: () => void
   onFitSelection: () => void
+  /** drawn inside another bar (the reviewer layout's dock) rather than
+   *  floating on its own over the canvas */
+  inline?: boolean
 }) {
   const t = useT()
   const isMobile = useIsMobile()
@@ -69,12 +73,14 @@ export function ZoomControls({
   return (
     <Toolbar
       className={cn(
-        'absolute bottom-[calc(64px+env(safe-area-inset-bottom))] z-[35] h-9 gap-0.5 px-1 py-0 transition-[right] duration-150 ease-[ease] md:bottom-3.5',
+        inline && 'h-9 gap-0.5 bg-transparent p-0 shadow-none',
+        !inline &&
+          'absolute bottom-[calc(64px+env(safe-area-inset-bottom))] z-[35] h-9 gap-0.5 px-1 py-0 transition-[right] duration-150 ease-[ease] md:bottom-3.5',
         /* on phones the tool strip runs along the bottom, with its drawing hint above it */
-        drawing && 'max-md:bottom-[calc(124px+env(safe-area-inset-bottom))]',
+        !inline && drawing && 'max-md:bottom-[calc(124px+env(safe-area-inset-bottom))]',
         /* beside the account island and whatever panels are open — the page
            sets --chrome-right as they come and go */
-        isMobile ? 'left-1/2 -translate-x-1/2' : 'right-[var(--chrome-right,12px)]',
+        !inline && (isMobile ? 'left-1/2 -translate-x-1/2' : 'right-[var(--chrome-right,12px)]'),
         hidden && 'hidden',
       )}
     >

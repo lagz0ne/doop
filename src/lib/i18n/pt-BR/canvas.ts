@@ -13,6 +13,8 @@ export const canvas: Catalog['canvas'] = {
 
   untitled: 'Sem título',
   allCanvases: 'Todos os canvases',
+  dock: 'Barra do canvas',
+  aiActivity: 'Atividade da IA',
   readOnlyBadgeTitle: 'Seu link de compartilhamento permite explorar, mas não alterar o design',
   canComment: 'Pode comentar',
   viewOnly: 'Somente visualização',

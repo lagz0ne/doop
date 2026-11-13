@@ -3,6 +3,8 @@ import type { Catalog } from '..'
 export const stage: Catalog['stage'] = {
   /* the tool rail */
   canvasTools: 'Ferramentas do canvas',
+  moreTools: 'Mais ferramentas',
+  modePrototypeShort: 'Modo protótipo',
   toolTooltip: '{label} ({key})',
   canvasMode: 'Modo do canvas',
   modeEdit: 'Modo de edição',

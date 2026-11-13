@@ -3,6 +3,8 @@
 export const panels = {
   layersTitle: 'Layers',
   layersCollapsePanel: 'Collapse panel',
+  layersShowSection: 'Show layers',
+  layersHideSection: 'Hide layers',
   layersExpandPanel: 'Expand panel',
   layersCollapseAll: 'Collapse all',
   layersNewFrame: 'New frame',
