@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 07:39:24 +0000
+Subject: [PATCH 22/22] feat(operator): a direct-only switch keeps the operator
+ API off the public edge
+
+The operator API is guarded by its bearer token alone. Keeping it off the
+public URL meant a proxy rule in front of doop (admit /api/operator from
+loopback only), which lives outside this code: one missed or reordered rule
+and the full-control API is on the internet, held back only by the token.
+
+DOOP_OPERATOR_DIRECT_ONLY=true moves that guarantee into doop: a request that
+came through a proxy (X-Forwarded-For or Forwarded set) gets 404 from
+/api/operator, token or not, and is logged as refused. Only a caller on
+doop's own port (the host, a sidecar, an ssh tunnel) gets past, so doopctl
+points --url at that port. Default false: nothing changes for anyone who
+does not set it.
+
+Test (tests/operator.test.ts): without the flag a proxied call with the
+token is served (200); with it, a direct call is 200 and a call carrying
+X-Forwarded-For or Forwarded is 404.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .env.example           |  6 ++++++
+ server/env.ts          |  3 +++
+ server/operator.ts     |  8 ++++++++
+ tests/operator.test.ts | 19 +++++++++++++++++++
+ 4 files changed, 36 insertions(+)
+
+diff --git a/.env.example b/.env.example
+index cb2270a..2b2a735 100644
+--- a/.env.example
++++ b/.env.example
+@@ -61,6 +61,12 @@
+ # Whoever holds it controls every account and canvas; keep it with the
+ # instance's other secrets.
+ #DOOP_ADMIN_TOKEN=
++# true = the operator API answers only direct calls to doop's own port: a
++# request that came through a proxy (X-Forwarded-For or Forwarded set) gets
++# 404, token or not. For an instance whose public edge should never offer
++# /api/operator, without relying on a proxy path rule. doopctl then talks to
++# the port directly (--url http://<container or host address>:<PORT>).
++#DOOP_OPERATOR_DIRECT_ONLY=true
+ 
+ # Embedded review panel: host apps (each with its own page origin) show doop's
+ # review panel in an iframe and sign their users in with a short-lived HS256
+diff --git a/server/env.ts b/server/env.ts
+index caaf76a..95aadbf 100644
+--- a/server/env.ts
++++ b/server/env.ts
+@@ -126,6 +126,9 @@ const schema = {
+   ADMIN_EMAILS: list({ default: [] }),
+   /* unset = the operator API (server/operator.ts) does not exist */
+   DOOP_ADMIN_TOKEN: secret({ default: undefined }),
++  /* true = the operator API refuses (404) any request that came through a proxy
++     (X-Forwarded-For or Forwarded set): only direct calls to doop's own port reach it */
++  DOOP_OPERATOR_DIRECT_ONLY: bool({ default: false }),
+   /* JSON {"<host id>": {"secret": "<32+ chars>", "origin": "https://…"}};
+      unset = no embedded review panel (server/embed.ts) */
+   DOOP_EMBED_HOSTS: str({ default: undefined }),
+diff --git a/server/operator.ts b/server/operator.ts
+index 3ed28d2..a2520c7 100644
+--- a/server/operator.ts
++++ b/server/operator.ts
+@@ -121,6 +121,14 @@ export function operatorRouter(refreshRoomRoles: Refresh): express.Router {
+   router.use((req, res, next) => {
+     const expected = env.DOOP_ADMIN_TOKEN
+     if (!expected) return res.status(404).end()
++    /* DOOP_OPERATOR_DIRECT_ONLY: a request a proxy forwarded (the public edge)
++       finds no surface either, token or not; only a caller on doop's own port
++       (the host, a sidecar, an ssh tunnel) gets past. This does not depend on
++       the proxy's own path rules, and a missed one exposes nothing. */
++    if (env.DOOP_OPERATOR_DIRECT_ONLY && (req.headers['x-forwarded-for'] || req.headers.forwarded)) {
++      audit(`refused ${req.method} ${req.path} from ${req.ip}: proxied, and DOOP_OPERATOR_DIRECT_ONLY is set`)
++      return res.status(404).end()
++    }
+     const presented = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? '')?.[1]?.trim()
+     if (!presented || !tokenMatches(presented, expected)) {
+       audit(`refused ${req.method} ${req.path} from ${req.ip}`)
+diff --git a/tests/operator.test.ts b/tests/operator.test.ts
+index 84f9b03..174d66b 100644
+--- a/tests/operator.test.ts
++++ b/tests/operator.test.ts
+@@ -63,6 +63,25 @@ describe('operator API: the token', () => {
+     }
+   }, 70_000)
+ 
++  it('serves proxied calls unless DOOP_OPERATOR_DIRECT_ONLY is set', async () => {
++    const proxied = { 'X-Forwarded-For': '203.0.113.7' }
++    const viaProxy = await fetch(`${server.base}/api/operator/users`, {
++      headers: { Authorization: `Bearer ${TOKEN}`, ...proxied },
++    })
++    expect(viaProxy.status).toBe(200)
++
++    const direct = await startServer({ DOOP_ADMIN_TOKEN: TOKEN, DOOP_OPERATOR_DIRECT_ONLY: 'true' })
++    try {
++      const call = (headers: Record<string, string>) =>
++        fetch(`${direct.base}/api/operator/users`, { headers: { Authorization: `Bearer ${TOKEN}`, ...headers } })
++      expect((await call({})).status).toBe(200)
++      expect((await call(proxied)).status).toBe(404)
++      expect((await call({ Forwarded: 'for=203.0.113.7;proto=https' })).status).toBe(404)
++    } finally {
++      direct.stop()
++    }
++  }, 70_000)
++
+   describe('env', () => {
+     afterEach(() => unstubAllEnvs())
+     it('rejects a token shorter than 32 characters at boot', () => {

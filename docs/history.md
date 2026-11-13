@@ -49,6 +49,8 @@ outside this repo.)
 | 0018 | perf(canvas): boot one document per frame while frames come late | two boots were one main-thread task of up to 36 ms; the batch is two only while frames come on time |
 | 0019 | perf(canvas): only the frames in view go live | the half-viewport live margin booted 12 documents per rest where 4-6 were on screen. Entry margin 0.1, keep margin 0.5; previews keep the half-viewport margin for their sharp level |
 | 0020 | feat(share): share-link guests: a name, an optional password, the link's level | reviewers without an account: the owner picks the link's level and an optional password; visitors give a name (and the password) and get that level on that canvas only, read live, ended by a new password. `doopctl share link <canvas> [level] --password-stdin \| --no-password` |
+| 0021 | fix(mcp): name the configured origin on the public host, not the proxy's scheme | behind a proxy that speaks http to doop and sets `X-Forwarded-Proto: http`, the OAuth protected-resource metadata and the MCP 401 challenge said `http://<host>/mcp`, and strict MCP clients refuse it. On `BETTER_AUTH_URL`'s host they now name that origin; other hosts (dev ports) are echoed as before |
+| 0022 | feat(operator): a direct-only switch keeps the operator API off the public edge | `DOOP_OPERATOR_DIRECT_ONLY=true`: `/api/operator` is 404 for any request a proxy forwarded (`X-Forwarded-For` / `Forwarded`), token or not; only direct calls to doop's port reach it. Keeping the API private no longer rests on a proxy path rule alone. Default off |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →

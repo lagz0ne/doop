@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 02:50:05 +0000
-Subject: [PATCH 12/20] feat(embed): the review panel host apps embed, at
+Subject: [PATCH 12/22] feat(embed): the review panel host apps embed, at
  /embed
 
 The page a host app puts in an iframe so its

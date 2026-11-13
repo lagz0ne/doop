@@ -84,6 +84,8 @@ accounts, canvas sharing, canvas owners and agent keys. `bin/doopctl --help` lis
 - **Target:** `--url` / `DOOP_URL`, default `http://localhost:4477` (`bin/doop serve`).
   `--connect` / `DOOP_CONNECT` opens the connection to another address with TLS and Host kept,
   for an instance whose proxy admits `/api/operator` from loopback only.
+  Or set `DOOP_OPERATOR_DIRECT_ONLY=true` on the instance (patch 0022): every proxied request
+  gets 404, and doopctl's `--url` points at doop's own port.
 - **Safety:** passwords never go in argv (`--password-stdin`, or the server generates one).
   Destructive commands ask for "yes", or need `--yes` when there is no terminal. `users delete`
   shows which canvases go with the account first. Every write is logged by the server as
