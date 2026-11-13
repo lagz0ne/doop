@@ -194,7 +194,7 @@ describe('propagation', () => {
   it('keeps sign-off on a frame that follows a component change', async () => {
     const { mainFrame, page } = setup()
     actions.updateFrame(page.id, { html: doc(`<doop-use component="Button"></doop-use>`) }, actor)
-    actions.setFrameApproval(page.id, true, { id: 'u', name: 'Reviewer' })
+    actions.setFrameApproval(page.id, 'ready_for_dev', { id: 'u', name: 'Reviewer' })
     actions.updateFrame(mainFrame.id, { html: framed(mainFrame.id).replace('Buy now', 'Buy today') }, actor)
     await propagation.whenIdle()
     expect(framed(page.id)).toContain('Buy today')

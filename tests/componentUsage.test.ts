@@ -83,7 +83,7 @@ function fixture() {
   const frames = Array.from({ length: 20 }, (_, index) => {
     const frame = actions.createFrame(canvas.id, { name: `Page ${index}`, html: '' }, actor)!
     actions.updateFrame(frame.id, { html: doc(bodies[index % bodies.length]!) }, actor)
-    if (index % 4 === 0) actions.setFrameApproval(frame.id, true, { id: 'u', name: 'Reviewer' })
+    if (index % 4 === 0) actions.setFrameApproval(frame.id, 'ready_for_dev', { id: 'u', name: 'Reviewer' })
     return frame
   })
   return { canvas, button, tag, card, row, unused, frames }
@@ -102,7 +102,7 @@ describe('component usage', () => {
     /* and again after a write, a rename, an approval and a delete */
     actions.updateFrame(frames[4]!.id, { html: doc(`<doop-use component="Tag"></doop-use>`) }, actor)
     actions.updateFrame(frames[0]!.id, { name: 'Renamed' }, actor)
-    actions.setFrameApproval(frames[1]!.id, true, { id: 'u', name: 'Reviewer' })
+    actions.setFrameApproval(frames[1]!.id, 'ready_for_dev', { id: 'u', name: 'Reviewer' })
     actions.deleteFrame(frames[2]!.id, actor)
     for (const def of canvas.components ?? []) {
       expect(usageOf(canvas, def.id)).toEqual(oldUsageOf(canvas, def.id))

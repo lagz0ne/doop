@@ -407,9 +407,11 @@ Viewers watch designs assemble live. Stream with append_frame_html:
 ## Frames and HTML
 
 - Human sign-off: get_canvas and get_frame expose approvalStatus (draft, ready_for_dev,
-  needs_review) and approval attribution. Filter get_canvas with approval_status="ready_for_dev"
-  to find approved screens, then re-read get_frame before implementing. HTML and size edits
-  move a ready_for_dev frame to needs_review, which requires another human approval. Renames,
+  changes_requested, needs_review) and approval attribution. Filter get_canvas with
+  approval_status="ready_for_dev" to find approved screens, then re-read get_frame before
+  implementing. changes_requested is a reviewer sending the frame back: filter for it, read the
+  frame's comments and revise. HTML and size edits after either verdict make it needs_review,
+  which requires another human verdict. Renames,
   moves (on its page or to another page), rotation, hiding and locking keep sign-off, and so
   do Doop's own rewrites: a token change restyling the frame, a component it uses changing,
   an element id stamped for a comment or link. Approval alone does not assign an

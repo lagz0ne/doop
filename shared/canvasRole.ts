@@ -6,11 +6,12 @@
 export type LinkAccess = 'none' | 'view' | 'comment' | 'edit'
 
 /** What one person may do on a canvas, from least to most. */
-export type CanvasRole = 'view' | 'comment' | 'edit'
+export type CanvasRole = 'view' | 'comment' | 'review' | 'edit'
 
 export const LINK_ACCESS_LEVELS: readonly LinkAccess[] = ['none', 'view', 'comment', 'edit']
 
-const RANK: Record<CanvasRole, number> = { view: 0, comment: 1, edit: 2 }
+/* review: comment, plus setting a frame's approval; never a design change */
+const RANK: Record<CanvasRole, number> = { view: 0, comment: 1, review: 2, edit: 3 }
 
 export function isLinkAccess(value: unknown): value is LinkAccess {
   return typeof value === 'string' && (LINK_ACCESS_LEVELS as readonly string[]).includes(value)

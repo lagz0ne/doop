@@ -17,6 +17,8 @@ export type CanvasEvent =
   /** the root of a thread (or a lone reply) was resolved; `by` is a display name */
   | { type: 'comment.resolved'; comment: ElementComment; frame: Frame | undefined; by: string }
   | { type: 'frame.created'; frame: Frame; actor: Actor }
+  /** a person set a frame's review verdict (ready_for_dev, changes_requested) or took it back (draft) */
+  | { type: 'frame.approval'; frame: Frame; status: 'ready_for_dev' | 'changes_requested' | 'draft'; actor: Actor }
   /** a board card an agent finished — status tasks ending are not events */
   | { type: 'task.completed'; task: AgentTask }
   | { type: 'task.failed'; task: AgentTask; reason: string }

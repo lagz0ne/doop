@@ -157,7 +157,7 @@ describe('the propagation queue', () => {
   it('drains to the HTML the synchronous sweep produced', async () => {
     const { canvas, button, buttonMain, frames } = library(12)
     await propagation.whenIdle()
-    actions.setFrameApproval(frames[1]!.id, true, { id: 'u', name: 'Reviewer' })
+    actions.setFrameApproval(frames[1]!.id, 'ready_for_dev', { id: 'u', name: 'Reviewer' })
     /* an override on one instance, which both have to keep */
     actions.updateFrame(
       frames[4]!.id,

@@ -38,7 +38,7 @@ describe('catching up instances behind', () => {
       { name: 'Page', html: doc('<doop-use component="Badge"></doop-use>') },
       actor,
     )!
-    actions.setFrameApproval(page.id, true, { id: 'u', name: 'Reviewer' })
+    actions.setFrameApproval(page.id, 'ready_for_dev', { id: 'u', name: 'Reviewer' })
     const stale = store.getFrame(page.id)!.html
     /* the component moves on while its propagation is lost: the frame keeps the old markup */
     const main = store.getFrame(def.mainFrameId!)!

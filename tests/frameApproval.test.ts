@@ -86,10 +86,22 @@ it('attributes approvals to the signed-in person, broadcasts them and records ac
     const approved: Frame = await response.json()
     expect(approved.approval).toEqual({
       status: 'ready_for_dev',
+      verdict: 'ready_for_dev',
       approvedBy: 'Review Owner',
       approvedByUserId: canvas.ownerId,
       approvedAt: expect.any(Number),
       approvedFrameUpdatedAt: frame.updatedAt,
+      /* the verdict and the state it was given on, never the forged name */
+      history: [
+        {
+          status: 'ready_for_dev',
+          by: 'Review Owner',
+          byUserId: canvas.ownerId,
+          at: expect.any(Number),
+          frameUpdatedAt: frame.updatedAt,
+          versionId: expect.any(String),
+        },
+      ],
     })
     expect((await read(frame)).approval).toEqual(approved.approval)
     await expect

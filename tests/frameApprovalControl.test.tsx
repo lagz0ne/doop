@@ -234,3 +234,76 @@ it('keeps approval disabled until every overlapping design request has settled',
   })
   expect(toggle().disabled).toBe(false)
 })
+
+it('sends a frame back with changes requested and says so on the badge', async () => {
+  const sentBack: Frame = {
+    ...frame,
+    updatedAt: 12,
+    approval: {
+      status: 'changes_requested',
+      approvedBy: 'Reviewer',
+      approvedByUserId: 'reviewer',
+      approvedAt: 12,
+      approvedFrameUpdatedAt: 10,
+    },
+  }
+  const save = vi.spyOn(api, 'setFrameApproval').mockResolvedValueOnce(sentBack)
+  const request = () =>
+    [...container.querySelectorAll('button')].find((b) => b.textContent === 'Request changes') as
+      HTMLButtonElement | undefined
+  await act(async () => request()!.click())
+  expect(save).toHaveBeenCalledWith('f', 'changes_requested', 10)
+  expect(container.textContent).toContain('Changes requested')
+  expect(container.textContent).toContain('A reviewer asked for changes')
+  expect(request()).toBeUndefined()
+  expect(toggle().getAttribute('aria-checked')).toBe('false')
+})
+
+it('gives a reviewer the verdicts in the frame menu but none of the editing items', () => {
+  useStore
+    .getState()
+    .setCanvas({ id: 'c', name: 'Canvas', frames: [frame], createdAt: 1, updatedAt: 10, role: 'review' })
+  act(() =>
+    root.render(
+      <TooltipProvider>
+        <ContextMenu>
+          <ContextMenuTrigger>
+            <span data-test-menu>Frame</span>
+          </ContextMenuTrigger>
+          <FrameContextMenu frame={frame} at={{ current: { x: 0, y: 0 } }} />
+        </ContextMenu>
+      </TooltipProvider>,
+    ),
+  )
+  act(() =>
+    container
+      .querySelector('[data-test-menu]')!
+      .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, button: 2 })),
+  )
+  const items = [...document.querySelectorAll('[role="menuitem"]')].map((el) => el.textContent)
+  expect(items).toContain('Mark ready for dev')
+  expect(items).toContain('Request changes')
+  expect(items.some((i) => i?.startsWith('Lock') || i?.startsWith('Delete'))).toBe(false)
+})
+
+it('says a frame was revised after changes were requested, not that it was approved', () => {
+  const revised: Frame = {
+    ...frame,
+    updatedAt: 14,
+    approval: {
+      status: 'needs_review',
+      verdict: 'changes_requested',
+      approvedBy: 'Reviewer',
+      approvedByUserId: 'reviewer',
+      approvedAt: 12,
+      approvedFrameUpdatedAt: 10,
+    },
+  }
+  useStore.getState().setCanvas({ id: 'c', name: 'Canvas', frames: [revised], createdAt: 1, updatedAt: 14 })
+  act(() => root.render(<Control />))
+  expect(container.textContent).toContain('Revised after a reviewer asked for changes')
+  expect(container.textContent).not.toContain('changed after approval')
+  expect(container.querySelector('[aria-label="Needs review"]')?.getAttribute('title')).toContain(
+    'Changes requested by Reviewer',
+  )
+})

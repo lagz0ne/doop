@@ -19,7 +19,7 @@ import { MAX_DECISION_CHARS } from '../shared/designDecisions.ts'
 import { MAX_PAGES, PageLimitError, store } from './store.ts'
 import * as persist from './db/persist.ts'
 import * as thumbs from './thumbs.ts'
-import { colorFor } from '../shared/types.ts'
+import { APPROVAL_HISTORY_MAX, colorFor } from '../shared/types.ts'
 import type { AgentBrand } from '../shared/agentBrand.ts'
 import type { StackWrite } from '../shared/frameStack.ts'
 import {
@@ -70,8 +70,10 @@ import type {
   AgentTask,
   CardScope,
   DesignDecision,
+  ApprovalHistoryEntry,
   ElementComment,
   Frame,
+  FrameApproval,
   GuidelineDoc,
   MemoryProposal,
   MemoryReference,
@@ -131,8 +133,8 @@ const stored = {
     afterCommit(() => persist.saveDecision(canvasId, decision)),
   saveProposal: (canvasId: string, proposal: MemoryProposal) =>
     afterCommit(() => persist.saveProposal(canvasId, proposal)),
-  saveFrameVersion: (version: Parameters<typeof persist.saveFrameVersion>[0]) =>
-    afterCommit(() => persist.saveFrameVersion(version)),
+  saveFrameVersion: (...args: Parameters<typeof persist.saveFrameVersion>) =>
+    afterCommit(() => persist.saveFrameVersion(...args)),
   saveGuidelineVersion: (...args: Parameters<typeof persist.saveGuidelineVersion>) =>
     afterCommit(() => persist.saveGuidelineVersion(...args)),
 }
@@ -2625,39 +2627,101 @@ export const restackFrames = atomic(function restackFrames(
   return frames
 })
 
+export type ApprovalVerdict = 'ready_for_dev' | 'changes_requested' | 'draft'
+
+/** File the state a verdict is given on as a design version, so the review
+ *  panel can compare against exactly what was decided: history is otherwise
+ *  kept per burst of edits, and a tweak joining the open burst would never
+ *  file this state on its own. Its savedAt is the frame's updatedAt at the
+ *  verdict. The next burst's own snapshot of the same state is skipped by
+ *  persist (the newest row already holds it). */
+function fileReviewedState(frame: Frame): string | undefined {
+  if (!frame.html) return undefined
+  const id = nanoid(10)
+  const author = bursts.get(frame.id)?.actor
+  stored.saveFrameVersion(
+    {
+      id,
+      frameId: frame.id,
+      canvasId: frame.canvasId,
+      html: frame.html,
+      width: frame.width,
+      height: frame.height,
+      savedAt: frame.updatedAt,
+      savedBy: author?.name ?? frame.updatedBy,
+      savedByKind: author?.kind,
+      htmlBytes: frame.html.length,
+    },
+    { always: true },
+  )
+  return id
+}
+
+/** The verdicts before this one: the stored history, or for an approval made
+ *  before verdicts were kept, the one it records. */
+export function priorVerdicts(approval: Frame['approval']): ApprovalHistoryEntry[] {
+  if (!approval) return []
+  if (approval.history) return approval.history
+  return [
+    {
+      status: approval.verdict ?? 'ready_for_dev',
+      by: approval.approvedBy,
+      byUserId: approval.approvedByUserId,
+      at: approval.approvedAt,
+      frameUpdatedAt: approval.approvedFrameUpdatedAt,
+    },
+  ]
+}
+
 /** Sign-off is a human action, separate from ordinary frame editing. An agent may set it
  *  for the person it works for: the approval stays theirs (`approvedBy`), with the agent
  *  recorded as `approvedVia` and as the actor of the broadcast and activity line. */
 export const setFrameApproval = atomic(function setFrameApproval(
   frameId: string,
-  ready: boolean,
+  status: ApprovalVerdict,
   user: { id: string; name: string },
   agent?: Actor,
 ): Frame | undefined {
   const current = store.getFrame(frameId)
   if (!current) return undefined
-  if (ready && current.approval?.status === 'ready_for_dev') return current
+  if (status !== 'draft' && current.approval?.status === status) return current
   const actor = agent ?? resolveActor({ name: user.name, kind: 'user' })
-  const approval = ready
-    ? {
-        status: 'ready_for_dev' as const,
-        approvedBy: user.name,
-        approvedByUserId: user.id,
-        approvedAt: Math.max(Date.now(), current.updatedAt + 1),
-        approvedFrameUpdatedAt: current.updatedAt,
-        ...(agent ? { approvedVia: agent.name } : {}),
-      }
-    : null
+  let approval: FrameApproval | null = null
+  if (status !== 'draft') {
+    const at = Math.max(Date.now(), current.updatedAt + 1)
+    const versionId = fileReviewedState(current)
+    const entry: ApprovalHistoryEntry = {
+      status,
+      by: user.name,
+      byUserId: user.id,
+      at,
+      frameUpdatedAt: current.updatedAt,
+      ...(versionId && { versionId }),
+    }
+    approval = {
+      status,
+      verdict: status,
+      approvedBy: user.name,
+      approvedByUserId: user.id,
+      approvedAt: at,
+      approvedFrameUpdatedAt: current.updatedAt,
+      ...(agent ? { approvedVia: agent.name } : {}),
+      history: [...priorVerdicts(current.approval), entry].slice(-APPROVAL_HISTORY_MAX),
+    }
+  }
   const frame = store.updateFrame(frameId, { approval }, actor.name)!
   broadcast(frame.canvasId, { type: 'frame:updated', frame, actor })
   logActivity(
     frame.canvasId,
     actor,
-    ready
+    status === 'ready_for_dev'
       ? `marked “${frame.name}” ready for dev${agent ? ` for ${user.name}` : ''}`
-      : `moved “${frame.name}” back to draft`,
+      : status === 'changes_requested'
+        ? `requested changes on “${frame.name}”`
+        : `moved “${frame.name}” back to draft`,
     frameId,
   )
+  emitEvent(frame.canvasId, { type: 'frame.approval', frame, status, actor })
   return frame
 })
 
@@ -2672,7 +2736,7 @@ export function agentSetFrameApproval(
   if (!current) return { ok: false, error: `no frame with id ${frameId}` }
   if (status === 'ready_for_dev' && isFrameStreaming(frameId))
     return { ok: false, error: 'the design is still streaming — wait for it to finish before approving it' }
-  const frame = setFrameApproval(frameId, status === 'ready_for_dev', user, agent)
+  const frame = setFrameApproval(frameId, status, user, agent)
   return frame ? { ok: true, frame } : { ok: false, error: `no frame with id ${frameId}` }
 }
 

@@ -14,6 +14,7 @@ export const webhooks: Catalog['webhooks'] = {
   eventCommentReplied: 'Uma resposta chega em uma conversa de comentários',
   eventCommentResolved: 'Uma conversa de comentários é resolvida',
   eventFrameCreated: 'Um frame é criado',
+  eventFrameApproval: 'Um frame é aprovado, devolvido com alterações ou volta a rascunho',
   eventTaskCompleted: 'Um agente conclui um card do quadro',
   eventTaskFailed: 'Um agente falha em um card do quadro',
 
