@@ -94,6 +94,29 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
     expect(n).toBeLessThanOrEqual(MAX_LIVE)
   }, 30_000)
 
+  it('sizes the chrome in the world from a zoom that follows a moving camera in steps', async () => {
+    /* the stage's --zoom restyles the whole canvas when written, so a small
+       zoom step leaves it standing; the label layer, which places its badges
+       from the zoom, always has the exact one */
+    const zooms = () =>
+      page.evaluate(() => ({
+        world: document.querySelector<HTMLElement>('.stage')?.style.getPropertyValue('--zoom'),
+        labels: document.querySelector<HTMLElement>('[data-stage-labels]')?.style.getPropertyValue('--zoom'),
+      }))
+    await camera(page, { x: 0, y: 0, zoom: 0.5 })
+    expect(await zooms()).toEqual({ world: '0.5', labels: '0.5' })
+    await store(page, 'setViewport({ x: 0, y: 0, zoom: 0.52 })')
+    expect(await zooms()).toEqual({ world: '0.5', labels: '0.52' })
+    /* past the drift it is written at once… */
+    await store(page, 'setViewport({ x: 0, y: 0, zoom: 0.7 })')
+    expect(await zooms()).toEqual({ world: '0.7', labels: '0.7' })
+    /* …and a camera at rest always gets its exact zoom */
+    await store(page, 'setViewport({ x: 0, y: 0, zoom: 0.72 })')
+    expect((await zooms()).world).toBe('0.7')
+    await new Promise((r) => setTimeout(r, 400))
+    expect(await zooms()).toEqual({ world: '0.72', labels: '0.72' })
+  }, 30_000)
+
   it('shows previews, not documents, when zoomed out past reading', async () => {
     await camera(page, { x: 0, y: 0, zoom: 0.08 })
     expect(await iframes(page)).toBe(0)

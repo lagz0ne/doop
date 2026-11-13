@@ -48,7 +48,7 @@ import {
 import { TOOLS, isDrawingTool, resolvePointerAction, toolForKey, type Tool } from '../lib/tools'
 import { useCanvasDrawing } from './CanvasDrawing'
 import { FrameLabelLayer } from './FrameLabelLayer'
-import { layoutZoomFor } from '../lib/layoutZoom'
+import { chromeZoomStale, layoutZoomFor } from '../lib/layoutZoom'
 import { useT, type PlainMessageKey } from '../lib/i18n'
 import { NO_INSETS, fitBox, type StageInsets } from '../lib/viewFit'
 import { spaceWouldScroll } from '../lib/spaceScroll'
@@ -65,6 +65,9 @@ import {
 } from '../lib/liveFrames'
 
 const MIN_ZOOM = 0.08
+/* how long the camera holds still before the chrome inside the world is put
+   back to its exact screen size (see chromeZoomStale) */
+const CHROME_ZOOM_REST_MS = 120
 /* The settled world is laid out at up to this zoom too (layoutZoomFor), so
    the desktop app stays sharp all the way in. That costs little: WebKit and
    Chromium both tile what is on screen, so backing memory follows the
@@ -271,6 +274,8 @@ export function Stage({
       const vp = useStore.getState().viewport
       el.style.setProperty('--vx', `${vp.x}px`)
       el.style.setProperty('--vy', `${vp.y}px`)
+      el.style.setProperty('--zoom', String(vp.zoom))
+      labelZoom.current = vp.zoom
     }
     setLabelLayer(el)
   }, [])
@@ -278,6 +283,7 @@ export function Stage({
   const previewPage = useRef<string | null>(null)
   /* the zoom and grid period last written to the DOM (see apply) */
   const appliedZoom = useRef<number | null>(null)
+  const labelZoom = useRef<number | null>(null)
   const appliedPeriod = useRef<number | null>(null)
   const zoomLabelRef = useRef<HTMLSpanElement>(null)
   const setViewport = useStore((s) => s.setViewport)
@@ -340,7 +346,12 @@ export function Stage({
      transform, the grid layer, the --zoom variable (which counter-scales
      labels/pins/cursors from CSS), and the zoom pill's % directly. */
   useLayoutEffect(() => {
-    function apply(vp: { x: number; y: number; zoom: number }) {
+    function writeChromeZoom(zoom: number) {
+      if (appliedZoom.current === zoom || !ref.current) return
+      appliedZoom.current = zoom
+      ref.current.style.setProperty('--zoom', String(zoom))
+    }
+    function apply(vp: { x: number; y: number; zoom: number }, exact = false) {
       const world = worldRef.current
       const grid = gridRef.current
       const stage = ref.current
@@ -354,12 +365,18 @@ export function Stage({
       if (labels) {
         labels.style.setProperty('--vx', `${vp.x}px`)
         labels.style.setProperty('--vy', `${vp.y}px`)
+        /* the label layer places its badges from the zoom, so it always has
+           the exact one; its few elements are all that write restyles */
+        if (labelZoom.current !== vp.zoom) {
+          labelZoom.current = vp.zoom
+          labels.style.setProperty('--zoom', String(vp.zoom))
+        }
       }
-      /* everything below follows the zoom alone: a pan leaves it untouched */
-      if (appliedZoom.current !== vp.zoom) {
-        appliedZoom.current = vp.zoom
-        stage.style.setProperty('--zoom', String(vp.zoom))
-      }
+      /* everything below follows the zoom alone: a pan leaves it untouched.
+         The stage's own --zoom sizes the chrome inside the world, and a write
+         restyles the whole canvas: it follows a moving camera in steps and
+         catches up when the camera rests (chromeZoomStale, layoutZoom.ts) */
+      if (exact || chromeZoomStale(appliedZoom.current, vp.zoom)) writeChromeZoom(vp.zoom)
       const period = 26 * vp.zoom
       if (appliedPeriod.current !== period) {
         appliedPeriod.current = period
@@ -389,8 +406,9 @@ export function Stage({
       if (zoomLabelRef.current && zoomLabelRef.current.textContent !== percent)
         zoomLabelRef.current.textContent = percent
     }
-    apply(useStore.getState().viewport)
+    apply(useStore.getState().viewport, true)
     let settle = 0
+    let chromeRest = 0
     const unsub = useStore.subscribe((s, prev) => {
       /* a (re)connect needs the camera announced afresh — the server only
          knows what this socket has sent */
@@ -399,6 +417,9 @@ export function Stage({
       if (s.viewport === prev.viewport) return
       apply(s.viewport)
       if (ref.current) sendViewport(s.viewport, ref.current)
+      window.clearTimeout(chromeRest)
+      if (appliedZoom.current !== s.viewport.zoom)
+        chromeRest = window.setTimeout(() => writeChromeZoom(useStore.getState().viewport.zoom), CHROME_ZOOM_REST_MS)
       window.clearTimeout(settle)
       settle = window.setTimeout(() => {
         setLayoutZoom(layoutZoomFor(useStore.getState().viewport.zoom, MAX_ZOOM))
@@ -407,6 +428,7 @@ export function Stage({
     return () => {
       unsub()
       window.clearTimeout(settle)
+      window.clearTimeout(chromeRest)
     }
   }, [])
 
@@ -1379,7 +1401,7 @@ export function Stage({
               ref={gridRef}
             />
             {/* the selected frame's size badge, in screen px (FrameLabelLayer) */}
-            <div className="pointer-events-none absolute inset-0" ref={attachLabelLayer} />
+            <div className="pointer-events-none absolute inset-0" data-stage-labels="" ref={attachLabelLayer} />
             {/* `world` is likewise a behaviour hook: pan hit-testing checks
             classList.contains('world') to tell background from frame */}
             <div

@@ -60,3 +60,23 @@ export function layoutZoomFor(zoom: number, max: number, density = FRAME_DOCUMEN
 export function counterZoom(k: number): number {
   return exactInverse(Math.fround(k)) ?? 1 / k
 }
+
+/* Chrome drawn inside the world at a fixed screen size (frame names, rings,
+   grips, pins) undoes the camera's zoom through the --zoom custom property.
+   The property is inherited, so every write restyles each element under the
+   stage and re-lays out and repaints whatever reads it: on a page of 188
+   frames, 10-13 ms of style for ~1550 elements plus the paint and commit of
+   every frame name, on each step of a zoom. A zoom that only moves the
+   world's transform costs none of that. So while the camera is moving the
+   property follows it in steps: it is rewritten once the zoom has drifted
+   this far from the value last written, and exactly when the camera rests.
+   In between, that chrome is off its screen size by at most the drift. */
+export const CHROME_ZOOM_DRIFT = 1.1
+
+/** True when the zoom last written for the world's chrome is too far from
+ *  the camera's to leave standing while it moves. */
+export function chromeZoomStale(written: number | null, zoom: number, drift = CHROME_ZOOM_DRIFT): boolean {
+  if (written === null || !(written > 0) || !(zoom > 0)) return true
+  const ratio = zoom > written ? zoom / written : written / zoom
+  return ratio > drift
+}
