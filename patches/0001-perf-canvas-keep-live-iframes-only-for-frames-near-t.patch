@@ -353,7 +353,7 @@ index 0000000..452e175
 +}
 diff --git a/tests/liveFrames.test.ts b/tests/liveFrames.test.ts
 new file mode 100644
-index 0000000..bdbb88c
+index 0000000..6d62896
 --- /dev/null
 +++ b/tests/liveFrames.test.ts
 @@ -0,0 +1,76 @@
@@ -361,7 +361,7 @@ index 0000000..bdbb88c
 +import { computeLiveFrames, LIVE_MIN_ZOOM, MAX_LIVE, viewRect, type FrameBox } from '../src/lib/liveFrames'
 +
 +const stage = { width: 1400, height: 900 }
-+/** a grid of 1440×900 frames, 8 per row, 160/200 px apart (the Big canvas canvas layout) */
++/** a grid of 1440×900 frames, 8 per row, 160/200 px apart (the layout of a large real canvas) */
 +function grid(n: number): FrameBox[] {
 +  return Array.from({ length: n }, (_, i) => ({
 +    id: `f${i}`,

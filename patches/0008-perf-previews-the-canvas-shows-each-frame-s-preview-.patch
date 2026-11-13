@@ -653,7 +653,7 @@ index 56913a9..ac85a1d 100644
 +  return `/i/${frameId}.webp?preview&s=${level}&v=${updatedAt}`
  }
 diff --git a/tests/liveFrames.test.ts b/tests/liveFrames.test.ts
-index 5be0291..680701e 100644
+index 94c33a2..8d4b3e9 100644
 --- a/tests/liveFrames.test.ts
 +++ b/tests/liveFrames.test.ts
 @@ -5,6 +5,7 @@ import {

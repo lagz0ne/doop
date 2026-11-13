@@ -4,7 +4,7 @@ Date: Fri, 13 Nov 2026 02:16:15 +0000
 Subject: [PATCH 11/14] feat(embed): sign host apps' reviewers in to one canvas
  through a short-lived token
 
-doop stays one backend for the host apps, but nobody logs in
+doop stays one backend for several host apps, but nobody logs in
 to it: each host shows doop's review panel in an iframe and signs its user in
 itself. This is the server side of that.
 
@@ -101,7 +101,7 @@ index 2f871de..c17e09d 100644
  --frozen-lockfile` in CI.
  - Vite 8 (Rolldown-based) - frontend build tool (`vite build`), with `@vitejs/plugin-react` 6.
 diff --git a/.env.example b/.env.example
-index ab6eab7..d6c92af 100644
+index ab6eab7..cb2270a 100644
 --- a/.env.example
 +++ b/.env.example
 @@ -62,6 +62,14 @@
@@ -114,7 +114,7 @@ index ab6eab7..d6c92af 100644
 +# secret is 32+ characters, the origin is the host page's (the panel's
 +# postMessage peer and its frame-ancestors). Unset = no review panel.
 +# A panel served from its own hostname needs that origin in TRUSTED_ORIGINS.
-+#DOOP_EMBED_HOSTS={"create":{"secret":"<openssl rand -hex 32>","origin":"https://app.example.com"}}
++#DOOP_EMBED_HOSTS={"myapp":{"secret":"<openssl rand -hex 32>","origin":"https://app.example.com"}}
 +
  # Optional SSO against an external OIDC provider (Zitadel, Okta, Authentik,
  # Keycloak, etc.), alongside email/password — not a replacement for it.
@@ -4649,7 +4649,7 @@ index 26bc07c..fb442aa 100644
  }
 diff --git a/server/embed.ts b/server/embed.ts
 new file mode 100644
-index 0000000..c4b2cfc
+index 0000000..e10ce63
 --- /dev/null
 +++ b/server/embed.ts
 @@ -0,0 +1,269 @@
@@ -4664,7 +4664,7 @@ index 0000000..c4b2cfc
 +import type { CanvasRole } from '../shared/canvasRole.ts'
 +
 +/**
-+ * The embedded review panel's way in. A host app (host apps)
++ * The embedded review panel's way in. A host app
 + * shows doop's review panel in an iframe and signs its user in with a token it
 + * mints itself, HS256 with its own secret:
 + *
@@ -4686,7 +4686,7 @@ index 0000000..c4b2cfc
 + * Shadow users have no password or OAuth account, so this is their only way
 + * in; their address is under `.embed.invalid`, which lists hide by default.
 + *
-+ * The panel may be served from its own hostname (review.example.com) so its
++ * The panel may be served from its own hostname (review.example.com, say) so its
 + * cookie never replaces a person's own doop session: nothing here reads the
 + * request host and the cookie is host-only; that origin must be in
 + * TRUSTED_ORIGINS, since the exchange checks a browser's Origin even before
@@ -5101,7 +5101,7 @@ index e9762ea..db86911 100644
      for (const c of store.allCanvases()) {
 diff --git a/tests/embed.test.ts b/tests/embed.test.ts
 new file mode 100644
-index 0000000..3aa4cd4
+index 0000000..368896c
 --- /dev/null
 +++ b/tests/embed.test.ts
 @@ -0,0 +1,300 @@
@@ -5114,9 +5114,9 @@ index 0000000..3aa4cd4
 +/* The embedded review panel's sign-in (server/embed.ts) on a real server
 +   whose sign-up is closed the way production's is. */
 +
-+const SECRET = 'create-embed-secret-0123456789abcdef'
++const SECRET = 'app-embed-secret-0123456789abcdef'
 +const ADMIN = 'operator-token-for-embed-tests-0123456789'
-+const HOSTS = JSON.stringify({ create: { secret: SECRET, origin: 'https://app.example.com' } })
++const HOSTS = JSON.stringify({ app: { secret: SECRET, origin: 'https://app.example.com' } })
 +let server: Server
 +let owner: Client
 +let canvasId: string
@@ -5130,9 +5130,9 @@ index 0000000..3aa4cd4
 +  const now = Math.floor(Date.now() / 1000) - (opts.iatAgo ?? 0)
 +  return new SignJWT({ name: 'Rita Reviewer', canvas: canvasId, role: 'review', ...claims })
 +    .setProtectedHeader({ alg: 'HS256' })
-+    .setIssuer('create')
++    .setIssuer('app')
 +    .setAudience('doop')
-+    .setSubject('create-user-42')
++    .setSubject('user-42')
 +    .setJti(`jti-${Math.random()}`)
 +    .setIssuedAt(now)
 +    .setExpirationTime(now + (opts.life ?? 120))
@@ -5322,7 +5322,7 @@ index 0000000..3aa4cd4
 +  it('keeps the shadow reviewer out of every other way in, and out of the lists', async () => {
 +    const { client } = await exchange(await token())
 +    const me = (await (await client.get('/api/me')).json()) as { email: string }
-+    expect(me.email).toMatch(/@create\.embed\.invalid$/)
++    expect(me.email).toMatch(/@app\.embed\.invalid$/)
 +    const signIn = await new Client(server).post('/api/auth/sign-in/email', {
 +      email: me.email,
 +      password: 'password12345',
@@ -5347,8 +5347,8 @@ index 0000000..3aa4cd4
 +    stubEnv(
 +      'DOOP_EMBED_HOSTS',
 +      JSON.stringify({
-+        create: { secret: SECRET, origin: 'https://app.example.com' },
-+        host-b: { secret: SECRET, origin: 'https://wiki.example.com' },
++        app: { secret: SECRET, origin: 'https://app.example.com' },
++        wiki: { secret: SECRET, origin: 'https://wiki.example.com' },
 +        short: { secret: 'too short', origin: 'https://x.example.com' },
 +        noOrigin: { secret: SECRET },
 +      }),

@@ -2,7 +2,7 @@
 // server's own loadFramePage (3 at once, as thumbs.ts renders) and reads document.fonts at the
 // moment a screenshot would be taken.
 // usage (from build/doop; TREE=base measures pristine upstream):
-//   CHROME_PATH=… CHROME_NO_SANDBOX=true BETTER_AUTH_URL=https://doop.example.com BETTER_AUTH_SECRET=x \
+//   CHROME_PATH=… CHROME_NO_SANDBOX=true BETTER_AUTH_URL=http://localhost:4477 BETTER_AUTH_SECRET=x \
 //     ./node_modules/.bin/tsx ../../perf/fonts.mts [n=24]
 import { readFileSync } from 'node:fs'
 import type { Frame } from '../build/doop/shared/types.ts'

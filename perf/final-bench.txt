@@ -1,4 +1,4 @@
-== NEW (patched.2 candidate)
+== NEW (v0.12.0 + 0001-0004)
    open page          main thread 0 ms in the first 5 s (script 0, style 0, layout 0) · 0 live documents · 5474 elements · editor JS heap 27 MB · renderer CPU 2.0 s
    pan at fit (8%)      397 ms (style 4, script 37) worst frame   28 ms, 0 slow
    zoom 8% -> 60%       481 ms (style 52, script 138) worst frame   57 ms, 5 slow

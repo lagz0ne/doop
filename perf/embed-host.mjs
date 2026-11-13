@@ -1,4 +1,4 @@
-// A stand-in host app for the review panel: what the host's server does, in one file.
+// A stand-in host app for the review panel: what a host app's server does, in one file.
 // It signs a short-lived token for its signed-in user (here a fixed one) with the secret it shares
 // with doop (DOOP_EMBED_HOSTS), and its page embeds doop's /embed with that token in the fragment.
 // It answers the panel's doop:need-token with a fresh token and logs every message the panel sends.
@@ -12,7 +12,7 @@ const doop = process.env.DOOP || "http://localhost:4477";
 const secret = new TextEncoder().encode(process.env.HOST_SECRET);
 const hostId = process.env.HOST_ID || "local";
 
-// what the host's server would expose to its own signed-in user: POST /review-token -> { token }
+// what the host app's server would expose to its own signed-in user: POST /review-token -> { token }
 async function reviewToken({ userId, name, canvas, role = "review" }) {
   return new SignJWT({ name, canvas, role })
     .setProtectedHeader({ alg: "HS256" })
@@ -42,7 +42,7 @@ addEventListener('message', async (ev) => {
 
 createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${port}`);
-  const who = { userId: "duc-123", name: "A reviewer", canvas: process.env.CANVAS };
+  const who = { userId: "user-123", name: "A reviewer", canvas: process.env.CANVAS };
   if (req.method === "POST" && url.pathname === "/review-token") {
     res.setHeader("content-type", "application/json");
     return res.end(JSON.stringify({ token: await reviewToken(who) }));

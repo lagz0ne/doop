@@ -24,8 +24,8 @@ editor's chrome moves out of the canvas's way:
 - Phones and the docked panel layout keep their own chrome, and
   localStorage['doop:full-ui'] = 'on' brings the whole old layout back.
 
-Shown to the human first as before / after frames on doop (canvas
-<canvas>, page 3) and changed as they asked.
+Shown first as before / after frames on a doop canvas and changed as
+asked.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

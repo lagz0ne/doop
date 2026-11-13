@@ -1,7 +1,7 @@
 // End to end: the review panel embedded in a host app, against a local doop (bin/doop serve with
 // DOOP_EMBED_HOSTS naming http://localhost:4499). A reviewer requests changes with a pinned comment,
 // an "agent" revises the frame (the owner's REST edit), the reviewer compares and approves.
-// usage: CHROME_PATH=... node embed-e2e.mjs <frameId> [outPrefix=out/embed/e2e]
+// usage: HOST_SECRET=<the secret in DOOP_EMBED_HOSTS> CHROME_PATH=... node embed-e2e.mjs <frameId> [outPrefix=out/embed/e2e]
 import { createRequire } from "node:module";
 import { readFileSync, mkdirSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -29,7 +29,7 @@ if (!f.html.includes("Link works 7 days")) {
   await owner(`/frames/${frameId}/approval`, { method: "PUT", body: JSON.stringify({ status: "draft", expectedUpdatedAt: f.updatedAt }) });
 }
 
-const host = spawn(process.execPath, [new URL("./embed-host.mjs", import.meta.url).pathname, "4499"], { env: { ...process.env, CANVAS: loc.canvas, HOST_SECRET: readFileSync("/tmp/embed-host-secret", "utf8").trim() }, stdio: "inherit" });
+const host = spawn(process.execPath, [new URL("./embed-host.mjs", import.meta.url).pathname, "4499"], { env: { ...process.env, CANVAS: loc.canvas, HOST_SECRET: process.env.HOST_SECRET }, stdio: "inherit" });
 await sleep(800);
 const b = await puppeteer.launch({ executablePath: process.env.CHROME_PATH, headless: true, args: ["--no-sandbox", "--site-per-process", "--force-device-scale-factor=2"] });
 try {

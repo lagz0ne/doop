@@ -676,7 +676,7 @@ index 452e175..56913a9 100644
  export function useFrameLive(frameId: string): boolean {
    return useLiveFrames((s) => s.ids === null || s.ids.has(frameId))
 diff --git a/tests/liveFrames.test.ts b/tests/liveFrames.test.ts
-index bdbb88c..5be0291 100644
+index 6d62896..94c33a2 100644
 --- a/tests/liveFrames.test.ts
 +++ b/tests/liveFrames.test.ts
 @@ -1,5 +1,14 @@
@@ -694,7 +694,7 @@ index bdbb88c..5be0291 100644
 +} from '../src/lib/liveFrames'
  
  const stage = { width: 1400, height: 900 }
- /** a grid of 1440×900 frames, 8 per row, 160/200 px apart (the Big canvas canvas layout) */
+ /** a grid of 1440×900 frames, 8 per row, 160/200 px apart (the layout of a large real canvas) */
 @@ -63,6 +72,19 @@ describe('computeLiveFrames', () => {
      expect(kept.has('f2')).toBe(true)
    })

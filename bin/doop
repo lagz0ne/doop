@@ -13,14 +13,24 @@ B=$ROOT/build/doop         # generated tree: pin + patches (+ transforms)
 BASE=$ROOT/build/base      # pristine pin, for A/B perf runs
 P=$ROOT/patches
 T=$ROOT/transforms
-SUFFIX=patched               # release tags: <upstream-tag>-patched.<n>
-FORK=fork                  # remote in vendor/doop that the deployer builds from (github.com/the fork/doop)
-BRANCH=patched               # fork branch that carries the latest release
-APP_ID=<app-id>   # the deployer app <app>
+
+# Setup-specific settings live in .env.local (git-ignored; the keys are in
+# .env.example). A variable already set in the environment wins over the file.
+if [ -f "$ROOT/.env.local" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ $line =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)=(.*)$ ]] || continue
+    k=${BASH_REMATCH[1]} v=${BASH_REMATCH[2]}
+    [[ $v =~ ^\"(.*)\"$ || $v =~ ^\'(.*)\'$ ]] && v=${BASH_REMATCH[1]}
+    [ -n "${!k+x}" ] || export "$k=$v"
+  done < "$ROOT/.env.local"
+fi
+SUFFIX=${DOOP_RELEASE_SUFFIX:-patched}   # release tags: <upstream-tag>-<suffix>.<n>
+FORK=${DOOP_FORK_REMOTE:-fork}           # remote in vendor/doop that releases are pushed to
+BRANCH=${DOOP_RELEASE_BRANCH:-patched}   # branch on that remote that carries the latest release
 # Commits made here use a fixed committer and the author's date, so the same
 # pin + patches always give the same commit hashes (a release is reproducible).
-export GIT_COMMITTER_NAME=${DOOP_COMMITTER_NAME:-lagz0ne}
-export GIT_COMMITTER_EMAIL=${DOOP_COMMITTER_EMAIL:-15101444+lagz0ne@users.noreply.github.com}
+export GIT_COMMITTER_NAME=${DOOP_COMMITTER_NAME:-doop-build}
+export GIT_COMMITTER_EMAIL=${DOOP_COMMITTER_EMAIL:-doop-build@localhost}
 
 # bun (and a bunx shim) for doop's own git hooks (lint-staged, commitlint) and scripts.
 export PATH="$ROOT/bin/shims:$HOME/.bun/bin:$PATH"
@@ -117,7 +127,8 @@ cmd_status() {
   fi
   local last; last=$(git -C "$V" tag -l "$(upstream)-$SUFFIX.*" --sort=-v:refname | head -1)
   echo "released   ${last:-none for $(upstream)}"
-  command -v deploys >/dev/null && { echo -n "deployed   "; deploys doop 2>/dev/null | head -1 || echo "?"; }
+  # what is deployed is the deployment's business: DOOP_DEPLOYED_CMD prints a line about it
+  [ -n "${DOOP_DEPLOYED_CMD:-}" ] && { echo -n "deployed   "; bash -c "$DOOP_DEPLOYED_CMD" 2>/dev/null | head -1 || echo "?"; }
   return 0
 }
 
@@ -205,7 +216,7 @@ cmd_release() {
     tag="$up-$SUFFIX.$n"
     git -C "$V" tag -a "$tag" "$head" -m "doop $up + $(patches | sed '/^$/d' | wc -l) patch(es), $(transforms | sed '/^$/d' | wc -l) transform(s)
 
-built by ~/dev/doop at $(git -C "$ROOT" rev-parse --short=12 HEAD) (bin/doop release)"
+built from the build repo at $(git -C "$ROOT" rev-parse --short=12 HEAD) (bin/doop release)"
     say "tagged $tag -> ${head:0:12}"
   fi
   git -C "$V" branch -q -f "$BRANCH" "$tag^{commit}"
@@ -215,10 +226,12 @@ built by ~/dev/doop at $(git -C "$ROOT" rev-parse --short=12 HEAD) (bin/doop rel
   else
     say "not pushed. To publish: bin/doop release --push"
   fi
-  cat >&2 <<EOF
-doop: to deploy, ask the hub (it owns the deployer):
-  hubq send "doop: deploy $tag" -d "Point app <app> ($APP_ID) at the fork/doop tag $tag (application.saveGitProvider customGitBranch=$tag), application.deploy, check https://doop.example.com" --from doop
-EOF
+  # deploying is the deployment's business: DOOP_POST_RELEASE, a command, gets the tag as $1
+  if [ -n "${DOOP_POST_RELEASE:-}" ]; then
+    (cd "$ROOT" && bash -c "$DOOP_POST_RELEASE \"\$1\"" _ "$tag")
+  else
+    say "to deploy: build doop's own Dockerfile from tag $tag on the '$FORK' remote"
+  fi
 }
 
 cmd_upgrade() {

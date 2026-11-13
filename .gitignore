@@ -3,8 +3,16 @@
 # perf outputs (Chrome traces are 60-320 MB each) and local perf-account logins
 /perf/out/
 /perf/**/local*.json
-# the host's material, used locally for perf runs; never published (this repo is public)
+# setup-specific material stays local (this repo is public and neutral):
+# settings for bin/doop and bin/doopctl (keys in .env.example), the agent manual's
+# local half (CLAUDE.local.md), notes and deploy log (local/), real canvases used
+# as perf data and the probes that run against a deployed instance
+/.env.local
+/CLAUDE.local.md
+/local/
 /perf/canvas.json
 /perf/base/canvas.json
-/perf/probes/ds-head.ts
-/perf/probes/layout.new.py
+/perf/seed.py
+/perf/base/seed.py
+/perf/probes/
+/paseo.json

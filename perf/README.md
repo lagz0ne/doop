@@ -1,7 +1,7 @@
 # perf/: render-performance harness for the doop editor
 
-Moved here from `tmp/2026-11-11-doop-crosspage/` (the investigation that produced
-patches 0001-0004). Outputs (Chrome traces, screenshots) are in `out/`, which git ignores.
+Started in the investigation that produced patches 0001-0004. Outputs (Chrome traces,
+screenshots) are in `out/`, which git ignores.
 
 ## Local setup
 
@@ -9,9 +9,10 @@ patches 0001-0004). Outputs (Chrome traces, screenshots) are in `out/`, which gi
     bin/doop base  && bin/doop serve --base    # pristine upstream on :4478, for A/B
 
 `local.json` / `local-base.json` (ignored) hold the local perf account
-(`{canvas, email, password, name}`) for those servers; `seed.py` / `stress.py` create it and
-seed the 188-frame stress page from `canvas.json` (uses `../host-app/scripts/canvas`).
-`base/` is the same seed for the :4478 server.
+(`{canvas, email, password, name}`) for those servers. `stress.py` (and `base/stress.py` for
+:4478) builds the 188-frame stress page from a canvas export in `canvas.json`. The measurements
+here used a copy of a real design canvas, which is not part of this repo: `canvas.json` and the
+script that copied it (`seed.py`) are git-ignored, so bring your own canvas.
 
 ## Scripts (node, puppeteer-core from build/doop/node_modules)
 
@@ -25,23 +26,20 @@ seed the 188-frame stress page from `canvas.json` (uses `../host-app/scripts/can
 | `boot.mjs <prefix> [page] [zoom]` | what a frame shows while its document boots (screencast of one frame after a click): finds the white flash |
 | `fonts.mts [n]` | are a frame's web fonts in place when the server captures it? Runs the server's own `loadFramePage` (`TREE=base` for upstream); run from `build/doop` with tsx, see its header |
 | `formats.mjs` | bytes and encode time of a preview per scale and format (jpeg/webp/png) |
-| `embed-host.mjs [port]` | a stand-in host app for the review panel: signs the review token as the host's server would (HS256, `HOST_SECRET`, `CANVAS`) and embeds `/embed`; answers `doop:need-token`, logs every panel message. Also the reference for the host side |
-| `embed-e2e.mjs <frameId>` | the review flow end to end in a browser against `bin/doop serve` started with `DOOP_EMBED_HOSTS` naming `http://localhost:4499`: request changes with a pinned comment, an edit as the agent, compare, approve, and a reviewer edit refused |
+| `embed-host.mjs [port]` | a stand-in host app for the review panel: signs the review token as a host app's server would (HS256, `HOST_SECRET`, `CANVAS`) and embeds `/embed`; answers `doop:need-token`, logs every panel message. Also the reference for the host side |
+| `embed-e2e.mjs <frameId>` | the review flow end to end in a browser against `bin/doop serve` started with `DOOP_EMBED_HOSTS` naming `http://localhost:4499` (the same secret in `HOST_SECRET`): request changes with a pinned comment, an edit as the agent, compare, approve, and a reviewer edit refused |
 | `diff.mjs`, `crop.mjs` | compare a screenshot region with a reference (mean pixel difference); cut and enlarge a region |
 | `fit.mjs`, `pancheck.mjs`, `layers.mjs`, `wake.mjs`, `oop.mjs` | single-question probes (fit stall, pan, layer count, frame wake-up, out-of-process frames on :4478) |
 
-`final-bench.txt` is the before/after that justified patched.2. Headline (188 frames, editor
+`final-bench.txt` is the before/after that justified releasing patches 0001-0004. Headline (188 frames, editor
 main thread): pan at fit 2260 → 245 ms, zoom 8→60% 1700 → 480-540 ms, open page
 10.4 → 2.2 s renderer CPU, heap 116 → 27 MB.
 
-`refine-bench.txt` is `bench.mjs` on patched.2 and on patches 0007-0009, interleaved (the
+`refine-bench.txt` is `bench.mjs` on v0.12.0 + 0001-0004 and with patches 0007-0009 added, interleaved (the
 machine was loaded, so only the comparison means anything, not the absolute numbers).
 
-## probes/
+## probes/ (local only)
 
-Playwright probes against **production** doop.example.com, logged in as the agent account
-(`~/.config/doop/doop-claude-*`), on the host's "Big canvas" canvas. They measured the
-cross-page prototype flow (`cases.json`) and gave `baseline-v0.12.0.txt`. They use the host's
-playwright install (`../host-app/node_modules`). `previews.mjs [page] [dpr]` opens a page without clicking and reports what the culled frames
-show (preview level asked for, loaded or not, picture widths, cache headers). Read-only, except `layout.new.py`, which
-reorganised the host's canvas pages (a reorg) and should not be re-run blindly.
+Probes that run against a deployed instance and its real canvases (cross-page prototype flow,
+preview levels and cache headers on production) live in `probes/`, which git ignores: they name
+the instance, its accounts and its canvases.

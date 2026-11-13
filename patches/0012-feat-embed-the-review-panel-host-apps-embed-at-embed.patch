@@ -4,7 +4,7 @@ Date: Fri, 13 Nov 2026 02:50:05 +0000
 Subject: [PATCH 12/14] feat(embed): the review panel host apps embed, at
  /embed
 
-The page a host app (host apps) puts in an iframe so its
+The page a host app puts in an iframe so its
 users review a doop canvas without ever going to doop: look at a frame,
 pin comments, reply and resolve, request changes or approve, compare a
 revision with the state the last verdict was given on.
@@ -30,7 +30,7 @@ revision with the state the last verdict was given on.
   doop:need-token; from it, only doop:token and doop:open.
 
 Checked end to end in a browser with a stand-in host app signing tokens
-(perf/embed-e2e.mjs in the patched build repo): the panel opens a frame,
+(perf/embed-e2e.mjs in the build repo): the panel opens a frame,
 pins a comment on "Link works 7 days", requests changes (doop records the
 verdict and files the version), shows the agent's revision as "Revised
 since changes were requested", compares (Link works 7 days -> Link
@@ -64,7 +64,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 tests/embedPage.test.ts
 
 diff --git a/.context/TECHSTACK.md b/.context/TECHSTACK.md
-index c17e09d..114dc53 100644
+index c17e09d..bcada40 100644
 --- a/.context/TECHSTACK.md
 +++ b/.context/TECHSTACK.md
 @@ -674,6 +674,29 @@ hostOrigin, expiresAt, user: { name } }`. An embed session opens its one canvas
@@ -92,7 +92,7 @@ index c17e09d..114dc53 100644
 +  only; it may send `doop:token` (a fresh token after the two-hour session ends) and `doop:open`,
 +  read from that origin only (`readHostMessage`). English only for now. Tests:
 +  `embedPage.test.ts`, `embedChanges.test.ts`; end to end in a browser with a stand-in host app:
-+  `perf/embed-e2e.mjs` in the patched build repo.
++  `perf/embed-e2e.mjs` in the build repo.
 +
  - Bun 1.3.10 - package manager; lockfile at `bun.lock`, installed with `bun install
  --frozen-lockfile` in CI.
@@ -1536,7 +1536,7 @@ index 0000000..d7e9ab2
 +)
 diff --git a/src/embed/session.ts b/src/embed/session.ts
 new file mode 100644
-index 0000000..69c02e7
+index 0000000..94a7dd9
 --- /dev/null
 +++ b/src/embed/session.ts
 @@ -0,0 +1,168 @@
@@ -1545,7 +1545,7 @@ index 0000000..69c02e7
 +
 +/* The review panel's connection to doop and to the page that embeds it.
 +
-+   A host app (host apps) loads /embed#token=<jwt>&frame=<id>
++   A host app loads /embed#token=<jwt>&frame=<id>
 +   in an iframe. The token is the host's word for who is reviewing which
 +   canvas (server/embed.ts); the panel trades it once for a session cookie,
 +   wipes it from the address bar and from then on is an ordinary doop client
@@ -1710,7 +1710,7 @@ index 0000000..69c02e7
 +}
 diff --git a/tests/embedChanges.test.ts b/tests/embedChanges.test.ts
 new file mode 100644
-index 0000000..c1d417f
+index 0000000..b652318
 --- /dev/null
 +++ b/tests/embedChanges.test.ts
 @@ -0,0 +1,69 @@
@@ -1755,7 +1755,7 @@ index 0000000..c1d417f
 +  const frame = (approval: Frame['approval'], updatedAt: number) => ({ id: 'f', updatedAt, approval }) as Frame
 +  const entry = {
 +    status: 'changes_requested' as const,
-+    by: 'Duc',
++    by: 'Ada',
 +    byUserId: 'u',
 +    at: 1,
 +    frameUpdatedAt: 10,
@@ -1763,7 +1763,7 @@ index 0000000..c1d417f
 +  }
 +  const approval = {
 +    status: 'needs_review' as const,
-+    approvedBy: 'Duc',
++    approvedBy: 'Ada',
 +    approvedByUserId: 'u',
 +    approvedAt: 1,
 +    approvedFrameUpdatedAt: 10,
@@ -1785,7 +1785,7 @@ index 0000000..c1d417f
 +})
 diff --git a/tests/embedPage.test.ts b/tests/embedPage.test.ts
 new file mode 100644
-index 0000000..3f78a5a
+index 0000000..74f2e2a
 --- /dev/null
 +++ b/tests/embedPage.test.ts
 @@ -0,0 +1,83 @@

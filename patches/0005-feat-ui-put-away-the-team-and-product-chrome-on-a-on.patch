@@ -18,8 +18,8 @@ stay.
 
 Kept on purpose: workspaces (rail section, "Move to workspace"), the
 presence pill (it is also where a working agent shows), comments, the Doop
-Agent, Activity, Memory, Connect AI on the canvas and Agent keys (the host's
-MCP key is one).
+Agent, Activity, Memory, Connect AI on the canvas and Agent keys (a host
+app's MCP key is one).
 
 Only the ways in are hidden: the pages still open by URL and the server
 is unchanged, so none of this is a permission. One flag, FULL_UI in
@@ -642,14 +642,14 @@ index 58d83f0..d66a5b8 100644
                  <UserIcon size="rail" /> {t('settings.accountTab')}
                </TabsTrigger>
 diff --git a/tests/accountMenu.test.tsx b/tests/accountMenu.test.tsx
-index cf626d8..4578ba3 100644
+index cf626d8..b44ba85 100644
 --- a/tests/accountMenu.test.tsx
 +++ b/tests/accountMenu.test.tsx
 @@ -3,11 +3,18 @@ import { act } from 'react'
  import { createRoot, type Root } from 'react-dom/client'
  import { afterEach, beforeEach, expect, it, vi } from 'vitest'
  const shell = vi.hoisted(() => ({ desktop: false }))
-+/* the patched build hides the product links unless the full UI is on (src/lib/fullUi.ts) */
++/* this build hides the product links unless the full UI is on (src/lib/fullUi.ts) */
 +const ui = vi.hoisted(() => ({ full: false }))
  vi.mock('../src/lib/auth', () => ({
    authClient: { useSession: () => ({ data: { user: { id: 'alice', name: 'Alice Doe' } } }), signOut: vi.fn() },

@@ -4,13 +4,16 @@
 // running server only, never the database: sharing lives in the server's
 // memory, so a direct database write would be lost or ignored.
 //
-//   token  $DOOP_ADMIN_TOKEN, else ~/.config/doop/doop-admin-token
-//   url    --url, else $DOOP_URL, else https://doop.example.com
-//   via    production's operator API answers only from this machine (Traefik
-//          allows /api/operator from loopback alone), so for doop.example.com the
-//          connection goes to 127.0.0.1:443; TLS and Host stay doop.example.com,
-//          so the certificate is still checked. --connect / $DOOP_CONNECT
-//          overrides (an address, or "dns").
+//   token  $DOOP_ADMIN_TOKEN, else the file $DOOP_ADMIN_TOKEN_FILE, else
+//          ~/.config/doop/admin-token (mode 600)
+//   url    --url, else $DOOP_URL, else http://localhost:4477 (bin/doop serve)
+//   via    --connect / $DOOP_CONNECT: open the connection to this address
+//          instead of what DNS says, keeping TLS and Host, so the certificate
+//          is still checked. For an instance whose proxy lets /api/operator in
+//          from loopback alone, that is 127.0.0.1. "dns" = plain DNS.
+//
+// Settings may come from .env.local beside bin/ (git-ignored; keys in
+// .env.example); the environment wins over the file.
 //
 // Safety: passwords never go on the command line (--password-stdin, or the
 // server generates one and it is printed once); destructive commands ask you
@@ -20,6 +23,12 @@ import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { homedir } from 'node:os'
 import { createInterface } from 'node:readline/promises'
+
+try {
+  process.loadEnvFile(new URL('../.env.local', import.meta.url))
+} catch {
+  /* no .env.local: environment and defaults only */
+}
 
 const USAGE = `doopctl: users, sharing, canvas owners and agent keys on doop
 
@@ -62,10 +71,9 @@ A <user> is an email or a user id. A <canvas> is an id, or an exact name if
 only one canvas has it.
 
 options
-  --url URL     instance (default $DOOP_URL or https://doop.example.com)
+  --url URL     instance (default $DOOP_URL or http://localhost:4477)
   --connect A   open the connection to address A instead of what DNS says,
-                keeping TLS and Host (default $DOOP_CONNECT; 127.0.0.1 for
-                doop.example.com, whose operator API is host-only; "dns" = DNS)
+                keeping TLS and Host (default $DOOP_CONNECT; "dns" = DNS)
   --json        raw JSON out, for scripts
   --yes         skip confirmations (required when there is no terminal)
 `
@@ -73,7 +81,7 @@ options
 /* ------------------------------------------------------------- arguments */
 
 const argv = process.argv.slice(2)
-const flags = { json: false, yes: false, url: process.env.DOOP_URL || 'https://doop.example.com', connect: process.env.DOOP_CONNECT }
+const flags = { json: false, yes: false, url: process.env.DOOP_URL || 'http://localhost:4477', connect: process.env.DOOP_CONNECT }
 const opts = {}
 const args = []
 const VALUED = new Set(['--url', '--connect', '--name', '--reason'])
@@ -108,7 +116,7 @@ function need(n, usage) {
 
 function token() {
   if (process.env.DOOP_ADMIN_TOKEN) return process.env.DOOP_ADMIN_TOKEN.trim()
-  const file = `${homedir()}/.config/doop/doop-admin-token`
+  const file = process.env.DOOP_ADMIN_TOKEN_FILE || `${homedir()}/.config/doop/admin-token`
   let text
   try {
     text = readFileSync(file, 'utf8')
@@ -122,9 +130,8 @@ function token() {
 /* ------------------------------------------------------------------- api */
 
 /** The address to open the connection to, or undefined for plain DNS. */
-function connectTo(url) {
-  const pick = flags.connect ?? (url.hostname === 'doop.example.com' ? '127.0.0.1' : undefined)
-  return pick === 'dns' ? undefined : pick
+function connectTo() {
+  return flags.connect === 'dns' ? undefined : flags.connect
 }
 
 const target = () => {
@@ -356,7 +363,7 @@ async function keys() {
     case 'create': {
       need(4, 'keys create <user> <name>')
       const k = await api(`/users/${enc(who)}/keys`, { body: { name: x } })
-      return out(k, () => console.log(`agent key "${k.name}" for ${who}:\n${k.secret}\n(shown once; store it, e.g. in ~/.config/doop, mode 600)`))
+      return out(k, () => console.log(`agent key "${k.name}" for ${who}:\n${k.secret}\n(shown once; store it somewhere private, mode 600)`))
     }
     case 'revoke':
       need(4, 'keys revoke <user> <key-id>')

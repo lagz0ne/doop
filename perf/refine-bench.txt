@@ -1,8 +1,8 @@
-bench.mjs, 188-frame stress page, 2026-11-12. prev = v0.12.0-patched.2 (38b882d) on :4479, new = 38b882d + patches 0007-0009 on :4477,
+bench.mjs, 188-frame stress page, 2026-11-12. prev = v0.12.0 + patches 0001-0004 (38b882d) on :4479, new = 38b882d + patches 0007-0009 on :4477,
 interleaved, same data, previews warm. Machine load average 21-27 on 8 cores during the runs: compare the pairs, not the absolute numbers.
 Medians of 4: pan at fit 654 -> 596 ms, zoom 8% -> 60% 850 -> 1066 ms, pan at 60% 1427 -> 1495 ms, fit jump 305 -> 195 ms.
 
-== prev (patched.2) 1  load 24.51
+== prev (0001-0004) 1  load 24.51
    pan at fit (8%)      676 ms (style 5, script 48) worst frame   38 ms, 1 slow
    zoom 8% -> 60%       841 ms (style 92, script 223) worst frame   86 ms, 15 slow
    pan at 60%          1435 ms (style 22, script 281) worst frame  147 ms, 20 slow
@@ -12,7 +12,7 @@ Medians of 4: pan at fit 654 -> 596 ms, zoom 8% -> 60% 850 -> 1066 ms, pan at 60
    zoom 8% -> 60%      1328 ms (style 130, script 259) worst frame  230 ms, 17 slow
    pan at 60%          2338 ms (style 34, script 567) worst frame  183 ms, 35 slow
    fit jump (60%->8%)   237 ms (style 17, script 58) worst frame   60 ms, 3 slow
-== prev (patched.2) 2  load 27.48
+== prev (0001-0004) 2  load 27.48
    pan at fit (8%)      696 ms (style 5, script 55) worst frame   36 ms, 2 slow
    zoom 8% -> 60%      1625 ms (style 213, script 464) worst frame  219 ms, 19 slow
    pan at 60%          1419 ms (style 27, script 276) worst frame  170 ms, 23 slow
@@ -22,7 +22,7 @@ Medians of 4: pan at fit 654 -> 596 ms, zoom 8% -> 60% 850 -> 1066 ms, pan at 60
    zoom 8% -> 60%       805 ms (style 85, script 200) worst frame  104 ms, 12 slow
    pan at 60%          1087 ms (style 17, script 231) worst frame  101 ms, 16 slow
    fit jump (60%->8%)   208 ms (style 10, script 27) worst frame   31 ms, 0 slow
-== prev (patched.2) 3  load 21.98
+== prev (0001-0004) 3  load 21.98
    pan at fit (8%)      632 ms (style 4, script 42) worst frame   36 ms, 3 slow
    zoom 8% -> 60%       809 ms (style 62, script 187) worst frame  141 ms, 11 slow
    pan at 60%          1265 ms (style 15, script 321) worst frame  131 ms, 17 slow
@@ -32,7 +32,7 @@ Medians of 4: pan at fit 654 -> 596 ms, zoom 8% -> 60% 850 -> 1066 ms, pan at 60
    zoom 8% -> 60%       757 ms (style 69, script 179) worst frame   76 ms, 8 slow
    pan at 60%          1165 ms (style 13, script 243) worst frame   98 ms, 13 slow
    fit jump (60%->8%)   183 ms (style 13, script 26) worst frame   38 ms, 1 slow
-== prev (patched.2) 4  load 20.95
+== prev (0001-0004) 4  load 20.95
    pan at fit (8%)      489 ms (style 6, script 60) worst frame   36 ms, 3 slow
    zoom 8% -> 60%       858 ms (style 110, script 219) worst frame   88 ms, 18 slow
    pan at 60%          1926 ms (style 33, script 416) worst frame  146 ms, 30 slow

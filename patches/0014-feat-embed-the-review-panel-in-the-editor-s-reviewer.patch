@@ -24,7 +24,7 @@ reviews in doop and in a host app meets one tool.
   frame runtime chunk).
 
 Checked end to end with the stand-in host app (perf/embed-e2e.mjs in the
-patched build repo): request changes with a pinned comment, the revision,
+build repo): request changes with a pinned comment, the revision,
 compare, approve, a reviewer edit refused; same results as before.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
