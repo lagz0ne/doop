@@ -137,6 +137,9 @@ refuse to clobber unexported work).
   Integrations, Webhooks, plan line, Help, and on Home the Agents rail section and the "Ask me what
   to design" hero) behind `FULL_UI` (`src/lib/fullUi.ts`, our `feat(ui)` patch). Workspaces stay
   (the human, 2026-11-12). Only the entry points are hidden, not the routes.
+  With FULL_UI off the editor also uses a reviewer layout (patch 0013, `CanvasDock.tsx`): one
+  dock along the bottom instead of the top bar, tool rail and side rail, the Hand first, Layers
+  folded; the review panel at `/embed` uses the same layout (0014).
   `localStorage['doop:full-ui']='on'` plus a reload brings it back in one browser.
 - Using doop as a design tool (the host's canvas, the doop MCP, canvas import tooling) is
   the host's business (`../host-app`, skill `doop-ui`), not this repo's.

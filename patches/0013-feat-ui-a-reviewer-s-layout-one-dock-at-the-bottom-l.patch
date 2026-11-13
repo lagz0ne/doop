@@ -1,0 +1,1138 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 03:50:10 +0000
+Subject: [PATCH 13/14] feat(ui): a reviewer's layout: one dock at the bottom,
+ layers folded, the Hand first
+
+On this instance people look, comment and review; the agents design. With
+FULL_UI off (as 0005 has it), on a desktop with floating panels, the
+editor's chrome moves out of the canvas's way:
+
+- No top bar, no tool rail, no side rail. One dock along the bottom
+  (CanvasDock.tsx), icons only with their names on hover: back to the
+  canvases, the canvas's name and its id (# opens copy id / copy link);
+  Hand, Comment and Prototype mode, the tool picked from the list, and the
+  rest of the tools in a list that opens upwards; the zoom (the Stage
+  draws its own control into the dock, menu and handlers included); who is
+  here; Import and Export; Comments and AI activity, which open the
+  right-hand panel on that tab and close it again, and Connect AI; the
+  design panel, settings and you.
+- Present stays at the top right, beside the open panels.
+- The Hand is the first tool; the right-hand panel starts closed; the
+  right-hand panels end above the dock.
+- Layers folds under the pages and starts folded (doop:layers-section).
+- Phones and the docked panel layout keep their own chrome, and
+  localStorage['doop:full-ui'] = 'on' brings the whole old layout back.
+
+Shown to the human first as before / after frames on doop (canvas
+<canvas>, page 3) and changed as they asked.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/components/CanvasDock.tsx       | 268 ++++++++++++++++++++++++++++
+ src/components/LayersPanel.tsx      |  63 ++++++-
+ src/components/Onboarding.tsx       |   2 +-
+ src/components/Stage.tsx            |  39 ++--
+ src/components/ZoomControls.tsx     |  12 +-
+ src/lib/i18n/en/canvas.ts           |   2 +
+ src/lib/i18n/en/panels.ts           |   2 +
+ src/lib/i18n/en/stage.ts            |   2 +
+ src/lib/i18n/pt-BR/canvas.ts        |   2 +
+ src/lib/i18n/pt-BR/panels.ts        |   2 +
+ src/lib/i18n/pt-BR/stage.ts         |   2 +
+ src/pages/CanvasPage.tsx            | 203 +++++++++++++++------
+ tests/browser.ts                    |  11 ++
+ tests/reviewerLayoutBrowser.test.ts | 123 +++++++++++++
+ 14 files changed, 662 insertions(+), 71 deletions(-)
+ create mode 100644 src/components/CanvasDock.tsx
+ create mode 100644 tests/reviewerLayoutBrowser.test.ts
+
+diff --git a/src/components/CanvasDock.tsx b/src/components/CanvasDock.tsx
+new file mode 100644
+index 0000000..df5ba62
+--- /dev/null
++++ b/src/components/CanvasDock.tsx
+@@ -0,0 +1,268 @@
++import type { ReactNode } from 'react'
++import { canEditOpenCanvas, roleOf, toolAllowed, useStore, type PanelTab } from '../lib/store'
++import { TOOLS, type Tool } from '../lib/tools'
++import { useOpenThreadCount } from '../lib/comments'
++import { useT } from '../lib/i18n'
++import { cn } from '@/lib/utils'
++import { TOOL_ICONS } from './Stage'
++import { PeerAvatars, PresenceFace } from './PeerAvatars'
++import { Toolbar, ToolbarButton, ToolbarControl, ToolbarDivider, ToolbarDot } from './ui/toolbar'
++import { MenuHint } from './ui/menu'
++import {
++  DropdownMenu,
++  DropdownMenuContent,
++  DropdownMenuItem,
++  DropdownMenuSeparator,
++  DropdownMenuTrigger,
++} from './ui/dropdown-menu'
++import { Tooltip } from './ui/tooltip'
++import {
++  CheckIcon,
++  ChevronDownIcon,
++  ChevronLeftIcon,
++  CommentIcon,
++  ExportIcon,
++  GearIcon,
++  ImportIcon,
++  PlusIcon,
++  PrototypeModeIcon,
++  SlidersIcon,
++  SparkIcon,
++} from './ui/icons'
++
++/**
++ * The reviewer layout's one bar (FULL_UI off, desktop, floating panels): what
++ * the top bar, the tool rail, the zoom pill and the side rail held, along the
++ * bottom of the canvas, icons only with their names on hover. Someone who
++ * reviews needs the canvas, the Hand to move around it, Comment, and the
++ * conversation with the agents; everything else is one click away, not in
++ * view.
++ *
++ * In order: back to the canvases, the canvas's name and id; Hand, Comment,
++ * Prototype mode and the rest of the tools in a list that opens upwards; the
++ * zoom (the Stage draws its own control into `zoomSlot`, keeping its menu and
++ * handlers); who is here; Import and Export; Comments and AI activity (the
++ * right-hand panel on that tab) and Connect AI; the design panel, settings
++ * and you. The page decides what each may do and passes null for what this
++ * person is not offered.
++ */
++export function CanvasDock({
++  title,
++  idMenu,
++  onBack,
++  zoomSlot,
++  me,
++  others,
++  onRenameSelf,
++  onImport,
++  onExport,
++  panelTab,
++  panelOpen,
++  onPanel,
++  onConnect,
++  inspector,
++  onSettings,
++}: {
++  title: ReactNode
++  idMenu: ReactNode
++  onBack: (() => void) | null
++  /** receives the element the zoom control is drawn into */
++  zoomSlot: (el: HTMLElement | null) => void
++  me: { name: string; image?: string; color: string }
++  others: Parameters<typeof PeerAvatars>[0]['others']
++  onRenameSelf: (() => void) | null
++  onImport: (() => void) | null
++  onExport: (() => void) | null
++  panelTab: PanelTab
++  panelOpen: boolean
++  /** open the right-hand panel on a tab, or close it if it shows that tab */
++  onPanel: ((tab: PanelTab) => void) | null
++  onConnect: (() => void) | null
++  inspector: { open: boolean; label: string; onToggle: () => void } | null
++  onSettings: (() => void) | null
++}) {
++  const t = useT()
++  const openThreads = useOpenThreadCount()
++  const working = useStore((s) => s.tasks.filter((x) => x.agentName && !x.endedAt && !x.failedAt).length)
++  /* a viewer or commenter's panel is Comments alone (ActivityPanel) */
++  const canEdit = useStore(canEditOpenCanvas)
++  const showing = (tab: PanelTab) => panelOpen && panelTab === tab
++  const side = 'top' as const
++
++  return (
++    <Toolbar
++      aria-label={t('canvas.dock')}
++      className="pointer-events-auto absolute bottom-3.5 left-1/2 z-[38] max-w-[calc(100%-28px)] -translate-x-1/2 overflow-x-auto"
++    >
++      {onBack && (
++        <ToolbarControl side={side} label={t('canvas.allCanvases')} onClick={onBack}>
++          <ChevronLeftIcon />
++        </ToolbarControl>
++      )}
++      <span className="flex min-w-0 max-w-[220px] items-center">{title}</span>
++      {idMenu}
++      <ToolbarDivider />
++      <DockTools />
++      <ToolbarDivider />
++      <span ref={zoomSlot} className="flex items-center" />
++      <ToolbarDivider />
++      <Tooltip label={others.map((p) => p.name).join(', ') || t('canvas.justYou')} side={side}>
++        <span className="flex items-center px-1">
++          <PresenceFace name={me.name} image={me.image} color={me.color} kind="user" />
++          <span className="-ml-[7px] flex items-center">
++            <PeerAvatars others={others} />
++          </span>
++        </span>
++      </Tooltip>
++      {(onImport || onExport) && <ToolbarDivider />}
++      {onImport && (
++        <ToolbarControl side={side} label={t('canvas.import')} onClick={onImport}>
++          <ImportIcon />
++        </ToolbarControl>
++      )}
++      {onExport && (
++        <ToolbarControl side={side} label={t('canvas.export')} onClick={onExport}>
++          <ExportIcon />
++        </ToolbarControl>
++      )}
++      {(onPanel || onConnect) && <ToolbarDivider />}
++      {onPanel && (
++        <>
++          <ToolbarControl
++            side={side}
++            label={openThreads ? t('canvas.commentsOpen', { open: openThreads }) : t('canvas.comments')}
++            aria-pressed={showing('comments')}
++            className="aria-pressed:bg-paper-deep aria-pressed:text-ink"
++            onClick={() => onPanel('comments')}
++          >
++            <CommentIcon />
++            {openThreads > 0 && <ToolbarDot className="bg-brand" />}
++          </ToolbarControl>
++          {canEdit && (
++            <ToolbarControl
++              side={side}
++              label={working ? t('canvas.agentsWorking', { working }) : t('canvas.aiActivity')}
++              aria-pressed={showing('tasks')}
++              className="aria-pressed:bg-paper-deep aria-pressed:text-ink"
++              onClick={() => onPanel('tasks')}
++            >
++              <SparkIcon />
++              {working > 0 && <ToolbarDot className="bg-success" />}
++            </ToolbarControl>
++          )}
++        </>
++      )}
++      {onConnect && (
++        <ToolbarControl
++          side={side}
++          label={t('canvas.connectAi')}
++          className="bg-ink text-paper hover:bg-ink hover:text-paper"
++          onClick={onConnect}
++        >
++          <PlusIcon />
++        </ToolbarControl>
++      )}
++      <ToolbarDivider />
++      {inspector && (
++        <ToolbarControl
++          side={side}
++          label={inspector.label}
++          aria-pressed={inspector.open}
++          className="aria-pressed:bg-paper-deep aria-pressed:text-ink"
++          onClick={inspector.onToggle}
++        >
++          <SlidersIcon />
++        </ToolbarControl>
++      )}
++      {onSettings && (
++        <ToolbarControl side={side} label={t('shell.settings')} onClick={onSettings}>
++          <GearIcon />
++        </ToolbarControl>
++      )}
++      {onRenameSelf && (
++        <ToolbarControl side={side} label={t('canvas.youAre', { name: me.name })} onClick={onRenameSelf}>
++          <PresenceFace name={me.name} image={me.image} color={me.color} kind="user" size={22} />
++        </ToolbarControl>
++      )}
++    </Toolbar>
++  )
++}
++
++/** Hand, Comment and Prototype mode, as the rail's foot had them, and every
++ *  other tool in a list that opens upwards. */
++function DockTools() {
++  const t = useT()
++  const tool = useStore((s) => s.tool)
++  const role = useStore(roleOf)
++  const prototypeMode = useStore((s) => s.prototypeMode)
++  const setTool = useStore((s) => s.setTool)
++  const label = (id: Tool) => {
++    const entry = TOOLS.find((e) => e.id === id)!
++    return t('stage.toolTooltip', { label: t(entry.label), key: entry.key })
++  }
++  const pressed = 'aria-pressed:bg-paper-deep aria-pressed:text-ink'
++  const listed = TOOLS.filter((e) => e.id !== 'zoom' && toolAllowed(e.id, role))
++  return (
++    <>
++      <ToolbarControl
++        side="top"
++        label={label('hand')}
++        aria-pressed={tool === 'hand'}
++        className={pressed}
++        onClick={() => setTool('hand')}
++      >
++        {TOOL_ICONS.hand}
++      </ToolbarControl>
++      {toolAllowed('comment', role) && (
++        <ToolbarControl
++          side="top"
++          label={label('comment')}
++          aria-pressed={tool === 'comment'}
++          className={pressed}
++          onClick={() => setTool('comment')}
++        >
++          {TOOL_ICONS.comment}
++        </ToolbarControl>
++      )}
++      <ToolbarControl
++        side="top"
++        label={t('stage.modePrototype')}
++        aria-pressed={prototypeMode}
++        className={pressed}
++        onClick={() => useStore.getState().setPrototypeMode(!prototypeMode)}
++      >
++        <PrototypeModeIcon />
++      </ToolbarControl>
++      {/* a tool picked from the list shows here, so the current one is always in view */}
++      {tool !== 'hand' && tool !== 'comment' && tool !== 'zoom' && (
++        <ToolbarControl side="top" label={label(tool)} aria-pressed className={pressed}>
++          {TOOL_ICONS[tool]}
++        </ToolbarControl>
++      )}
++      <DropdownMenu>
++        <Tooltip label={t('stage.moreTools')} side="top">
++          <DropdownMenuTrigger asChild>
++            <ToolbarButton aria-label={t('stage.moreTools')} className="data-[state=open]:bg-paper-deep">
++              <ChevronDownIcon className={cn('rotate-180')} />
++            </ToolbarButton>
++          </DropdownMenuTrigger>
++        </Tooltip>
++        <DropdownMenuContent side="top" align="start" width="sm">
++          {listed.map((entry) => (
++            <DropdownMenuItem key={entry.id} onSelect={() => setTool(entry.id)}>
++              {TOOL_ICONS[entry.id]}
++              {t(entry.label)}
++              {tool === entry.id ? <CheckIcon size="rail" className="ml-auto" /> : <MenuHint>{entry.key}</MenuHint>}
++            </DropdownMenuItem>
++          ))}
++          <DropdownMenuSeparator />
++          <DropdownMenuItem onSelect={() => useStore.getState().setPrototypeMode(!prototypeMode)}>
++            <PrototypeModeIcon size="rail" />
++            {t('stage.modePrototypeShort')}
++            {prototypeMode && <CheckIcon size="rail" className="ml-auto" />}
++          </DropdownMenuItem>
++        </DropdownMenuContent>
++      </DropdownMenu>
++    </>
++  )
++}
+diff --git a/src/components/LayersPanel.tsx b/src/components/LayersPanel.tsx
+index 0afd16d..69b320e 100644
+--- a/src/components/LayersPanel.tsx
++++ b/src/components/LayersPanel.tsx
+@@ -215,11 +215,23 @@ function visibleRows(frames: Frame[], query: string, expanded: Set<string>): Vis
+ /** The Layers rail: every frame on the canvas, opening into the element tree
+  *  of its HTML. Selection runs both ways — a row selects the element in the
+  *  frame, a click in the frame highlights its row. */
++/* the reviewer layout folds the Layers section under the pages by default;
++   whether it is open is this browser's choice (CanvasDock.tsx) */
++const LAYERS_SECTION_KEY = 'doop:layers-section'
++function readLayersSection(): boolean {
++  try {
++    return localStorage.getItem(LAYERS_SECTION_KEY) === '1'
++  } catch {
++    return false
++  }
++}
++
+ export function LayersPanel({
+   onAddFrame,
+   surface = 'floating',
+   onClose,
+   resize,
++  foldLayers = false,
+ }: {
+   onAddFrame: () => void
+   /* 'inline' when the panel is filling a mobile Sheet rather than floating */
+@@ -227,7 +239,22 @@ export function LayersPanel({
+   /** inline only: the sheet's close, in the collapse control's place */
+   onClose?: () => void
+   resize?: PanelResize
++  /** the reviewer layout: the Layers section can fold away under the pages,
++   *  and starts folded, since someone reviewing moves between pages and
++   *  frames rather than through a frame's layers */
++  foldLayers?: boolean
+ }) {
++  const [sectionOpen, setSectionOpen] = useState(readLayersSection)
++  const layersShown = !foldLayers || sectionOpen
++  function toggleSection() {
++    const next = !sectionOpen
++    setSectionOpen(next)
++    try {
++      localStorage.setItem(LAYERS_SECTION_KEY, next ? '1' : '0')
++    } catch {
++      /* the choice holds for this visit */
++    }
++  }
+   /* a row's pointerleave never fires if the panel goes away under it */
+   useEffect(() => () => useStore.getState().setHoveredLayer(null), [])
+   /* which of the panel's two faces shows: the layer tree, or the design
+@@ -523,7 +550,9 @@ export function LayersPanel({
+       surface={surface}
+       resize={resize}
+       className={cn(
+-        surface === 'floating' && 'top-2.5 bottom-3.5 left-3.5 w-[264px]',
++        surface === 'floating' && 'top-2.5 left-3.5 w-[264px]',
++        /* folded, the panel is as tall as its pages, not the window */
++        surface === 'floating' && (layersShown || tab !== 'layers' ? 'bottom-3.5' : 'max-h-[calc(100%-24px)]'),
+         surface === 'docked' && 'left-0 w-[264px] border-r',
+       )}
+     >
+@@ -565,8 +594,38 @@ export function LayersPanel({
+           {/* Figma's order: the pages at the top, the frames of the active page
+           under them, the search at the bottom within thumb's reach */}
+           <PagesPanel />
++          {!layersShown && (
++            <Button
++              variant="bare"
++              className="mx-2 mt-1 mb-2 h-9 flex-none justify-start gap-2 rounded-[7px] border-t border-line-soft px-2 font-medium text-ink hover:bg-paper-deep"
++              aria-expanded={false}
++              onClick={toggleSection}
++            >
++              <LayersIcon className="size-3.5 text-ink-faint" />
++              {t('panels.layersTitle')}
++              <ChevronRightIcon className="ml-auto size-3.5 text-ink-faint" />
++            </Button>
++          )}
++        </>
++      )}
++      {tab === 'layers' && layersShown && (
++        <>
+           <div className={cn('mt-1.5 flex h-6 flex-none items-center justify-between pr-2.5 pl-3.5', sectionHeading)}>
+-            <span data-slot="frame-section-heading" className={sectionHeading}>
++            <span data-slot="frame-section-heading" className={cn(sectionHeading, 'flex items-center gap-1')}>
++              {foldLayers && (
++                <Tooltip label={t('panels.layersHideSection')} side="bottom" align="start">
++                  <Button
++                    variant="bare"
++                    size="icon-sm"
++                    className={cn(sectionBtn, '-ml-1.5')}
++                    aria-label={t('panels.layersHideSection')}
++                    aria-expanded
++                    onClick={toggleSection}
++                  >
++                    <ChevronDownIcon className="size-3.5" />
++                  </Button>
++                </Tooltip>
++              )}
+               {t('panels.layersTitle')}
+             </span>
+             <span className="flex gap-1">
+diff --git a/src/components/Onboarding.tsx b/src/components/Onboarding.tsx
+index fbd2c53..5b88f6a 100644
+--- a/src/components/Onboarding.tsx
++++ b/src/components/Onboarding.tsx
+@@ -190,7 +190,7 @@ export function Onboarding({ canvasId }: { canvasId: string }) {
+        card always sits past it */
+     <div
+       className={cn(
+-        'pointer-events-auto absolute bottom-3.5 z-40 flex w-[340px] flex-col gap-3 rounded-panel bg-surface px-5 pt-4 pb-5 shadow-pop transition-[left] duration-150 max-md:right-4 max-md:bottom-4 max-md:left-auto',
++        'pointer-events-auto absolute bottom-[calc(var(--chrome-bottom,0px)+14px)] z-40 flex w-[340px] flex-col gap-3 rounded-panel bg-surface px-5 pt-4 pb-5 shadow-pop transition-[left] duration-150 max-md:right-4 max-md:bottom-4 max-md:left-auto',
+         docked
+           ? 'left-[var(--chrome-left,14px)]'
+           : 'left-[var(--rail-left,14px)] md:[@media(max-height:599px)]:left-[var(--chrome-left,14px)]',
+diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
+index a06823d..4bf0984 100644
+--- a/src/components/Stage.tsx
++++ b/src/components/Stage.tsx
+@@ -7,7 +7,7 @@ import type { Frame } from '../../shared/types'
+ import { usePageCanvas, currentPageCanvas } from '../lib/pages'
+ import { sendWs } from '../lib/ws'
+ import { throttle } from '../lib/throttle'
+-import { flushSync } from 'react-dom'
++import { createPortal, flushSync } from 'react-dom'
+ import { FrameSlot, HiddenFrameView } from './FrameView'
+ import { CanvasComments, type CanvasComposeAt } from './CanvasComments'
+ import { placeComposer } from '../lib/composerPlacement'
+@@ -155,7 +155,7 @@ function zoomCentered(el: HTMLElement, next: number) {
+   })
+ }
+ 
+-const TOOL_ICONS: Record<Tool, React.ReactNode> = {
++export const TOOL_ICONS: Record<Tool, React.ReactNode> = {
+   select: <CursorIcon />,
+   hand: <HandIcon />,
+   zoom: <ZoomInIcon />,
+@@ -209,6 +209,8 @@ export function Stage({
+   insets = NO_INSETS,
+   bounds,
+   docked = false,
++  toolsElsewhere = false,
++  zoomSlot = null,
+ }: {
+   onAddFrame: () => void
+   /** px the top bar, floating panels and islands cover at each of the
+@@ -220,6 +222,12 @@ export function Stage({
+   bounds?: StageInsets
+   /** the panels are docked, so the tool rail is a full-height column too */
+   docked?: boolean
++  /** the reviewer layout draws the tools in its dock (CanvasDock.tsx): no
++   *  tool rail here */
++  toolsElsewhere?: boolean
++  /** where the zoom control goes when it is part of the dock rather than
++   *  floating over the canvas */
++  zoomSlot?: HTMLElement | null
+ }) {
+   const ref = useRef<HTMLDivElement>(null)
+   /* read by the fit callbacks, which outlive a render */
+@@ -1416,7 +1424,7 @@ export function Stage({
+             'absolute bottom-[calc(8px+env(safe-area-inset-bottom))] left-1/2 z-[35] -translate-x-1/2 sm:bottom-4',
+             'md:top-[calc(var(--chrome-top,0px)+10px)] md:bottom-auto md:left-[var(--rail-left,14px)] md:translate-x-0 md:transition-[left] md:duration-150',
+             docked && 'md:top-[var(--chrome-top,0px)] md:bottom-0',
+-            uiHidden && 'hidden',
++            (uiHidden || toolsElsewhere) && 'hidden',
+           )}
+         >
+           {isDrawingTool(tool) && (
+@@ -1483,15 +1491,22 @@ export function Stage({
+           </Toolbar>
+         </div>
+ 
+-        <ZoomControls
+-          labelRef={zoomLabelRef}
+-          hidden={uiHidden}
+-          onZoomIn={() => ref.current && zoomCentered(ref.current, useStore.getState().viewport.zoom * 1.25)}
+-          onZoomOut={() => ref.current && zoomCentered(ref.current, useStore.getState().viewport.zoom / 1.25)}
+-          onZoomTo={(zoom) => ref.current && zoomCentered(ref.current, zoom)}
+-          onFit={fit}
+-          onFitSelection={fitSelection}
+-        />
++        {(() => {
++          /* the zoom keeps its handlers here, wherever it is drawn */
++          const zoom = (
++            <ZoomControls
++              labelRef={zoomLabelRef}
++              hidden={uiHidden}
++              inline={!!zoomSlot}
++              onZoomIn={() => ref.current && zoomCentered(ref.current, useStore.getState().viewport.zoom * 1.25)}
++              onZoomOut={() => ref.current && zoomCentered(ref.current, useStore.getState().viewport.zoom / 1.25)}
++              onZoomTo={(zoom) => ref.current && zoomCentered(ref.current, zoom)}
++              onFit={fit}
++              onFitSelection={fitSelection}
++            />
++          )
++          return zoomSlot ? createPortal(zoom, zoomSlot) : zoom
++        })()}
+ 
+         {canvas && (
+           <ContextMenuContent>
+diff --git a/src/components/ZoomControls.tsx b/src/components/ZoomControls.tsx
+index ab3a580..9d250ab 100644
+--- a/src/components/ZoomControls.tsx
++++ b/src/components/ZoomControls.tsx
+@@ -31,6 +31,7 @@ export function ZoomControls({
+   onZoomTo,
+   onFit,
+   onFitSelection,
++  inline = false,
+ }: {
+   labelRef: RefObject<HTMLSpanElement>
+   /** ⌘. has hidden the chrome: display:none, so the label ref stays mounted */
+@@ -40,6 +41,9 @@ export function ZoomControls({
+   onZoomTo: (zoom: number) => void
+   onFit: () => void
+   onFitSelection: () => void
++  /** drawn inside another bar (the reviewer layout's dock) rather than
++   *  floating on its own over the canvas */
++  inline?: boolean
+ }) {
+   const t = useT()
+   const isMobile = useIsMobile()
+@@ -69,12 +73,14 @@ export function ZoomControls({
+   return (
+     <Toolbar
+       className={cn(
+-        'absolute bottom-[calc(64px+env(safe-area-inset-bottom))] z-[35] h-9 gap-0.5 px-1 py-0 transition-[right] duration-150 ease-[ease] md:bottom-3.5',
++        inline && 'h-9 gap-0.5 bg-transparent p-0 shadow-none',
++        !inline &&
++          'absolute bottom-[calc(64px+env(safe-area-inset-bottom))] z-[35] h-9 gap-0.5 px-1 py-0 transition-[right] duration-150 ease-[ease] md:bottom-3.5',
+         /* on phones the tool strip runs along the bottom, with its drawing hint above it */
+-        drawing && 'max-md:bottom-[calc(124px+env(safe-area-inset-bottom))]',
++        !inline && drawing && 'max-md:bottom-[calc(124px+env(safe-area-inset-bottom))]',
+         /* beside the account island and whatever panels are open — the page
+            sets --chrome-right as they come and go */
+-        isMobile ? 'left-1/2 -translate-x-1/2' : 'right-[var(--chrome-right,12px)]',
++        !inline && (isMobile ? 'left-1/2 -translate-x-1/2' : 'right-[var(--chrome-right,12px)]'),
+         hidden && 'hidden',
+       )}
+     >
+diff --git a/src/lib/i18n/en/canvas.ts b/src/lib/i18n/en/canvas.ts
+index 56f521f..c3f2e23 100644
+--- a/src/lib/i18n/en/canvas.ts
++++ b/src/lib/i18n/en/canvas.ts
+@@ -14,6 +14,8 @@ export const canvas = {
+   /* top bar */
+   untitled: 'Untitled',
+   allCanvases: 'All canvases',
++  dock: 'Canvas dock',
++  aiActivity: 'AI activity',
+   readOnlyBadgeTitle: 'Your share link lets you look around but not change the design',
+   canComment: 'Can comment',
+   viewOnly: 'View only',
+diff --git a/src/lib/i18n/en/panels.ts b/src/lib/i18n/en/panels.ts
+index 333b0e0..67dfc16 100644
+--- a/src/lib/i18n/en/panels.ts
++++ b/src/lib/i18n/en/panels.ts
+@@ -3,6 +3,8 @@
+ export const panels = {
+   layersTitle: 'Layers',
+   layersCollapsePanel: 'Collapse panel',
++  layersShowSection: 'Show layers',
++  layersHideSection: 'Hide layers',
+   layersExpandPanel: 'Expand panel',
+   layersCollapseAll: 'Collapse all',
+   layersNewFrame: 'New frame',
+diff --git a/src/lib/i18n/en/stage.ts b/src/lib/i18n/en/stage.ts
+index 12e20b2..cf0fa9d 100644
+--- a/src/lib/i18n/en/stage.ts
++++ b/src/lib/i18n/en/stage.ts
+@@ -3,6 +3,8 @@
+ export const stage = {
+   /* the tool rail */
+   canvasTools: 'Canvas tools',
++  moreTools: 'More tools',
++  modePrototypeShort: 'Prototype mode',
+   toolTooltip: '{label} ({key})',
+   canvasMode: 'Canvas mode',
+   modeEdit: 'Edit mode',
+diff --git a/src/lib/i18n/pt-BR/canvas.ts b/src/lib/i18n/pt-BR/canvas.ts
+index 23cc279..844c5dc 100644
+--- a/src/lib/i18n/pt-BR/canvas.ts
++++ b/src/lib/i18n/pt-BR/canvas.ts
+@@ -13,6 +13,8 @@ export const canvas: Catalog['canvas'] = {
+ 
+   untitled: 'Sem título',
+   allCanvases: 'Todos os canvases',
++  dock: 'Barra do canvas',
++  aiActivity: 'Atividade da IA',
+   readOnlyBadgeTitle: 'Seu link de compartilhamento permite explorar, mas não alterar o design',
+   canComment: 'Pode comentar',
+   viewOnly: 'Somente visualização',
+diff --git a/src/lib/i18n/pt-BR/panels.ts b/src/lib/i18n/pt-BR/panels.ts
+index 304629a..531d94a 100644
+--- a/src/lib/i18n/pt-BR/panels.ts
++++ b/src/lib/i18n/pt-BR/panels.ts
+@@ -3,6 +3,8 @@ import type { Catalog } from '..'
+ export const panels: Catalog['panels'] = {
+   layersTitle: 'Camadas',
+   layersCollapsePanel: 'Recolher painel',
++  layersShowSection: 'Mostrar camadas',
++  layersHideSection: 'Ocultar camadas',
+   layersExpandPanel: 'Expandir painel',
+   layersCollapseAll: 'Recolher tudo',
+   layersNewFrame: 'Novo frame',
+diff --git a/src/lib/i18n/pt-BR/stage.ts b/src/lib/i18n/pt-BR/stage.ts
+index 762a29c..046d238 100644
+--- a/src/lib/i18n/pt-BR/stage.ts
++++ b/src/lib/i18n/pt-BR/stage.ts
+@@ -3,6 +3,8 @@ import type { Catalog } from '..'
+ export const stage: Catalog['stage'] = {
+   /* the tool rail */
+   canvasTools: 'Ferramentas do canvas',
++  moreTools: 'Mais ferramentas',
++  modePrototypeShort: 'Modo protótipo',
+   toolTooltip: '{label} ({key})',
+   canvasMode: 'Modo do canvas',
+   modeEdit: 'Modo de edição',
+diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
+index c03c4ea..64a5db6 100644
+--- a/src/pages/CanvasPage.tsx
++++ b/src/pages/CanvasPage.tsx
+@@ -49,6 +49,7 @@ import { ConnectModal } from '../components/ConnectModal'
+ import { LimitWall, isResidentLimit } from '../components/TeamAllowance'
+ import { WorkingNow } from '../components/WorkingNow'
+ import { MobilePanelTabs, SideRail } from '../components/SideRail'
++import { CanvasDock } from '../components/CanvasDock'
+ import { LayersPanel, LayersRailToggle } from '../components/LayersPanel'
+ import { Onboarding } from '../components/Onboarding'
+ import { AccessBanner } from '../components/AccessBanner'
+@@ -176,6 +177,8 @@ const DOCKED_BAR_H = 44
+ const FLOAT_GAP = 10
+ /* the narrowest stage docked panels squeeze it to, while their minimums allow */
+ const DOCKED_STAGE_MIN = 320
++/* the reviewer layout's dock: its height and the gaps above and below it */
++const DOCK_CLEAR = 66
+ const AGENTS_W = 280
+ const PANEL_WIDTH_KEY = 'doop:canvas-panel-widths'
+ 
+@@ -291,7 +294,10 @@ export function CanvasPage({
+   /* open on desktop for anyone signed in: an editor gets the Agents panel,
+      a viewer or commenter its Comments tab alone (ActivityPanel). A guest has
+      no panel at all — the team's conversation is not sent to them. */
+-  const [showActivity, setShowActivity] = useState(() => !guest && !window.matchMedia('(max-width: 900px)').matches)
++  /* the reviewer layout (FULL_UI off) keeps it closed until the dock opens it */
++  const [showActivity, setShowActivity] = useState(
++    () => FULL_UI && !guest && !window.matchMedia('(max-width: 900px)').matches,
++  )
+   /* ?connect=1 (the "connect your agent" email) lands on the Connect AI
+      modal; the flag comes off the URL once the page is up so a reload or a
+      copied link does not reopen it */
+@@ -727,6 +733,16 @@ export function CanvasPage({
+   /* docked panels: the stage sits between the columns, under a solid bar */
+   const docked = usePanelLayout() === 'docked' && !isMobile
+   const panelSurface = docked ? 'docked' : 'floating'
++  /* The reviewer layout (FULL_UI off, a desktop, floating panels): no top
++     bar, no tool rail, no side rail; one dock along the bottom holds them
++     (CanvasDock.tsx), the Layers section folds under the pages, the right
++     panel starts closed and the Hand is the first tool. Present stays at the
++     top right. Phones and the docked layout keep their own. */
++  const reviewerLayout = !FULL_UI && !isMobile && !docked
++  const [zoomSlot, setZoomSlot] = useState<HTMLElement | null>(null)
++  useEffect(() => {
++    if (reviewerLayout) useStore.getState().setTool('hand')
++  }, [canvasId, reviewerLayout])
+   /* docked, the rulers sit on the stage's own edges inside the columns, so
+      nothing steps in past them */
+   const rulerInset = rulersShown && !docked ? RULER_PX : 0
+@@ -785,19 +801,23 @@ export function CanvasPage({
+   }, [rulers, uiHidden, hideUiActive, layersOpen, showActivity, hasSelection])
+   useEffect(() => () => syncViewMenu(NO_CANVAS), [])
+   const chromeVars = {
+-    '--chrome-top': isMobile ? '0px' : `${(docked ? DOCKED_BAR_H : BAR_H) + rulerInset}px`,
++    '--chrome-top': isMobile ? '0px' : `${(reviewerLayout ? 0 : docked ? DOCKED_BAR_H : BAR_H) + rulerInset}px`,
+     '--rail-left': `${chrome.toolRail + rulerInset}px`,
+     /* what floats over the canvas (the zoom pill, toasts) keeps clear of a
+        docked column's edge */
+     '--chrome-left': `${chrome.left + (docked ? FLOAT_GAP : 0)}px`,
+-    '--chrome-right': `${chrome.right + (docked ? FLOAT_GAP : 0)}px`,
++    '--chrome-right': `${reviewerLayout ? chrome.island : chrome.right + (docked ? FLOAT_GAP : 0)}px`,
++    /* what floats at the bottom (the onboarding card) keeps clear of the dock */
++    '--chrome-bottom': reviewerLayout ? `${DOCK_CLEAR}px` : '0px',
+   } as CSSProperties
+   /* what the bar and the floating chrome cover of the stage, which spans the
+      whole window; phones open their panels as sheets over everything */
+   const stageInsets: StageInsets =
+     isMobile || uiHidden || docked
+       ? NO_INSETS
+-      : { top: BAR_H + rulerInset, right: chrome.right, bottom: 0, left: chrome.left + rulerInset }
++      : reviewerLayout
++        ? { top: rulerInset, right: chrome.island, bottom: DOCK_CLEAR, left: chrome.toolRail + rulerInset }
++        : { top: BAR_H + rulerInset, right: chrome.right, bottom: 0, left: chrome.left + rulerInset }
+   /* docked, the stage is the gap between the bar and the columns; ⌘. gives
+      it the whole window back */
+   const stageBounds: StageInsets | undefined =
+@@ -829,6 +849,50 @@ export function CanvasPage({
+     )
+   }
+ 
++  /* Present: in the top bar, or on its own at the top right in the reviewer layout */
++  const presentButton = (
++    <Tooltip
++      label={
++        selectedId
++          ? `${t('canvas.presentFromFrame')} · ${PRESENT_SHORTCUT_HINT}`
++          : playFrom
++            ? `${t('canvas.presentPrototype')} · ${PRESENT_SHORTCUT_HINT}`
++            : t('canvas.addFrameToPresent')
++      }
++      side="bottom"
++    >
++      <span className="inline-flex">
++        <Button
++          variant="bare"
++          size="icon-sm"
++          className={barPillIconBtn}
++          aria-label={t('canvas.presentPrototypeLabel')}
++          disabled={!playFrom}
++          onClick={() => setPresenting(playFrom)}
++        >
++          <PlayIcon className="size-3.5" />
++        </Button>
++      </span>
++    </Tooltip>
++  )
++  /* the right-hand panels end above the dock rather than under it */
++  const belowDock: CSSProperties = reviewerLayout ? { bottom: DOCK_CLEAR } : {}
++  /* the properties slot (frame Inspector, element panel or Page panel): the
++     side rail's sliders, and the dock's in the reviewer layout */
++  function toggleProperties() {
++    const s = useStore.getState()
++    if (!selectedFrame) {
++      s.setPagePanelOpen(!s.pagePanelOpen)
++      return
++    }
++    if (propertiesShown) {
++      /* the element panel and the inspector share the slot —
++         hiding it closes whichever is showing */
++      s.setElementPanelOpen(false)
++      s.setInspectorOpen(false)
++    } else s.setInspectorOpen(true)
++  }
++
+   return (
+     /* --app-inset is 0 normally; the impersonation shell raises it so this
+        fixed layer starts below the banner instead of under it */
+@@ -845,7 +909,7 @@ export function CanvasPage({
+           bar's pills float below it */}
+       <TopBar
+         variant={docked ? 'docked' : 'canvas'}
+-        className={cn(uiHidden && 'hidden')}
++        className={cn((uiHidden || reviewerLayout) && 'hidden')}
+         style={rulerInset ? { top: rulerInset, left: rulerInset } : undefined}
+       >
+         <div className="flex min-w-0 items-center gap-2 max-xs:basis-full">
+@@ -924,29 +988,7 @@ export function CanvasPage({
+                 {t('canvas.share')}
+               </Button>
+             )}
+-            <Tooltip
+-              label={
+-                selectedId
+-                  ? `${t('canvas.presentFromFrame')} · ${PRESENT_SHORTCUT_HINT}`
+-                  : playFrom
+-                    ? `${t('canvas.presentPrototype')} · ${PRESENT_SHORTCUT_HINT}`
+-                    : t('canvas.addFrameToPresent')
+-              }
+-              side="bottom"
+-            >
+-              <span className="inline-flex">
+-                <Button
+-                  variant="bare"
+-                  size="icon-sm"
+-                  className={barPillIconBtn}
+-                  aria-label={t('canvas.presentPrototypeLabel')}
+-                  disabled={!playFrom}
+-                  onClick={() => setPresenting(playFrom)}
+-                >
+-                  <PlayIcon className="size-3.5" />
+-                </Button>
+-              </span>
+-            </Tooltip>
++            {presentButton}
+           </BarPill>
+           {/* the bar's one black action — it opens the MCP connection modal;
+               an agent connected through a view or comment link could not
+@@ -1001,7 +1043,14 @@ export function CanvasPage({
+           edge; the floating chrome gets its own layer that starts below the
+           bar, so every panel offset stays measured from there */}
+       <div className="absolute inset-0 overflow-hidden" style={chromeVars}>
+-        <Stage onAddFrame={addFrame} insets={stageInsets} bounds={stageBounds} docked={docked} />
++        <Stage
++          onAddFrame={addFrame}
++          insets={stageInsets}
++          bounds={stageBounds}
++          docked={docked}
++          toolsElsewhere={reviewerLayout}
++          zoomSlot={reviewerLayout ? zoomSlot : null}
++        />
+         <div
+           className={cn(
+             'pointer-events-none absolute inset-x-0 bottom-0 top-[50px] max-md:top-14 max-xs:top-[100px]',
+@@ -1009,7 +1058,7 @@ export function CanvasPage({
+           )}
+           /* panel offsets are measured from this layer, so moving it past
+              the rulers moves every panel with it */
+-          style={rulerInset || docked ? { top: 'var(--chrome-top)', left: rulerInset } : undefined}
++          style={rulerInset || docked || reviewerLayout ? { top: 'var(--chrome-top)', left: rulerInset } : undefined}
+         >
+           <div className="pointer-events-none absolute top-3.5 right-[var(--chrome-right)] z-30 flex flex-col items-end gap-2 transition-[right] duration-150 [&>*]:pointer-events-auto max-md:top-[56px] max-md:right-2 max-md:left-2">
+             {pendingProposal && mutedProposal !== pendingProposal.id && !(showActivity && panelTab === 'memory') && (
+@@ -1065,6 +1114,7 @@ export function CanvasPage({
+               <LayersPanel
+                 onAddFrame={addFrame}
+                 surface={panelSurface}
++                foldLayers={reviewerLayout}
+                 resize={{
+                   label: t('canvas.resizeLayers'),
+                   edge: 'right',
+@@ -1096,19 +1146,25 @@ export function CanvasPage({
+               frame={selectedFrame}
+               selector={panelElement.selector}
+               surface={panelSurface}
+-              style={{ right: chrome.properties }}
++              style={{ right: chrome.properties, ...belowDock }}
+             />
+           )}
+           {!isMobile && !readOnly && selectedFrame && inspectorOpen && !panelElement && !deferPanel && (
+-            <Inspector frame={selectedFrame} surface={panelSurface} style={{ right: chrome.properties }} />
++            <Inspector
++              frame={selectedFrame}
++              surface={panelSurface}
++              style={{ right: chrome.properties, ...belowDock }}
++            />
++          )}
++          {!isMobile && pageShown && (
++            <PagePanel surface={panelSurface} style={{ right: chrome.properties, ...belowDock }} />
+           )}
+-          {!isMobile && pageShown && <PagePanel surface={panelSurface} style={{ right: chrome.properties }} />}
+           {!isMobile && showActivity && (
+             <ActivityPanel
+               canvasId={canvasId}
+               onClose={() => setShowActivity(false)}
+               surface={panelSurface}
+-              style={{ right: docked ? 0 : EDGE }}
++              style={{ right: docked ? 0 : EDGE, ...belowDock }}
+               resize={{
+                 label: t('canvas.resizeAgents'),
+                 edge: 'left',
+@@ -1120,7 +1176,7 @@ export function CanvasPage({
+               }}
+             />
+           )}
+-          {!isMobile && (
++          {!isMobile && !reviewerLayout && (
+             <SideRail
+               style={{ right: chrome.island }}
+               docked={docked}
+@@ -1129,24 +1185,52 @@ export function CanvasPage({
+               inspectorOpen={propertiesShown}
+               inspectorAvailable={!readOnly}
+               inspectTarget={selectedFrame ? 'frame' : 'page'}
+-              onToggleInspector={() => {
+-                const s = useStore.getState()
+-                if (!selectedFrame) {
+-                  s.setPagePanelOpen(!s.pagePanelOpen)
+-                  return
+-                }
+-                if (propertiesShown) {
+-                  /* the element panel and the inspector share the slot —
+-                     hiding it closes whichever is showing */
+-                  s.setElementPanelOpen(false)
+-                  s.setInspectorOpen(false)
+-                } else s.setInspectorOpen(true)
+-              }}
++              onToggleInspector={toggleProperties}
+               me={meFace}
+               onRenameSelf={() => setRenaming(true)}
+               guest={guest}
+             />
+           )}
++          {reviewerLayout && (
++            <>
++              <BarPill className="pointer-events-auto absolute top-2.5 right-[var(--chrome-right)] z-[38] transition-[right] duration-150">
++                {presentButton}
++              </BarPill>
++              <CanvasDock
++                title={<CanvasName readOnly={readOnly} />}
++                idMenu={<CanvasIdMenu canvasId={canvasId} onCopied={showToast} compact />}
++                onBack={guest ? null : () => navigate('/')}
++                zoomSlot={setZoomSlot}
++                me={meFace}
++                others={others}
++                onRenameSelf={guest ? null : () => setRenaming(true)}
++                onImport={!guest && !readOnly ? () => setShowImport(true) : null}
++                onExport={guest ? null : openExport}
++                panelTab={panelTab}
++                panelOpen={showActivity}
++                onPanel={
++                  guest
++                    ? null
++                    : (tab) => {
++                        if (showActivity && panelTab === tab) return setShowActivity(false)
++                        useStore.getState().setPanelTab(tab)
++                        setShowActivity(true)
++                      }
++                }
++                onConnect={readOnly ? null : openConnect}
++                inspector={
++                  readOnly
++                    ? null
++                    : {
++                        open: propertiesShown,
++                        label: selectedFrame ? t('canvas.inspectFrame') : t('canvas.pageSettings'),
++                        onToggle: toggleProperties,
++                      }
++                }
++                onSettings={guest ? null : () => navigate('/settings')}
++              />
++            </>
++          )}
+         </div>
+       </div>
+ 
+@@ -2349,7 +2433,16 @@ function GithubSection({
+ 
+ /* The id badge in the bar opens a menu that copies the id (what agents hand
+    the MCP tools) or the canvas link. */
+-function CanvasIdMenu({ canvasId, onCopied }: { canvasId: string; onCopied: (msg: string) => void }) {
++function CanvasIdMenu({
++  canvasId,
++  onCopied,
++  compact = false,
++}: {
++  canvasId: string
++  onCopied: (msg: string) => void
++  /** the dock's form: a # that shows the id on hover, the menu above it */
++  compact?: boolean
++}) {
+   const t = useT()
+   async function copy(text: string, msg: string) {
+     try {
+@@ -2368,13 +2461,17 @@ function CanvasIdMenu({ canvasId, onCopied }: { canvasId: string; onCopied: (msg
+           layout="inline"
+           focus="ring"
+           aria-label={t('canvas.canvasIdMenu')}
+-          title={t('canvas.canvasIdTitle')}
+-          className={cn(badgeVariants({ interactive: true }), 'max-md:hidden data-[state=open]:bg-current/10')}
++          title={compact ? `${canvasId} · ${t('canvas.canvasIdTitle')}` : t('canvas.canvasIdTitle')}
++          className={
++            compact
++              ? 'grid size-7 place-items-center rounded-[7px] font-mono text-[13px] text-ink-soft hover:bg-paper-deep hover:text-ink data-[state=open]:bg-paper-deep'
++              : cn(badgeVariants({ interactive: true }), 'max-md:hidden data-[state=open]:bg-current/10')
++          }
+         >
+-          {canvasId}
++          {compact ? '#' : canvasId}
+         </Pressable>
+       </DropdownMenuTrigger>
+-      <DropdownMenuContent side="bottom" align="start" width="sm">
++      <DropdownMenuContent side={compact ? 'top' : 'bottom'} align="start" width="sm">
+         <DropdownMenuItem onSelect={() => void copy(canvasId, t('canvas.idCopied'))}>
+           <CopyIcon size="rail" />
+           {t('canvas.copyId')}
+diff --git a/tests/browser.ts b/tests/browser.ts
+index af03ceb..3df2884 100644
+--- a/tests/browser.ts
++++ b/tests/browser.ts
+@@ -139,6 +139,17 @@ export async function openBrowser(): Promise<TestBrowser> {
+   return {
+     async newPage() {
+       const page = await context.newPage()
++      /* the tests drive the editor's full layout (the top bar, the tool rail,
++         the select tool first), which is what they were written against; this
++         build's reviewer layout (FULL_UI off, CanvasDock.tsx) has its own test,
++         which sets doop:full-ui to off before the page loads */
++      await page.evaluateOnNewDocument(() => {
++        try {
++          if (localStorage.getItem('doop:full-ui') === null) localStorage.setItem('doop:full-ui', 'on')
++        } catch {
++          /* no storage on this page */
++        }
++      })
+       page.setDefaultTimeout(STEP_TIMEOUT_MS)
+       page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
+       /* files running side by side each have a window in the one browser, and
+diff --git a/tests/reviewerLayoutBrowser.test.ts b/tests/reviewerLayoutBrowser.test.ts
+new file mode 100644
+index 0000000..6dc4ae9
+--- /dev/null
++++ b/tests/reviewerLayoutBrowser.test.ts
+@@ -0,0 +1,123 @@
++import { afterAll, beforeAll, describe, expect, it } from 'vitest'
++import type { Page } from 'puppeteer-core'
++import type { Frame } from '../shared/types'
++import { findBrowserPath } from '../server/screenshot'
++import { fixtureUrl, openBrowser, type TestBrowser } from './browser'
++
++/* The reviewer layout (FULL_UI off, a desktop, floating panels): one dock
++   along the bottom instead of the top bar, the tool rail and the side rail;
++   the Hand first; Layers folded under the pages; the right-hand panel opened
++   from the dock. The editor page itself, mounted by the clipboard fixture. */
++
++/* the harness's own type is declared in canvasClipboardBrowser.test.ts */
++type Harness = { canvasClipboardHarness: { seed: (frames: Frame[]) => void } }
++
++const FRAME: Frame = {
++  id: 'f',
++  canvasId: 'c',
++  name: 'Frame',
++  x: 0,
++  y: 0,
++  width: 400,
++  height: 300,
++  html: '<!doctype html><html><body><h1>Hello</h1></body></html>',
++  createdAt: 0,
++  updatedAt: 0,
++  updatedBy: 'Tester',
++}
++
++const store = (page: Page, expr: string) =>
++  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { const s = useStore.getState(); return ${expr} })`)
++const dock = '[aria-label="Canvas dock"]'
++const shown = (page: Page, selector: string) =>
++  page.evaluate((sel) => {
++    const el = document.querySelector<HTMLElement>(sel)
++    return !!el && el.offsetParent !== null
++  }, selector)
++
++async function open(page: Page, fullUi: 'on' | 'off') {
++  /* runs after the rig's default (on), so it decides */
++  await page.evaluateOnNewDocument((value) => localStorage.setItem('doop:full-ui', value), fullUi)
++  await page.goto(fixtureUrl('canvasClipboard.html'))
++  await page.waitForFunction(
++    () => !!(window as unknown as Harness).canvasClipboardHarness && !!document.querySelector('.stage'),
++  )
++  await page.evaluate((frame) => {
++    localStorage.removeItem('doop:layers-section')
++    ;(window as unknown as Harness).canvasClipboardHarness.seed([frame])
++  }, FRAME)
++  /* the harness hides the chrome and closes Layers; this test is about them */
++  await store(page, `(useStore.setState({ uiHidden: false }), s.setLayersOpen(true), true)`)
++}
++
++describe.skipIf(!findBrowserPath())('the reviewer layout', () => {
++  let browser: TestBrowser
++  let page: Page
++  beforeAll(async () => {
++    browser = await openBrowser()
++    page = await browser.newPage()
++    await page.setViewport({ width: 1440, height: 900 })
++    await open(page, 'off')
++  }, 60_000)
++  afterAll(async () => {
++    await page?.close()
++    await browser?.close()
++  })
++
++  it('puts the chrome in one dock and starts on the Hand', async () => {
++    await page.waitForSelector(dock)
++    expect(await shown(page, '[aria-label="Canvas tools"]')).toBe(false)
++    expect(await store(page, 's.tool')).toBe('hand')
++    expect(await page.$eval(dock, (el) => !!el.querySelector('[aria-label="Zoom out"]'))).toBe(true)
++  })
++
++  it('folds Layers under the pages, and remembers when it is opened', async () => {
++    await page.waitForSelector('button[aria-expanded="false"]')
++    expect(await page.$('[data-slot="frame-section-heading"]')).toBe(null)
++    await page.evaluate(() =>
++      [...document.querySelectorAll<HTMLButtonElement>('button[aria-expanded="false"]')]
++        .find((b) => b.textContent?.trim() === 'Layers')!
++        .click(),
++    )
++    await page.waitForSelector('[data-slot="frame-section-heading"]')
++    expect(await page.evaluate(() => localStorage.getItem('doop:layers-section'))).toBe('1')
++  })
++
++  it('lists every tool upwards and shows the one picked in the dock', async () => {
++    await page.click('[aria-label="More tools"]')
++    await page.waitForSelector('[role="menuitem"]')
++    const select = (await page.$$('[role="menuitem"]')).at(0)!
++    expect(await select.evaluate((el) => el.textContent)).toContain('Select')
++    await select.click()
++    expect(await store(page, 's.tool')).toBe('select')
++    expect(await page.$eval(dock, (el) => !!el.querySelector('[aria-label^="Select"][aria-pressed="true"]'))).toBe(true)
++  })
++
++  it('opens the comments from the dock and closes them again', async () => {
++    const comments = `${dock} [aria-label^="Comments"]`
++    expect(await page.$eval(comments, (el) => el.getAttribute('aria-pressed'))).toBe('false')
++    await page.click(comments)
++    await page.waitForFunction(
++      (sel) => document.querySelector(sel)?.getAttribute('aria-pressed') === 'true',
++      {},
++      comments,
++    )
++    expect(await store(page, 's.panelTab')).toBe('comments')
++    await page.click(comments)
++    await page.waitForFunction(
++      (sel) => document.querySelector(sel)?.getAttribute('aria-pressed') === 'false',
++      {},
++      comments,
++    )
++  })
++
++  it('keeps the full layout when doop:full-ui is on', async () => {
++    const full = await browser.newPage()
++    await full.setViewport({ width: 1440, height: 900 })
++    await open(full, 'on')
++    await full.waitForSelector('[aria-label="Canvas tools"]')
++    expect(await full.$(dock)).toBe(null)
++    expect(await store(full, 's.tool')).toBe('select')
++    await full.close()
++  })
++})

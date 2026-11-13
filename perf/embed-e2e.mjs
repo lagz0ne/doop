@@ -43,7 +43,7 @@ try {
   await p.screenshot({ path: `${out}-1-open.png` });
 
   // request changes, pinned on the footer line
-  await panel.click(".pf .btn:not(.pri)");
+  await panel.click(".dock .btn:not(.pri)");
   const box = await panel.evaluate(() => { const r = document.querySelector(".sheet").getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width }; });
   const k = box.w / 1440;
   await panel.click(".shield", { offset: { x: 532 * k, y: 528 * k } }); await sleep(600);
@@ -61,13 +61,13 @@ try {
   await owner(`/frames/${frameId}`, { method: "PATCH", body: JSON.stringify({ html: f.html.replace("Link works 7 days", "Link expires Wed 19 Nov (7 days)"), expectedUpdatedAt: f.updatedAt }) });
   await panel.waitForFunction(() => document.querySelector(".badge")?.textContent.includes("Revised since"), { timeout: 10000 });
   step(`panel shows: ${await panel.$eval(".badge", (e) => e.textContent)}`);
-  await panel.click(".seg button:nth-child(2)");
+  await panel.click('.dock [aria-label^="Compare"]');
   await panel.waitForSelector(".changes", { timeout: 10000 }); await sleep(2500);
   step(`compare: ${await panel.$eval(".changes", (e) => e.textContent.replace(/\s+/g, " ").trim())}`);
   await p.screenshot({ path: `${out}-4-compare.png` });
 
   // approve
-  await panel.click(".pf .btn.pri");
+  await panel.click(".dock .btn.pri");
   await p.waitForFunction(() => window.__msgs.some((m) => m.type === "doop:verdict" && m.status === "ready_for_dev"), { timeout: 10000 });
   await sleep(1200);
   f = await frameNow();
