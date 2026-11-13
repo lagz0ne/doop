@@ -2,10 +2,10 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 const { TraceMap, originalPositionFor } = createRequire(new URL("../build/doop/package.json", import.meta.url))("@jridgewell/trace-mapping");
-const dist = new URL("../build/doop/dist/assets/", import.meta.url).pathname;
+const dist = new URL(`../build/${process.env.TREE || "doop"}/dist/assets/`, import.meta.url).pathname; // TREE=perf for another build tree
 const maps = {}; for (const f of readdirSync(dist)) if (f.endsWith(".js.map")) maps[f.slice(0, -4)] = new TraceMap(readFileSync(dist + f, "utf8"));
 const tr = JSON.parse(readFileSync(process.argv[2], "utf8")); const ev = tr.traceEvents || tr; const only = process.argv[3]; const depth = +(process.argv[4] || 0);
-const marks = {}; for (const e of ev) if (e.cat?.includes("blink.user_timing") && /^S\d-/.test(e.name)) marks[e.name] = e.ts;
+const marks = {}; for (const e of ev) if (e.cat?.includes("blink.user_timing") && /^[A-Z]\d-/.test(e.name)) marks[e.name] = e.ts;
 const prof = {};
 for (const e of ev) if (e.name === "ProfileChunk") { const id = e.pid + ":" + e.id; const cp = e.args.data.cpuProfile || {}; const P = prof[id] || (prof[id] = { nodes: new Map(), samples: [], dts: [], t: null }); for (const n of cp.nodes || []) P.nodes.set(n.id, n); (cp.samples || []).forEach((s, i) => { P.samples.push(s); P.dts.push(e.args.data.timeDeltas[i]); }); }
 for (const e of ev) if (e.name === "Profile") { const id = e.pid + ":" + e.id; if (prof[id]) prof[id].t = e.args.data.startTime; }

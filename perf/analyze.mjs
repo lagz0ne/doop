@@ -4,7 +4,7 @@ const tr = JSON.parse(readFileSync(process.argv[2], "utf8")); const ev = tr.trac
 const only = process.argv[3];
 const pname = {}, tname = {};
 for (const e of ev) { if (e.ph === "M" && e.name === "process_name") pname[e.pid] = e.args.name; if (e.ph === "M" && e.name === "thread_name") tname[e.pid + ":" + e.tid] = e.args.name; if (e.ph === "M" && e.name === "process_labels") pname[e.pid] += " [" + String(e.args.labels).slice(0, 40) + "]"; }
-const marks = {}; for (const e of ev) if (e.cat?.includes("blink.user_timing") && /^S\d-/.test(e.name)) marks[e.name] = e.ts;
+const marks = {}; for (const e of ev) if (e.cat?.includes("blink.user_timing") && /^[A-Z]\d-/.test(e.name)) marks[e.name] = e.ts;
 const scen = [...new Set(Object.keys(marks).map((k) => k.split(":")[0]))].sort();
 const X = ev.filter((e) => e.ph === "X" && e.dur !== undefined);
 const byThread = new Map(); for (const e of X) { const k = e.pid + ":" + e.tid; (byThread.get(k) || byThread.set(k, []).get(k)).push(e); }
