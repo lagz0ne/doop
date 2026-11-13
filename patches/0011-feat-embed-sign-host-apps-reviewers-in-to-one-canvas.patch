@@ -64,20 +64,20 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  server/env.ts                                |    3 +
  server/index.ts                              |   56 +-
  server/operator.ts                           |    7 +-
- tests/embed.test.ts                          |  260 ++
- 13 files changed, 5045 insertions(+), 18 deletions(-)
+ tests/embed.test.ts                          |  300 ++
+ 13 files changed, 5085 insertions(+), 18 deletions(-)
  create mode 100644 server/db/migrations/0049_embed_session.sql
  create mode 100644 server/db/migrations/meta/0049_snapshot.json
  create mode 100644 server/embed.ts
  create mode 100644 tests/embed.test.ts
 
 diff --git a/.context/TECHSTACK.md b/.context/TECHSTACK.md
-index 625af8a..13b1768 100644
+index 2f871de..c17e09d 100644
 --- a/.context/TECHSTACK.md
 +++ b/.context/TECHSTACK.md
-@@ -649,6 +649,24 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
-   changes beside the approval switch. Tests: `reviewVerdicts.test.ts`, `frameApprovalControl.test.tsx`,
-   `canvasRole.test.ts`.
+@@ -656,6 +656,24 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
+   own record (`priorVerdicts`). Tests: `reviewVerdicts.test.ts`, `approvalHistory.test.ts`,
+   `frameApprovalControl.test.tsx`, `canvasRole.test.ts`.
  
 +- Embedded review panel sign-in (`server/embed.ts`): a host app signs its user in with an HS256
 +  token (`iss` a key of `DOOP_EMBED_HOSTS`, `aud` "doop", `sub`, `name`, `canvas`, `role` view /
@@ -5101,10 +5101,10 @@ index e9762ea..db86911 100644
      for (const c of store.allCanvases()) {
 diff --git a/tests/embed.test.ts b/tests/embed.test.ts
 new file mode 100644
-index 0000000..3c6cd5d
+index 0000000..3aa4cd4
 --- /dev/null
 +++ b/tests/embed.test.ts
-@@ -0,0 +1,260 @@
+@@ -0,0 +1,300 @@
 +import { SignJWT } from 'jose'
 +import WebSocket from 'ws'
 +import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
@@ -5265,6 +5265,46 @@ index 0000000..3c6cd5d
 +    await expect.poll(() => room.messages.some((m) => m.type === 'comment'), { timeout: 8000 }).toBe(true)
 +    expect(room.messages.some((m) => m.type === 'guidelines' || m.type === 'activity')).toBe(false)
 +    room.close()
++  })
++
++  it('gives a reviewer the verdict history over REST, the room init and live updates', async () => {
++    type Approval = { verdict?: string; history?: { status: string; versionId?: string }[] }
++    type WithFrames = { frames: { id: string; updatedAt: number; approval?: Approval | null }[] }
++    const { client } = await exchange(await token())
++    const room = join(client, canvasId)
++    const init = (await room.ready) as { canvas: WithFrames }
++    expect(init.canvas.frames.find((f) => f.id === frameId)!.approval?.history?.length).toBeGreaterThan(0)
++
++    const current = ((await (await owner.get(`/api/canvases/${canvasId}`)).json()) as WithFrames).frames.find(
++      (f) => f.id === frameId,
++    )!
++    const res = await owner.req(`/api/frames/${frameId}/approval`, {
++      method: 'PUT',
++      body: JSON.stringify({ status: 'ready_for_dev', expectedUpdatedAt: current.updatedAt }),
++    })
++    expect(res.status, await res.clone().text()).toBe(200)
++    await expect
++      .poll(() =>
++        room.messages.some(
++          (m) =>
++            m.type === 'frame:updated' &&
++            (m as { frame?: { approval?: Approval } }).frame?.approval?.history?.at(-1)?.status === 'ready_for_dev',
++        ),
++      )
++      .toBe(true)
++    room.close()
++
++    const read = ((await (await client.get(`/api/canvases/${canvasId}`)).json()) as WithFrames).frames.find(
++      (f) => f.id === frameId,
++    )!
++    expect(read.approval?.verdict).toBe('ready_for_dev')
++    const statuses = read.approval!.history!.map((e) => e.status)
++    expect(statuses.slice(-2)).toEqual(['changes_requested', 'ready_for_dev'])
++    /* the reviewed state of each verdict is open to the panel for compare */
++    const versionId = read.approval!.history!.at(-1)!.versionId!
++    await expect
++      .poll(async () => (await client.get(`/api/frames/${frameId}/versions/${versionId}`)).status, { timeout: 8000 })
++      .toBe(200)
 +  })
 +
 +  it('refuses a replayed, expired, forged, over-long or over-privileged token', async () => {

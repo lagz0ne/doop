@@ -19,6 +19,19 @@ verdict needed edit rights, and there was no way to say "not yet".
   instead of a boolean and writes "requested changes on ..." to activity.
 - A design edit after either verdict makes the frame needs_review, as it
   already did after an approval.
+- The approval keeps `verdict`, the last verdict given, which the flip to
+  needs_review does not erase, and `history`, the last 20 verdicts oldest
+  first ({ status, by, byUserId, at, frameUpdatedAt, versionId }). A
+  verdict files the state it was given on as a design version (savedAt =
+  the frame's updatedAt then), because versions are kept per burst of edits
+  and a tweak joining the open burst would never file it: the review panel
+  compares against that versionId. persist's saveFrameVersion takes
+  { always } so that snapshot is never skipped as a duplicate. Moving to
+  draft clears the approval, history included; an approval from before
+  history starts one from its own record (priorVerdicts).
+- Editor: a frame revised after changes were requested says so ("Changes
+  requested by X on D; revised since", en and pt-BR), not "previously
+  approved".
 - Each verdict emits a frame.approval canvas event: a webhook event of the
   same name ({ status, actor, frame }), listed in Settings (en, pt-BR).
 - Agents: MCP get_canvas filters approval_status=changes_requested, and the
@@ -31,73 +44,151 @@ verdict needed edit rights, and there was no way to say "not yet".
 
 Tests: reviewVerdicts.test.ts (real server: a comment-link visitor is
 refused, an editor sends a frame back, the webhook delivery, needs_review
-after an edit, a new verdict on the new revision), frameApprovalControl
+after an edit, a new verdict on the new revision; verdict and history
+through an edit, the reviewed state's version even when the next tweak
+joins its burst, the cap of 20, draft clearing it), approvalHistory
+(an approval from before history), frameApprovalControl
 (Request changes, the badge, a reviewer's menu without editing items),
 canvasRole (the ranking). approvalAutomations, frameApproval, webhooks,
 webhookRoutes, mcp-tools, i18n, shareLinkRoles, guestCanvas, access pass.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- .context/TECHSTACK.md               | 11 ++++
- server/actions.ts                   | 32 ++++++----
- server/events.ts                    |  2 +
- server/guide.ts                     |  8 ++-
- server/index.ts                     | 10 ++--
- server/mcp.ts                       |  7 ++-
- server/resident.ts                  |  2 +-
- server/store.ts                     |  5 +-
- server/webhooks.ts                  |  6 ++
- shared/canvasRole.ts                |  5 +-
- shared/types.ts                     |  4 +-
- shared/webhooks.ts                  |  2 +
- src/components/FrameApproval.tsx    | 37 +++++++++---
- src/components/FrameContextMenu.tsx | 33 +++++++++-
- src/components/Webhooks.tsx         |  1 +
- src/lib/api.ts                      |  6 +-
- src/lib/frameApproval.ts            |  4 +-
- src/lib/i18n/en/stage.ts            |  5 ++
- src/lib/i18n/en/webhooks.ts         |  1 +
- src/lib/i18n/pt-BR/stage.ts         |  5 ++
- src/lib/i18n/pt-BR/webhooks.ts      |  1 +
- src/lib/store.ts                    |  5 ++
- tests/approvalAutomations.test.ts   |  6 +-
- tests/canvasRole.test.ts            |  7 ++-
- tests/frameApprovalControl.test.tsx | 51 ++++++++++++++++
- tests/reviewVerdicts.test.ts        | 93 +++++++++++++++++++++++++++++
- 26 files changed, 306 insertions(+), 43 deletions(-)
+ .context/TECHSTACK.md               |  18 ++++
+ server/actions.ts                   |  92 ++++++++++++++---
+ server/db/persist.ts                |  17 +++-
+ server/events.ts                    |   2 +
+ server/guide.ts                     |   8 +-
+ server/index.ts                     |  10 +-
+ server/mcp.ts                       |   7 +-
+ server/resident.ts                  |   2 +-
+ server/store.ts                     |   5 +-
+ server/webhooks.ts                  |   6 ++
+ shared/canvasRole.ts                |   5 +-
+ shared/types.ts                     |  27 ++++-
+ shared/webhooks.ts                  |   2 +
+ src/components/FrameApproval.tsx    |  42 ++++++--
+ src/components/FrameContextMenu.tsx |  33 +++++-
+ src/components/Webhooks.tsx         |   1 +
+ src/lib/api.ts                      |   6 +-
+ src/lib/frameApproval.ts            |   4 +-
+ src/lib/i18n/en/stage.ts            |   7 ++
+ src/lib/i18n/en/webhooks.ts         |   1 +
+ src/lib/i18n/pt-BR/stage.ts         |   7 ++
+ src/lib/i18n/pt-BR/webhooks.ts      |   1 +
+ src/lib/store.ts                    |   5 +
+ tests/approvalAutomations.test.ts   |   6 +-
+ tests/approvalHistory.test.ts       |  30 ++++++
+ tests/canvasRole.test.ts            |   7 +-
+ tests/frameApproval.test.ts         |  12 +++
+ tests/frameApprovalControl.test.tsx |  73 +++++++++++++
+ tests/reviewVerdicts.test.ts        | 153 ++++++++++++++++++++++++++++
+ 29 files changed, 541 insertions(+), 48 deletions(-)
+ create mode 100644 tests/approvalHistory.test.ts
  create mode 100644 tests/reviewVerdicts.test.ts
 
 diff --git a/.context/TECHSTACK.md b/.context/TECHSTACK.md
-index 90e52e9..625af8a 100644
+index 90e52e9..2f871de 100644
 --- a/.context/TECHSTACK.md
 +++ b/.context/TECHSTACK.md
-@@ -638,6 +638,17 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
+@@ -638,6 +638,24 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
    the WebSocket room and MCP gate reads, comments and writes on it separately; spec in
    `.context/specs/share-link-roles.md`.
  
-+- Review verdicts (`shared/canvasRole.ts`, `server/actions.ts` `setFrameApproval`): roles rank
-+  view < comment < review < edit; `review` comments and gives a frame its verdict but never
-+  changes the design (every frame write still needs `edit`). `PUT /api/frames/:id/approval` takes
++- Review verdicts (`shared/canvasRole.ts`, `server/actions.ts` `setFrameApproval`): roles rank view
++  < comment < review < edit; `review` comments and gives a frame its verdict but never changes the
++  design (every frame write still needs `edit`). `PUT /api/frames/:id/approval` takes
 +  `ready_for_dev`, `changes_requested` or `draft` at `review`; a design edit after either verdict
 +  makes it `needs_review`. Each verdict is a `frame.approval` canvas event (webhook event of the
-+  same name) and an activity line; MCP `get_canvas` filters `approval_status=changes_requested`.
-+  In the editor the frame menu's verdict items (Mark ready for dev, Request changes) need
-+  `review`, the rest of its editing items `edit`; the Inspector's Development group has Request
-+  changes beside the approval switch. Tests: `reviewVerdicts.test.ts`, `frameApprovalControl.test.tsx`,
-+  `canvasRole.test.ts`.
++  same name) and an activity line; MCP `get_canvas` filters `approval_status=changes_requested`. In
++  the editor the frame menu's verdict items (Mark ready for dev, Request changes) need `review`, the
++  rest of its editing items `edit`; the Inspector's Development group has Request changes beside the
++  approval switch. The approval keeps `verdict` (the last one given, which an edit's flip to
++  `needs_review` does not erase) and `history` (the last `APPROVAL_HISTORY_MAX` = 20 verdicts,
++  oldest first: status, by, at, `frameUpdatedAt`, `versionId`). A verdict files the state it was
++  given on as a design version (`fileReviewedState`, `saveFrameVersion(…, { always: true })`,
++  `savedAt` = the frame's `updatedAt` then), since versions are kept per burst and a tweak joining
++  the open burst would never file it; the review panel compares against that `versionId`. Moving to
++  draft clears the approval, history included; an approval older than history starts one from its
++  own record (`priorVerdicts`). Tests: `reviewVerdicts.test.ts`, `approvalHistory.test.ts`,
++  `frameApprovalControl.test.tsx`, `canvasRole.test.ts`.
 +
  - Bun 1.3.10 - package manager; lockfile at `bun.lock`, installed with `bun install
  --frozen-lockfile` in CI.
  - Vite 8 (Rolldown-based) - frontend build tool (`vite build`), with `@vitejs/plugin-react` 6.
 diff --git a/server/actions.ts b/server/actions.ts
-index 09cbe20..fb18fe5 100644
+index 09cbe20..f730456 100644
 --- a/server/actions.ts
 +++ b/server/actions.ts
-@@ -1949,32 +1949,40 @@ export function restackFrames(canvasId: string, writes: StackWrite[], actor: Act
+@@ -2,7 +2,7 @@ import { nanoid } from 'nanoid'
+ import { MAX_PAGES, PageLimitError, store } from './store.ts'
+ import * as persist from './db/persist.ts'
+ import * as thumbs from './thumbs.ts'
+-import { colorFor } from '../shared/types.ts'
++import { APPROVAL_HISTORY_MAX, colorFor } from '../shared/types.ts'
+ import type { StackWrite } from '../shared/frameStack.ts'
+ import { DEFAULT_ROLE_ID, mentionedRole, normalizePipeline, roleByAgentName, roleName } from '../shared/agents.ts'
+ import { canvasPages } from '../shared/pages.ts'
+@@ -42,8 +42,10 @@ import type {
+   AgentTask,
+   CardScope,
+   DesignDecision,
++  ApprovalHistoryEntry,
+   ElementComment,
+   Frame,
++  FrameApproval,
+   GuidelineDoc,
+   MemoryProposal,
+   MemoryReference,
+@@ -1949,32 +1951,96 @@ export function restackFrames(canvasId: string, writes: StackWrite[], actor: Act
  }
  
  /** Sign-off is a human action, separate from ordinary frame editing. */
 +export type ApprovalVerdict = 'ready_for_dev' | 'changes_requested' | 'draft'
++
++/** File the state a verdict is given on as a design version, so the review
++ *  panel can compare against exactly what was decided: history is otherwise
++ *  kept per burst of edits, and a tweak joining the open burst would never
++ *  file this state on its own. Its savedAt is the frame's updatedAt at the
++ *  verdict. The next burst's own snapshot of the same state is skipped by
++ *  persist (the newest row already holds it). */
++function fileReviewedState(frame: Frame): string | undefined {
++  if (!frame.html) return undefined
++  const id = nanoid(10)
++  const author = bursts.get(frame.id)?.actor
++  persist.saveFrameVersion(
++    {
++      id,
++      frameId: frame.id,
++      canvasId: frame.canvasId,
++      html: frame.html,
++      width: frame.width,
++      height: frame.height,
++      savedAt: frame.updatedAt,
++      savedBy: author?.name ?? frame.updatedBy,
++      savedByKind: author?.kind,
++      htmlBytes: frame.html.length,
++    },
++    { always: true },
++  )
++  return id
++}
++
++/** The verdicts before this one: the stored history, or for an approval made
++ *  before verdicts were kept, the one it records. */
++export function priorVerdicts(approval: Frame['approval']): ApprovalHistoryEntry[] {
++  if (!approval) return []
++  if (approval.history) return approval.history
++  return [
++    {
++      status: approval.verdict ?? 'ready_for_dev',
++      by: approval.approvedBy,
++      byUserId: approval.approvedByUserId,
++      at: approval.approvedAt,
++      frameUpdatedAt: approval.approvedFrameUpdatedAt,
++    },
++  ]
++}
 +
  export function setFrameApproval(
    frameId: string,
@@ -119,16 +210,28 @@ index 09cbe20..fb18fe5 100644
 -        approvedFrameUpdatedAt: current.updatedAt,
 -      }
 -    : null
-+  const approval =
-+    status === 'draft'
-+      ? null
-+      : {
-+          status,
-+          approvedBy: user.name,
-+          approvedByUserId: user.id,
-+          approvedAt: Math.max(Date.now(), current.updatedAt + 1),
-+          approvedFrameUpdatedAt: current.updatedAt,
-+        }
++  let approval: FrameApproval | null = null
++  if (status !== 'draft') {
++    const at = Math.max(Date.now(), current.updatedAt + 1)
++    const versionId = fileReviewedState(current)
++    const entry: ApprovalHistoryEntry = {
++      status,
++      by: user.name,
++      byUserId: user.id,
++      at,
++      frameUpdatedAt: current.updatedAt,
++      ...(versionId && { versionId }),
++    }
++    approval = {
++      status,
++      verdict: status,
++      approvedBy: user.name,
++      approvedByUserId: user.id,
++      approvedAt: at,
++      approvedFrameUpdatedAt: current.updatedAt,
++      history: [...priorVerdicts(current.approval), entry].slice(-APPROVAL_HISTORY_MAX),
++    }
++  }
    const frame = store.updateFrame(frameId, { approval }, user.name)!
    broadcast(frame.canvasId, { type: 'frame:updated', frame, actor })
    logActivity(
@@ -146,6 +249,48 @@ index 09cbe20..fb18fe5 100644
    return frame
  }
  
+diff --git a/server/db/persist.ts b/server/db/persist.ts
+index 8bc3aa9..b77d72b 100644
+--- a/server/db/persist.ts
++++ b/server/db/persist.ts
+@@ -457,8 +457,11 @@ function queueVersionWrite(frameId: string, canvasId: string, work: () => Promis
+   swallow(queued.finally(() => versionWrites.get(frameId)?.queued === queued && versionWrites.delete(frameId)))
+ }
+ 
+-export function saveFrameVersion(version: FrameVersion) {
+-  queueVersionWrite(version.frameId, version.canvasId, () => appendFrameVersion(version))
++/** `always`: file it even when the newest row holds the same state, so a
++ *  caller that hands its id on (a verdict's reviewed state) never points at a
++ *  row that was skipped. */
++export function saveFrameVersion(version: FrameVersion, opts: { always?: boolean } = {}) {
++  queueVersionWrite(version.frameId, version.canvasId, () => appendFrameVersion(version, opts.always))
+ }
+ 
+ /** Settles once every queued version write the filter picks has landed. */
+@@ -467,7 +470,7 @@ function pendingVersionWrites(pick: (frameId: string, canvasId: string) => boole
+   return Promise.allSettled(queued)
+ }
+ 
+-async function appendFrameVersion(version: FrameVersion) {
++async function appendFrameVersion(version: FrameVersion, always = false) {
+   /* a burst that ended where it began (an edit typed and reverted) would
+      snapshot the same state twice — the newest row already holds it. Size
+      counts: the same document at another frame size is a state of its own */
+@@ -477,7 +480,13 @@ async function appendFrameVersion(version: FrameVersion) {
+     .where(eq(t.frameVersions.frameId, version.frameId))
+     .orderBy(desc(t.frameVersions.savedAt))
+     .limit(1)
+-  if (latest && latest.html === version.html && latest.width === version.width && latest.height === version.height)
++  if (
++    !always &&
++    latest &&
++    latest.html === version.html &&
++    latest.width === version.width &&
++    latest.height === version.height
++  )
+     return
+   await db.insert(t.frameVersions).values({
+     id: version.id,
 diff --git a/server/events.ts b/server/events.ts
 index 3119476..10a0f89 100644
 --- a/server/events.ts
@@ -308,10 +453,10 @@ index 6d727d8..740e1a7 100644
  export function isLinkAccess(value: unknown): value is LinkAccess {
    return typeof value === 'string' && (LINK_ACCESS_LEVELS as readonly string[]).includes(value)
 diff --git a/shared/types.ts b/shared/types.ts
-index d3e5b8a..7657beb 100644
+index d3e5b8a..53aa179 100644
 --- a/shared/types.ts
 +++ b/shared/types.ts
-@@ -39,7 +39,9 @@ export interface Frame {
+@@ -39,12 +39,37 @@ export interface Frame {
  }
  
  export interface FrameApproval {
@@ -322,6 +467,34 @@ index d3e5b8a..7657beb 100644
    approvedBy: string
    approvedByUserId: string
    approvedAt: number
+   /** The frame revision the person reviewed before approving. */
+   approvedFrameUpdatedAt: number
++  /** The last verdict given, which an edit does not erase (status turns
++   *  needs_review, this stays). Unset on approvals older than verdicts:
++   *  read it as ready_for_dev. */
++  verdict?: ApprovalVerdictStatus
++  /** The frame's recent verdicts, oldest first, at most APPROVAL_HISTORY_MAX.
++   *  Moving the frame back to draft clears approval, history included. */
++  history?: ApprovalHistoryEntry[]
++}
++
++export type ApprovalVerdictStatus = 'ready_for_dev' | 'changes_requested'
++
++export const APPROVAL_HISTORY_MAX = 20
++
++export interface ApprovalHistoryEntry {
++  status: ApprovalVerdictStatus
++  by: string
++  byUserId: string
++  at: number
++  /** the frame's updatedAt when the verdict was given */
++  frameUpdatedAt: number
++  /** the reviewed state, filed as a design version when the verdict was given
++   *  (GET /api/frames/:id/versions/:versionId); unset when the frame had no HTML */
++  versionId?: string
+ }
+ 
+ /** One entry of a frame's design history: the HTML (and size) the frame had
 diff --git a/shared/webhooks.ts b/shared/webhooks.ts
 index 8dcc03f..12b6a4d 100644
 --- a/shared/webhooks.ts
@@ -343,10 +516,10 @@ index 8dcc03f..12b6a4d 100644
    'task.failed': 'An agent fails a board card',
  }
 diff --git a/src/components/FrameApproval.tsx b/src/components/FrameApproval.tsx
-index c23e853..581d7f3 100644
+index c23e853..e4608eb 100644
 --- a/src/components/FrameApproval.tsx
 +++ b/src/components/FrameApproval.tsx
-@@ -1,19 +1,21 @@
+@@ -1,19 +1,24 @@
  import { useState } from 'react'
  import type { Frame } from '../../shared/types'
 -import { setFramesApproval } from '../lib/frameApproval'
@@ -368,11 +541,14 @@ index c23e853..581d7f3 100644
 -  return approval.status === 'ready_for_dev' ? t('stage.approvedByOn', vars) : t('stage.previouslyApprovedByOn', vars)
 +  if (approval.status === 'ready_for_dev') return t('stage.approvedByOn', vars)
 +  if (approval.status === 'changes_requested') return t('stage.changesRequestedByOn', vars)
-+  return t('stage.previouslyApprovedByOn', vars)
++  /* needs_review: the design changed since the last verdict, whichever it was */
++  return approval.verdict === 'changes_requested'
++    ? t('stage.changesRequestedEditedByOn', vars)
++    : t('stage.previouslyApprovedByOn', vars)
  }
  
  export function FrameApprovalBadge({ frame, compact = false }: { frame: Frame; compact?: boolean }) {
-@@ -21,8 +23,9 @@ export function FrameApprovalBadge({ frame, compact = false }: { frame: Frame; c
+@@ -21,8 +26,9 @@ export function FrameApprovalBadge({ frame, compact = false }: { frame: Frame; c
    const approval = frame.approval
    if (!approval) return null
    const ready = approval.status === 'ready_for_dev'
@@ -384,7 +560,7 @@ index c23e853..581d7f3 100644
    return (
      <Badge
        tone={ready ? 'success' : 'banned'}
-@@ -49,7 +52,8 @@ export function FrameApprovalControl({
+@@ -49,7 +55,8 @@ export function FrameApprovalControl({
    const pendingSave = useFrameSaves((s) => !!s.pending[frame.id])
    const awaitingChanges = streaming || pendingSave || hasUnsavedChanges
    const ready = frame.approval?.status === 'ready_for_dev'
@@ -394,7 +570,7 @@ index c23e853..581d7f3 100644
      setSaving(true)
      try {
        await setFramesApproval([frame], status)
-@@ -79,7 +83,13 @@ export function FrameApprovalControl({
+@@ -79,7 +86,15 @@ export function FrameApprovalControl({
          </div>
        )}
        <p className="text-caption text-ink-faint">
@@ -403,13 +579,15 @@ index c23e853..581d7f3 100644
 +          ? t('stage.approvalReady')
 +          : sentBack
 +            ? t('stage.approvalChangesRequested')
-+            : frame.approval
-+              ? t('stage.approvalChanged')
-+              : t('stage.approvalPrompt')}
++            : frame.approval?.verdict === 'changes_requested'
++              ? t('stage.approvalRevised')
++              : frame.approval
++                ? t('stage.approvalChanged')
++                : t('stage.approvalPrompt')}
        </p>
        {saving && (
          <p role="status" className="text-caption text-ink-faint">
-@@ -87,6 +97,17 @@ export function FrameApprovalControl({
+@@ -87,6 +102,17 @@ export function FrameApprovalControl({
          </p>
        )}
        {!ready && awaitingChanges && <p className="text-caption text-ink-faint">{t('stage.approvalWait')}</p>}
@@ -544,10 +722,10 @@ index 8605574..2d92f35 100644
    let failure: string | undefined
    for (const frame of frames) {
 diff --git a/src/lib/i18n/en/stage.ts b/src/lib/i18n/en/stage.ts
-index f5e008d..518385f 100644
+index f5e008d..12e20b2 100644
 --- a/src/lib/i18n/en/stage.ts
 +++ b/src/lib/i18n/en/stage.ts
-@@ -91,15 +91,20 @@ export const stage = {
+@@ -91,15 +91,22 @@ export const stage = {
    versionHistory: 'Version history…',
    markReadyForDev: 'Mark ready for dev',
    moveToDraft: 'Move to draft',
@@ -558,6 +736,7 @@ index f5e008d..518385f 100644
    needsReview: 'Needs review',
 +  changesRequested: 'Changes requested',
 +  changesRequestedByOn: 'Changes requested by {name} on {date}',
++  changesRequestedEditedByOn: 'Changes requested by {name} on {date}; revised since',
    approvedByOn: 'Approved by {name} on {date}',
    previouslyApprovedByOn: 'Previously approved by {name} on {date}',
    markAsApproved: 'Mark as approved',
@@ -565,6 +744,7 @@ index f5e008d..518385f 100644
    approvalChanged: 'This design changed after approval. Review it before marking it ready again.',
 +  approvalChangesRequested:
 +    'A reviewer asked for changes; their comments say what. Editing the design sends it back for review.',
++  approvalRevised: 'Revised after a reviewer asked for changes. Review it again.',
    approvalPrompt: 'Approve this screen to let your team and agents know it’s ready to build.',
    saving: 'Saving…',
    approvalWait: 'Wait for changes to finish saving before approving.',
@@ -581,10 +761,10 @@ index 589e083..7daa89a 100644
    eventTaskFailed: 'An agent fails a board card',
  
 diff --git a/src/lib/i18n/pt-BR/stage.ts b/src/lib/i18n/pt-BR/stage.ts
-index b7a8810..8866174 100644
+index b7a8810..762a29c 100644
 --- a/src/lib/i18n/pt-BR/stage.ts
 +++ b/src/lib/i18n/pt-BR/stage.ts
-@@ -91,15 +91,20 @@ export const stage: Catalog['stage'] = {
+@@ -91,15 +91,22 @@ export const stage: Catalog['stage'] = {
    versionHistory: 'Histórico de versões…',
    markReadyForDev: 'Marcar como pronto para dev',
    moveToDraft: 'Voltar para rascunho',
@@ -595,6 +775,7 @@ index b7a8810..8866174 100644
    needsReview: 'Precisa de revisão',
 +  changesRequested: 'Alterações solicitadas',
 +  changesRequestedByOn: 'Alterações solicitadas por {name} em {date}',
++  changesRequestedEditedByOn: 'Alterações solicitadas por {name} em {date}; revisado desde então',
    approvedByOn: 'Aprovado por {name} em {date}',
    previouslyApprovedByOn: 'Aprovado anteriormente por {name} em {date}',
    markAsApproved: 'Marcar como aprovado',
@@ -602,6 +783,7 @@ index b7a8810..8866174 100644
    approvalChanged: 'Este design mudou depois da aprovação. Revise-o antes de marcá-lo como pronto de novo.',
 +  approvalChangesRequested:
 +    'Um revisor pediu alterações; os comentários dizem quais. Editar o design o envia de volta para revisão.',
++  approvalRevised: 'Revisado depois que um revisor pediu alterações. Revise-o de novo.',
    approvalPrompt: 'Aprove esta tela para avisar sua equipe e os agentes que ela está pronta para ser construída.',
    saving: 'Salvando…',
    approvalWait: 'Aguarde as alterações terminarem de salvar antes de aprovar.',
@@ -664,6 +846,42 @@ index cfc8d96..bce8815 100644
      approve()
      expect(source.approval!.approvedAt).toBeGreaterThan(first)
      await runAutomation(a.id)
+diff --git a/tests/approvalHistory.test.ts b/tests/approvalHistory.test.ts
+new file mode 100644
+index 0000000..31ad26f
+--- /dev/null
++++ b/tests/approvalHistory.test.ts
+@@ -0,0 +1,30 @@
++import { expect, it } from 'vitest'
++import { priorVerdicts } from '../server/actions.ts'
++import type { FrameApproval } from '../shared/types.ts'
++
++/* An approval stored before verdicts were kept has no history: its one
++   recorded verdict becomes the first entry, with no reviewed version. */
++
++const legacy: FrameApproval = {
++  status: 'needs_review',
++  approvedBy: 'Reviewer',
++  approvedByUserId: 'u1',
++  approvedAt: 100,
++  approvedFrameUpdatedAt: 90,
++}
++
++it('starts a history from an approval that predates it', () => {
++  expect(priorVerdicts(legacy)).toEqual([
++    { status: 'ready_for_dev', by: 'Reviewer', byUserId: 'u1', at: 100, frameUpdatedAt: 90 },
++  ])
++  expect(priorVerdicts({ ...legacy, verdict: 'changes_requested' })[0]!.status).toBe('changes_requested')
++})
++
++it('keeps a stored history as it is, and has none for a draft', () => {
++  const history = [
++    { status: 'ready_for_dev' as const, by: 'R', byUserId: 'u', at: 1, frameUpdatedAt: 1, versionId: 'v' },
++  ]
++  expect(priorVerdicts({ ...legacy, history })).toBe(history)
++  expect(priorVerdicts(null)).toEqual([])
++  expect(priorVerdicts(undefined)).toEqual([])
++})
 diff --git a/tests/canvasRole.test.ts b/tests/canvasRole.test.ts
 index 3bdb3cf..3125fdd 100644
 --- a/tests/canvasRole.test.ts
@@ -682,11 +900,38 @@ index 3bdb3cf..3125fdd 100644
      expect(roleAllows('edit', 'comment')).toBe(true)
      expect(roleAllows('comment', 'comment')).toBe(true)
      expect(roleAllows('comment', 'edit')).toBe(false)
+diff --git a/tests/frameApproval.test.ts b/tests/frameApproval.test.ts
+index 502a5cb..d918f55 100644
+--- a/tests/frameApproval.test.ts
++++ b/tests/frameApproval.test.ts
+@@ -86,10 +86,22 @@ it('attributes approvals to the signed-in person, broadcasts them and records ac
+     const approved: Frame = await response.json()
+     expect(approved.approval).toEqual({
+       status: 'ready_for_dev',
++      verdict: 'ready_for_dev',
+       approvedBy: 'Review Owner',
+       approvedByUserId: canvas.ownerId,
+       approvedAt: expect.any(Number),
+       approvedFrameUpdatedAt: frame.updatedAt,
++      /* the verdict and the state it was given on, never the forged name */
++      history: [
++        {
++          status: 'ready_for_dev',
++          by: 'Review Owner',
++          byUserId: canvas.ownerId,
++          at: expect.any(Number),
++          frameUpdatedAt: frame.updatedAt,
++          versionId: expect.any(String),
++        },
++      ],
+     })
+     expect((await read(frame)).approval).toEqual(approved.approval)
+     await expect
 diff --git a/tests/frameApprovalControl.test.tsx b/tests/frameApprovalControl.test.tsx
-index 543dccd..4280d03 100644
+index 543dccd..9deb1c1 100644
 --- a/tests/frameApprovalControl.test.tsx
 +++ b/tests/frameApprovalControl.test.tsx
-@@ -234,3 +234,54 @@ it('keeps approval disabled until every overlapping design request has settled',
+@@ -234,3 +234,76 @@ it('keeps approval disabled until every overlapping design request has settled',
    })
    expect(toggle().disabled).toBe(false)
  })
@@ -741,12 +986,34 @@ index 543dccd..4280d03 100644
 +  expect(items).toContain('Request changes')
 +  expect(items.some((i) => i?.startsWith('Lock') || i?.startsWith('Delete'))).toBe(false)
 +})
++
++it('says a frame was revised after changes were requested, not that it was approved', () => {
++  const revised: Frame = {
++    ...frame,
++    updatedAt: 14,
++    approval: {
++      status: 'needs_review',
++      verdict: 'changes_requested',
++      approvedBy: 'Reviewer',
++      approvedByUserId: 'reviewer',
++      approvedAt: 12,
++      approvedFrameUpdatedAt: 10,
++    },
++  }
++  useStore.getState().setCanvas({ id: 'c', name: 'Canvas', frames: [revised], createdAt: 1, updatedAt: 14 })
++  act(() => root.render(<Control />))
++  expect(container.textContent).toContain('Revised after a reviewer asked for changes')
++  expect(container.textContent).not.toContain('changed after approval')
++  expect(container.querySelector('[aria-label="Needs review"]')?.getAttribute('title')).toContain(
++    'Changes requested by Reviewer',
++  )
++})
 diff --git a/tests/reviewVerdicts.test.ts b/tests/reviewVerdicts.test.ts
 new file mode 100644
-index 0000000..e2a47ae
+index 0000000..e3a841e
 --- /dev/null
 +++ b/tests/reviewVerdicts.test.ts
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,153 @@
 +import { createServer, type Server as HttpServer } from 'node:http'
 +import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 +import { Client, freePort, startServer, type Server } from './harness.ts'
@@ -763,9 +1030,22 @@ index 0000000..e2a47ae
 +let hook: HttpServer
 +const deliveries: Record<string, unknown>[] = []
 +
-+async function frameNow(): Promise<{ updatedAt: number; approval?: { status: string } | null }> {
++interface Entry {
++  status: string
++  by: string
++  at: number
++  frameUpdatedAt: number
++  versionId?: string
++}
++interface FrameNow {
++  updatedAt: number
++  html: string
++  approval?: { status: string; verdict?: string; history?: Entry[] } | null
++}
++
++async function frameNow(): Promise<FrameNow> {
 +  const canvas = (await (await owner.get(`/api/canvases/${canvasId}`)).json()) as {
-+    frames: { id: string; updatedAt: number; approval?: { status: string } | null }[]
++    frames: (FrameNow & { id: string })[]
 +  }
 +  return canvas.frames.find((f) => f.id === frameId)!
 +}
@@ -838,5 +1118,52 @@ index 0000000..e2a47ae
 +    const again = await verdict(owner, 'ready_for_dev', (await frameNow()).updatedAt)
 +    expect(again.status).toBe(200)
 +    expect((await frameNow()).approval?.status).toBe('ready_for_dev')
++  })
++})
++
++describe('verdict history', () => {
++  it('keeps the last verdict and its history through an edit, with the reviewed state filed as a version', async () => {
++    const before = await frameNow()
++    const sent = await verdict(owner, 'changes_requested', before.updatedAt)
++    expect(sent.status).toBe(200)
++    const after = await frameNow()
++    expect(after.approval).toMatchObject({ status: 'changes_requested', verdict: 'changes_requested' })
++    const last = after.approval!.history!.at(-1)!
++    expect(last).toMatchObject({ status: 'changes_requested', by: 'Olive Owner', frameUpdatedAt: before.updatedAt })
++    expect(last.versionId).toBeTruthy()
++
++    /* the same person tweaks it at once: one burst, so only the verdict's own
++       snapshot keeps the reviewed state */
++    await owner.patch(`/api/frames/${frameId}`, { html: '<html><body><h1>Revised</h1></body></html>' })
++    await owner.patch(`/api/frames/${frameId}`, { html: '<html><body><h1>Revised again</h1></body></html>' })
++    const edited = await frameNow()
++    expect(edited.approval).toMatchObject({ status: 'needs_review', verdict: 'changes_requested' })
++    expect(edited.approval!.history!.at(-1)).toEqual(last)
++    await expect
++      .poll(async () => (await owner.get(`/api/frames/${frameId}/versions/${last.versionId}`)).status, {
++        timeout: 8000,
++      })
++      .toBe(200)
++    const reviewed = (await (await owner.get(`/api/frames/${frameId}/versions/${last.versionId}`)).json()) as {
++      html: string
++      savedAt: number
++    }
++    expect(reviewed.html).toBe(before.html)
++    expect(reviewed.savedAt).toBe(last.frameUpdatedAt)
++  })
++
++  it('appends verdicts oldest first, keeps the last 20 and clears with a move to draft', async () => {
++    for (let i = 0; i < 22; i++) {
++      const status = i % 2 ? 'changes_requested' : 'ready_for_dev'
++      const res = await verdict(owner, status, (await frameNow()).updatedAt)
++      expect(res.status, await res.clone().text()).toBe(200)
++    }
++    const { approval } = await frameNow()
++    expect(approval!.history).toHaveLength(20)
++    expect(approval!.history!.at(-1)!.status).toBe('changes_requested')
++    const ats = approval!.history!.map((e) => e.at)
++    expect([...ats].sort((a, b) => a - b)).toEqual(ats)
++    expect((await verdict(owner, 'draft', (await frameNow()).updatedAt)).status).toBe(200)
++    expect((await frameNow()).approval ?? null).toBeNull()
 +  })
 +})
