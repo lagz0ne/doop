@@ -20,8 +20,14 @@ script that copied it (`seed.py`) are git-ignored, so bring your own canvas.
 |---|---|
 | `trace.mjs <out.json> [page] [cull=on\|off]` | Chrome trace (all processes) through fixed scenarios: open, pan at fit, zoom 8→60%, pan at 60%, fit jump |
 | `analyze.mjs <trace>` | CPU per process/thread, event self time, top JS functions, input latency per scenario |
-| `jsprof.mjs <trace>` | source-mapped JS profile (needs `vite build --sourcemap`, which `serve` does) |
-| `bench.mjs` | main-thread busy time + worst frame gap for pan / zoom / fit, per CSS variant |
+| `jsprof.mjs <trace> [scenario]` | source-mapped JS profile (needs `vite build --sourcemap`, which `serve` does; `TREE=` names a build tree other than `build/doop`) |
+| `bench.mjs` | main-thread busy time, worst frame gap and live document count for pan / zoom / press / fit, and leaving a neighbourhood and coming back (with the time until its frames show their documents). An argument is CSS to inject; `LS=` sets localStorage first; `JSON_OUT=` appends the numbers |
+| `ab.sh <name> <A url> <B url> [runs]` | `bench.mjs` on two servers, interleaved and alternating who goes first, with a table of medians. `A_LS` / `B_LS` give each side its own localStorage, so one server can be both sides |
+| `trace-live.mjs <out.json> [page]` | Chrome trace of the gestures over live documents: zoom in small steps (60>95>60%), zoom across 100% (the layout zoom changes), six presses, a pan. `INV=1` adds style invalidation tracking |
+| `events.mjs <trace> <scenario> <Event>...` | occurrences of a timeline event in a scenario: count, time, how many were forced from script, elements per event |
+| `longtasks.mjs <trace> <scenario> [n]` | the longest main-thread tasks of the editor in a scenario, and what ran inside each |
+| `presscheck.mjs` | a pan press with the Hand tool: the cursor shown, whether the drag selects text in the chrome, restyle cost at press and release |
+| `parkcheck.mjs` | the probe behind the shelved experiment of keeping frame documents alive after they leave the view (see `docs/history.md`) |
 | `look.mjs <prefix> [page] [dpr]` | screenshots of previews next to live frames: fit, one frame clicked, a few zooms, mid-pan (`CULL=off`: every frame live, the reference). Forces the device scale factor on the browser: emulating it does not reach out-of-process frames, which then look blurred |
 | `boot.mjs <prefix> [page] [zoom]` | what a frame shows while its document boots (screencast of one frame after a click): finds the white flash |
 | `fonts.mts [n]` | are a frame's web fonts in place when the server captures it? Runs the server's own `loadFramePage` (`TREE=base` for upstream); run from `build/doop` with tsx, see its header |

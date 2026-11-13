@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 05:09:37 +0000
+Subject: [PATCH 17/19] perf(canvas): ask once per document whether it is a
+ canvas element
+
+isCanvasElement runs a regular expression over the frame's whole HTML (a
+frame without the marker has no early match) and is asked several times
+per frame on every render of the canvas: 30 ms of a 188-frame page's
+opening, and again on each render after. Frame HTML is immutable, so the
+answer is kept per string (bounded: the table is dropped at 2000 entries).
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/lib/drawing.ts | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/src/lib/drawing.ts b/src/lib/drawing.ts
+index 4e1cd16..11c4d30 100644
+--- a/src/lib/drawing.ts
++++ b/src/lib/drawing.ts
+@@ -75,8 +75,20 @@ let pendingDrawing: Promise<void> = Promise.resolve()
+ /** Standalone elements use the same persistence, layers and export as frames,
+  *  with transparent chrome. The marker stays in HTML through undo and copying. */
+ export function isCanvasElement(html: string): boolean {
+-  return /<body\b[^>]*\bdata-doop-canvas-element=/i.test(html)
++  /* Asked several times per frame on every render of the canvas, and the
++     answer takes a scan of the whole document (a frame without the marker
++     has no early match): 30 ms of a 188-frame page's opening went here.
++     Frame HTML is immutable, so the answer is kept per string. */
++  let known = canvasElementAnswers.get(html)
++  if (known === undefined) {
++    known = /<body\b[^>]*\bdata-doop-canvas-element=/i.test(html)
++    if (canvasElementAnswers.size >= CANVAS_ELEMENT_ANSWERS_MAX) canvasElementAnswers.clear()
++    canvasElementAnswers.set(html, known)
++  }
++  return known
+ }
++const CANVAS_ELEMENT_ANSWERS_MAX = 2000
++const canvasElementAnswers = new Map<string, boolean>()
+ 
+ export function drawingTarget(point: Point, tool: DrawingTool): DrawingTarget | null {
+   const canvas = currentPageCanvas()

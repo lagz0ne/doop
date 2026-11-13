@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 05:09:38 +0000
+Subject: [PATCH 19/19] perf(canvas): only the frames in view go live
+
+A frame got its live document when it came within half a viewport of the
+view, and kept it out to a whole viewport. The margin dates from when a
+frame without a document was a blurred thumbnail and a booting one a white
+flash: a short pan was to find documents waiting. Since then a frame
+without its document shows a picture of itself at the sharpness of the
+screen, and keeps it until the document has painted, so the swap is not
+seen and the margin only decides how many documents boot off screen. At
+60% on a 188-frame page of desktop screens that was 12 documents at every
+rest of the camera, with 4 to 6 of them on screen. Each is a FrameView
+mounted on the editor's main thread and a document started in the frames'
+process, which they all share.
+
+The entry margin is now a tenth of a viewport and the keep margin half of
+one. The pictures keep the wider margin (SHARP_MARGIN, half a viewport), so
+what a pan brings into view is already crisp.
+
+perf/bench.mjs, old margins against new on one build, four interleaved
+runs on a loaded machine, medians: live documents at 60% 12 -> 4-6;
+leaving a neighbourhood and coming back, editor main thread 435 -> 183 ms
+and every frame on screen showing its document after 602 -> 329 ms. The
+other gestures are unchanged within the noise.
+
+What it costs: a frame that has just scrolled into view is its picture
+until the camera rests (120 ms), where it used to be a document already
+if it had been within half a viewport. A press on it wakes it at once, as
+on any frame showing its picture.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/lib/liveFrames.ts    | 22 +++++++++++++++++-----
+ tests/liveFrames.test.ts | 16 +++++++++++++---
+ 2 files changed, 30 insertions(+), 8 deletions(-)
+
+diff --git a/src/lib/liveFrames.ts b/src/lib/liveFrames.ts
+index 6882c56..2e862d1 100644
+--- a/src/lib/liveFrames.ts
++++ b/src/lib/liveFrames.ts
+@@ -56,10 +56,22 @@ export function cullingEnabled(): boolean {
+ /** Below this zoom a frame is too small on screen for its live document to
+  *  matter: it shows its preview image even in view. */
+ export const LIVE_MIN_ZOOM = 0.3
+-/** A frame comes alive when it is within this many viewports of the view… */
+-export const ENTER_MARGIN = 0.5
++/** A frame comes alive when it is within this many viewports of the view…
++ *
++ *  The margin was half a viewport, so that a short pan showed documents, not
++ *  blanks. A frame without its document shows a sharp picture of itself now,
++ *  and keeps it until the document has painted, so the margin only decides
++ *  how many documents boot that nobody is looking at: at 60% on a page of
++ *  desktop screens, 12 went live at every rest of the camera where 4 to 6
++ *  were on screen. Each boot is a FrameView mounted on the editor's main
++ *  thread and a document started in the frames' process. */
++export const ENTER_MARGIN = 0.1
+ /** …and stays alive until it is farther than this (no flicker at the edge). */
+-export const KEEP_MARGIN = 1
++export const KEEP_MARGIN = 0.5
++/** The frames within this many viewports of the resting view get their
++ *  picture at the sharp level: wider than the live margin, so what a pan
++ *  brings in is already crisp. */
++export const SHARP_MARGIN = 0.5
+ /** At most this many live documents besides the pinned ones; the nearest win. */
+ export const MAX_LIVE = 24
+ /** A selection this large pins nothing: selecting a whole page must not boot
+@@ -121,7 +133,7 @@ export function computeLiveFrames(
+ }
+ 
+ /** The frames whose previews are worth a sharper picture than the smallest:
+- *  the ones within the entry margin of the resting view (those the camera
++ *  the ones within SHARP_MARGIN of the resting view (those the camera
+  *  shows, or will with a short pan). Everything farther keeps the smallest
+  *  level. Without that limit a zoom-in changed every preview on the page to
+  *  the large picture; the far ones only queued it (they load lazily), and a
+@@ -130,7 +142,7 @@ export function computeLiveFrames(
+ export function sharpPreviews(frames: readonly FrameBox[], camera: Camera, stage: Size): Set<string> {
+   const sharp = new Set<string>()
+   if (stage.width <= 0 || stage.height <= 0 || camera.zoom <= 0) return sharp
+-  const near = viewRect(camera, stage, ENTER_MARGIN)
++  const near = viewRect(camera, stage, SHARP_MARGIN)
+   for (const f of frames) if (!f.element && intersects(f, near)) sharp.add(f.id)
+   return sharp
+ }
+diff --git a/tests/liveFrames.test.ts b/tests/liveFrames.test.ts
+index 8d4b3e9..8c13e6b 100644
+--- a/tests/liveFrames.test.ts
++++ b/tests/liveFrames.test.ts
+@@ -62,11 +62,21 @@ describe('computeLiveFrames', () => {
+     expect(live.has('f399')).toBe(false)
+   })
+ 
++  it('boots the frames on screen, not their neighbours beyond the edge', () => {
++    const frames = grid(64)
++    // the view shows world x 0..1400, y 0..900: f0 fills it. Its neighbours start 200 px past the
++    // right edge (f1) and the bottom edge (f8), beyond the 0.1-viewport entry margin (140 and 90 px)
++    const live = computeLiveFrames(frames, { x: 0, y: 0, zoom: 1 }, stage, none, none)
++    expect([...live]).toEqual(['f0'])
++    // one of them a sliver into view is wanted
++    expect(computeLiveFrames(frames, { x: -300, y: 0, zoom: 1 }, stage, none, none).has('f1')).toBe(true)
++  })
++
+   it('keeps a live frame alive a little past the edge it entered at (no flicker)', () => {
+     const frames = grid(16)
+-    // the view shows world x 900..2300; f2 starts at x=3200: outside the 0.5-viewport entry
+-    // margin (200..3000), inside the 1-viewport keep margin (-500..3700)
+-    const camera = { x: -900, y: 0, zoom: 1 }
++    // the view shows world x 1300..2700; f2 starts at x=3200: outside the 0.1-viewport entry
++    // margin (1160..2840), inside the 0.5-viewport keep margin (600..3400)
++    const camera = { x: -1300, y: 0, zoom: 1 }
+     const entered = computeLiveFrames(frames, camera, stage, none, none)
+     expect(entered.has('f2')).toBe(false)
+     const kept = computeLiveFrames(frames, camera, stage, none, new Set(['f2']))

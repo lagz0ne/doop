@@ -1,0 +1,276 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 05:09:37 +0000
+Subject: [PATCH 15/19] perf(canvas): a zoom step restyles the canvas only when
+ its chrome has drifted
+
+Chrome drawn inside the world at a fixed screen size (frame names, rings,
+grips, pins) undoes the camera's zoom through the --zoom custom property
+on the stage. The property is inherited, so every write restyles each
+element under the stage and re-lays out and repaints whatever reads it.
+Traced on a 188-frame page at 60-95% with 12 live documents in view, a
+zoom in small steps as a pinch makes them: every one of 19 steps restyled
+1555 elements (10-13 ms each on a loaded machine), re-laid out 390 and
+repainted every frame name, where a pan step is one transform.
+
+- The stage's --zoom now follows a moving camera in steps: it is rewritten
+  once the zoom has drifted 10% from the value last written
+  (chromeZoomStale, layoutZoom.ts) and exactly when the camera has rested
+  for 120 ms. In between, that chrome is off its screen size by at most
+  10%; a wheel notch or a zoom jump is past the drift and is written at
+  once.
+- The label layer, which places the size badge from the zoom, gets the
+  exact zoom on every step: its own few elements are all that restyles.
+  It carries data-stage-labels, where a script can read the camera's zoom.
+- useCanvasDrawing read the zoom at all times for the pen's snap radius.
+  The hook runs inside the Stage, so the whole Stage re-rendered on every
+  zoom step (and its layout effect forced the restyle above from script).
+  It now reads the zoom only while a path is being drawn.
+
+Editor main thread, perf/bench.mjs "zoom 60>95>60%", four interleaved
+runs against the previous build on a loaded machine (load 10-25), median:
+1015 -> 516 ms, style 187-471 -> 93-195 ms, slow frames 5 -> 1.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/components/CanvasDrawing.tsx |  6 ++++-
+ src/components/Stage.tsx         | 40 +++++++++++++++++++++++++-------
+ src/lib/layoutZoom.ts            | 20 ++++++++++++++++
+ tests/chromeZoom.test.ts         | 32 +++++++++++++++++++++++++
+ tests/liveFramesBrowser.test.ts  | 23 ++++++++++++++++++
+ 5 files changed, 111 insertions(+), 10 deletions(-)
+ create mode 100644 tests/chromeZoom.test.ts
+
+diff --git a/src/components/CanvasDrawing.tsx b/src/components/CanvasDrawing.tsx
+index 46e0938..5f8b43c 100644
+--- a/src/components/CanvasDrawing.tsx
++++ b/src/components/CanvasDrawing.tsx
+@@ -278,7 +278,11 @@ export function useCanvasDrawing(stage: RefObject<HTMLDivElement>) {
+       onFinish={() => finish()}
+     />
+   )
+-  const penZoom = useStore((s) => s.viewport.zoom)
++  /* The zoom matters here only while a path is being drawn (the snap radius
++     is in screen px). This hook runs inside the Stage, so reading the zoom
++     at all times re-rendered the whole Stage on every step of a zoom. */
++  const drawingPath = draft?.drawing.tool === 'path'
++  const penZoom = useStore((s) => (drawingPath ? s.viewport.zoom : 1))
+   /* what the pen's badge says a press would do: close the path, land on an
+      anchor it already placed, or just add the next point */
+   const penCursor = (() => {
+diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
+index 4bf0984..3b5f65f 100644
+--- a/src/components/Stage.tsx
++++ b/src/components/Stage.tsx
+@@ -48,7 +48,7 @@ import {
+ import { TOOLS, isDrawingTool, resolvePointerAction, toolForKey, type Tool } from '../lib/tools'
+ import { useCanvasDrawing } from './CanvasDrawing'
+ import { FrameLabelLayer } from './FrameLabelLayer'
+-import { layoutZoomFor } from '../lib/layoutZoom'
++import { chromeZoomStale, layoutZoomFor } from '../lib/layoutZoom'
+ import { useT, type PlainMessageKey } from '../lib/i18n'
+ import { NO_INSETS, fitBox, type StageInsets } from '../lib/viewFit'
+ import { spaceWouldScroll } from '../lib/spaceScroll'
+@@ -65,6 +65,9 @@ import {
+ } from '../lib/liveFrames'
+ 
+ const MIN_ZOOM = 0.08
++/* how long the camera holds still before the chrome inside the world is put
++   back to its exact screen size (see chromeZoomStale) */
++const CHROME_ZOOM_REST_MS = 120
+ /* The settled world is laid out at up to this zoom too (layoutZoomFor), so
+    the desktop app stays sharp all the way in. That costs little: WebKit and
+    Chromium both tile what is on screen, so backing memory follows the
+@@ -271,6 +274,8 @@ export function Stage({
+       const vp = useStore.getState().viewport
+       el.style.setProperty('--vx', `${vp.x}px`)
+       el.style.setProperty('--vy', `${vp.y}px`)
++      el.style.setProperty('--zoom', String(vp.zoom))
++      labelZoom.current = vp.zoom
+     }
+     setLabelLayer(el)
+   }, [])
+@@ -278,6 +283,7 @@ export function Stage({
+   const previewPage = useRef<string | null>(null)
+   /* the zoom and grid period last written to the DOM (see apply) */
+   const appliedZoom = useRef<number | null>(null)
++  const labelZoom = useRef<number | null>(null)
+   const appliedPeriod = useRef<number | null>(null)
+   const zoomLabelRef = useRef<HTMLSpanElement>(null)
+   const setViewport = useStore((s) => s.setViewport)
+@@ -340,7 +346,12 @@ export function Stage({
+      transform, the grid layer, the --zoom variable (which counter-scales
+      labels/pins/cursors from CSS), and the zoom pill's % directly. */
+   useLayoutEffect(() => {
+-    function apply(vp: { x: number; y: number; zoom: number }) {
++    function writeChromeZoom(zoom: number) {
++      if (appliedZoom.current === zoom || !ref.current) return
++      appliedZoom.current = zoom
++      ref.current.style.setProperty('--zoom', String(zoom))
++    }
++    function apply(vp: { x: number; y: number; zoom: number }, exact = false) {
+       const world = worldRef.current
+       const grid = gridRef.current
+       const stage = ref.current
+@@ -354,12 +365,18 @@ export function Stage({
+       if (labels) {
+         labels.style.setProperty('--vx', `${vp.x}px`)
+         labels.style.setProperty('--vy', `${vp.y}px`)
++        /* the label layer places its badges from the zoom, so it always has
++           the exact one; its few elements are all that write restyles */
++        if (labelZoom.current !== vp.zoom) {
++          labelZoom.current = vp.zoom
++          labels.style.setProperty('--zoom', String(vp.zoom))
++        }
+       }
+-      /* everything below follows the zoom alone: a pan leaves it untouched */
+-      if (appliedZoom.current !== vp.zoom) {
+-        appliedZoom.current = vp.zoom
+-        stage.style.setProperty('--zoom', String(vp.zoom))
+-      }
++      /* everything below follows the zoom alone: a pan leaves it untouched.
++         The stage's own --zoom sizes the chrome inside the world, and a write
++         restyles the whole canvas: it follows a moving camera in steps and
++         catches up when the camera rests (chromeZoomStale, layoutZoom.ts) */
++      if (exact || chromeZoomStale(appliedZoom.current, vp.zoom)) writeChromeZoom(vp.zoom)
+       const period = 26 * vp.zoom
+       if (appliedPeriod.current !== period) {
+         appliedPeriod.current = period
+@@ -389,8 +406,9 @@ export function Stage({
+       if (zoomLabelRef.current && zoomLabelRef.current.textContent !== percent)
+         zoomLabelRef.current.textContent = percent
+     }
+-    apply(useStore.getState().viewport)
++    apply(useStore.getState().viewport, true)
+     let settle = 0
++    let chromeRest = 0
+     const unsub = useStore.subscribe((s, prev) => {
+       /* a (re)connect needs the camera announced afresh — the server only
+          knows what this socket has sent */
+@@ -399,6 +417,9 @@ export function Stage({
+       if (s.viewport === prev.viewport) return
+       apply(s.viewport)
+       if (ref.current) sendViewport(s.viewport, ref.current)
++      window.clearTimeout(chromeRest)
++      if (appliedZoom.current !== s.viewport.zoom)
++        chromeRest = window.setTimeout(() => writeChromeZoom(useStore.getState().viewport.zoom), CHROME_ZOOM_REST_MS)
+       window.clearTimeout(settle)
+       settle = window.setTimeout(() => {
+         setLayoutZoom(layoutZoomFor(useStore.getState().viewport.zoom, MAX_ZOOM))
+@@ -407,6 +428,7 @@ export function Stage({
+     return () => {
+       unsub()
+       window.clearTimeout(settle)
++      window.clearTimeout(chromeRest)
+     }
+   }, [])
+ 
+@@ -1379,7 +1401,7 @@ export function Stage({
+               ref={gridRef}
+             />
+             {/* the selected frame's size badge, in screen px (FrameLabelLayer) */}
+-            <div className="pointer-events-none absolute inset-0" ref={attachLabelLayer} />
++            <div className="pointer-events-none absolute inset-0" data-stage-labels="" ref={attachLabelLayer} />
+             {/* `world` is likewise a behaviour hook: pan hit-testing checks
+             classList.contains('world') to tell background from frame */}
+             <div
+diff --git a/src/lib/layoutZoom.ts b/src/lib/layoutZoom.ts
+index 680ec04..f1c257e 100644
+--- a/src/lib/layoutZoom.ts
++++ b/src/lib/layoutZoom.ts
+@@ -60,3 +60,23 @@ export function layoutZoomFor(zoom: number, max: number, density = FRAME_DOCUMEN
+ export function counterZoom(k: number): number {
+   return exactInverse(Math.fround(k)) ?? 1 / k
+ }
++
++/* Chrome drawn inside the world at a fixed screen size (frame names, rings,
++   grips, pins) undoes the camera's zoom through the --zoom custom property.
++   The property is inherited, so every write restyles each element under the
++   stage and re-lays out and repaints whatever reads it: on a page of 188
++   frames, 10-13 ms of style for ~1550 elements plus the paint and commit of
++   every frame name, on each step of a zoom. A zoom that only moves the
++   world's transform costs none of that. So while the camera is moving the
++   property follows it in steps: it is rewritten once the zoom has drifted
++   this far from the value last written, and exactly when the camera rests.
++   In between, that chrome is off its screen size by at most the drift. */
++export const CHROME_ZOOM_DRIFT = 1.1
++
++/** True when the zoom last written for the world's chrome is too far from
++ *  the camera's to leave standing while it moves. */
++export function chromeZoomStale(written: number | null, zoom: number, drift = CHROME_ZOOM_DRIFT): boolean {
++  if (written === null || !(written > 0) || !(zoom > 0)) return true
++  const ratio = zoom > written ? zoom / written : written / zoom
++  return ratio > drift
++}
+diff --git a/tests/chromeZoom.test.ts b/tests/chromeZoom.test.ts
+new file mode 100644
+index 0000000..81c6ee4
+--- /dev/null
++++ b/tests/chromeZoom.test.ts
+@@ -0,0 +1,32 @@
++import { describe, expect, it } from 'vitest'
++import { CHROME_ZOOM_DRIFT, chromeZoomStale } from '../src/lib/layoutZoom'
++
++/* The --zoom the world's chrome is sized by follows a moving camera in
++   steps (layoutZoom.ts): a write restyles the whole canvas. */
++describe('chromeZoomStale', () => {
++  it('leaves a zoom within the drift standing, in either direction', () => {
++    expect(chromeZoomStale(1, 1)).toBe(false)
++    expect(chromeZoomStale(1, 1.05)).toBe(false)
++    expect(chromeZoomStale(1, 0.95)).toBe(false)
++    expect(chromeZoomStale(0.5, 0.5 * CHROME_ZOOM_DRIFT * 0.999)).toBe(false)
++    expect(chromeZoomStale(0.5, (0.5 / CHROME_ZOOM_DRIFT) * 1.001)).toBe(false)
++  })
++
++  it('asks for a write once the camera has drifted past it', () => {
++    expect(chromeZoomStale(1, 1.2)).toBe(true)
++    expect(chromeZoomStale(1, 0.8)).toBe(true)
++    expect(chromeZoomStale(0.08, 0.6)).toBe(true)
++    expect(chromeZoomStale(8, 8 * CHROME_ZOOM_DRIFT * 1.001)).toBe(true)
++  })
++
++  it('always writes when nothing usable was written yet', () => {
++    expect(chromeZoomStale(null, 1)).toBe(true)
++    expect(chromeZoomStale(0, 1)).toBe(true)
++    expect(chromeZoomStale(Number.NaN, 1)).toBe(true)
++  })
++
++  it('takes the drift it is given', () => {
++    expect(chromeZoomStale(1, 1.05, 1.02)).toBe(true)
++    expect(chromeZoomStale(1, 1.05, 1.5)).toBe(false)
++  })
++})
+diff --git a/tests/liveFramesBrowser.test.ts b/tests/liveFramesBrowser.test.ts
+index de4ca1b..09e3da1 100644
+--- a/tests/liveFramesBrowser.test.ts
++++ b/tests/liveFramesBrowser.test.ts
+@@ -94,6 +94,29 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
+     expect(n).toBeLessThanOrEqual(MAX_LIVE)
+   }, 30_000)
+ 
++  it('sizes the chrome in the world from a zoom that follows a moving camera in steps', async () => {
++    /* the stage's --zoom restyles the whole canvas when written, so a small
++       zoom step leaves it standing; the label layer, which places its badges
++       from the zoom, always has the exact one */
++    const zooms = () =>
++      page.evaluate(() => ({
++        world: document.querySelector<HTMLElement>('.stage')?.style.getPropertyValue('--zoom'),
++        labels: document.querySelector<HTMLElement>('[data-stage-labels]')?.style.getPropertyValue('--zoom'),
++      }))
++    await camera(page, { x: 0, y: 0, zoom: 0.5 })
++    expect(await zooms()).toEqual({ world: '0.5', labels: '0.5' })
++    await store(page, 'setViewport({ x: 0, y: 0, zoom: 0.52 })')
++    expect(await zooms()).toEqual({ world: '0.5', labels: '0.52' })
++    /* past the drift it is written at once… */
++    await store(page, 'setViewport({ x: 0, y: 0, zoom: 0.7 })')
++    expect(await zooms()).toEqual({ world: '0.7', labels: '0.7' })
++    /* …and a camera at rest always gets its exact zoom */
++    await store(page, 'setViewport({ x: 0, y: 0, zoom: 0.72 })')
++    expect((await zooms()).world).toBe('0.7')
++    await new Promise((r) => setTimeout(r, 400))
++    expect(await zooms()).toEqual({ world: '0.72', labels: '0.72' })
++  }, 30_000)
++
+   it('shows previews, not documents, when zoomed out past reading', async () => {
+     await camera(page, { x: 0, y: 0, zoom: 0.08 })
+     expect(await iframes(page)).toBe(0)

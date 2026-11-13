@@ -42,11 +42,50 @@ outside this repo.)
 | 0012 | feat(embed): the review panel host apps embed, at `/embed` | review in the host app without going to doop |
 | 0013 | feat(ui): a reviewer's layout, one dock at the bottom | the editor for someone who comments and reviews |
 | 0014 | feat(embed): the review panel in the editor's reviewer layout | one layout for both |
+| 0015 | perf(canvas): a zoom step restyles the canvas only when its chrome has drifted | the stage's inherited `--zoom` restyled ~1550 elements and repainted every frame name on each zoom step. It now follows a moving camera in 10% steps and is exact at rest; the label layer always has the exact zoom (`data-stage-labels`). The Stage no longer re-renders per zoom step (`useCanvasDrawing` read the zoom at all times) |
+| 0016 | perf(canvas): a pan press restyles nothing | with the Hand tool each press and release restyled the whole document (15 + 13 ms): `user-select` set on the root, and a descendant cursor rule swapped on the stage. Now a `selectstart` guard and one cover element (0.8 + 0.3 ms) |
+| 0017 | perf(canvas): ask once per document whether it is a canvas element | a regular expression over each frame's whole HTML, several times per frame per render (30 ms of opening a 188-frame page) |
+| 0018 | perf(canvas): boot one document per frame while frames come late | two boots were one main-thread task of up to 36 ms; the batch is two only while frames come on time |
+| 0019 | perf(canvas): only the frames in view go live | the half-viewport live margin booted 12 documents per rest where 4-6 were on screen. Entry margin 0.1, keep margin 0.5; previews keep the half-viewport margin for their sharp level |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
 480-540 ms; pan at 60% 1780 → 715 ms; fit jump 390 → 125 ms; open page 10.4 → 2.2 s renderer
 CPU, editor heap 116 → 27 MB. Raw numbers: `perf/final-bench.txt`.
+
+Second render pass (0015-0019, 2026-11-13), from fresh traces of v0.14.0 + 0001-0014 on the same
+188-frame page (`perf/trace-live.mjs`, `perf/events.mjs`, `perf/longtasks.mjs`,
+`perf/presscheck.mjs`, `perf/bench.mjs` through `perf/ab.sh`). The machine was loaded (load
+10-30) and has no GPU, so every number is a median of interleaved pairs and says nothing about
+raster or compositing cost on a real display. Editor main thread, before → after: zoom over live
+frames (60>95>60%) 741-1015 → 511-516 ms; six presses with the Hand tool 293 → 149 ms (slow
+frames 5 → 0); leaving a neighbourhood and coming back 435 → 183 ms, its frames showing their
+documents after 602 → 329 ms; live documents at 60% 12 → 4-6. Pan at fit, zoom 8→60% and the fit
+jump are unchanged within the noise.
+
+Tests for 0015-0019: `bin/doop check --test` 2234 pass, 2 fail, 382 skipped (that run has no
+browser, so the browser files are skipped); the two failures are server tests that time out
+under load (`oidc`, `rate-limit-wiring`; both pass alone, and `rate-limit-wiring` fails the same
+way on the pristine pin). With a browser, the full suite on the same code: 2559 pass, the 10
+`elementPanelBrowser` failures that pristine v0.14.0 has on this machine, and timeouts under
+load; the canvas browser files run on their own (`liveFramesBrowser`, `drawingBrowser`,
+`reviewerLayoutBrowser`, `fitSelectionBrowser`, `zoomToolBrowser`, `frameResizeBrowser`,
+`textSelectionBrowser`, `pageCanvasBrowser`): 179 of 179.
+
+Tried and not shipped: keeping a frame's document alive after it leaves the view (moved with
+`Node.moveBefore` into a clipped holder and back; `perf/parkcheck.mjs`). It works (a kept document
+gets no animation frames, keeps its viewport and its script-made state) but did not pay: going
+live is paced per frame and costs a FrameView mount either way, so a neighbourhood was back on
+screen no sooner, and the kept documents cost memory. It would pay together with a lighter live
+frame (a document shown without the full FrameView until the pointer reaches it). Looked at and
+left: one message router for all frames in place of three window listeners per live frame (a few
+per cent of a pan at most); frame names in one overlay layer (hiding them halves the main-thread
+cost of a pan at fit, 216 → 122 ms, but a pan at fit already drops no frames, and upstream put
+the names inside the frames so that they stack with them); the ~200 compositor layers, one per
+frame (Chrome will not merge sparse layers). Still unmeasured: what a zoom step over live
+out-of-process frames costs in raster on a real GPU (each step re-rasters every live frame once
+the zoom is past 25%), which is the reason to consider covering live frames with their pictures
+while a zoom gesture lasts.
 
 Preview fidelity (0007-0009, 2026-11-12: culled frames looked too rasterized, and a clicked
 frame looked very different from its neighbours). Three causes, measured on a copy of a real
