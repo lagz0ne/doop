@@ -34,6 +34,11 @@ export const session = pgTable('session', {
      It is the audit trail for impersonation and the flag every read-only
      guard reads — see server/index.ts. */
   impersonatedBy: text('impersonated_by'),
+  /* an embedded review panel session (server/embed.ts): the one canvas it
+     may open and its role there. The grant lives on the session, not the
+     user, so it ends with it. */
+  embedCanvasId: text('embed_canvas_id'),
+  embedRole: text('embed_role'),
 })
 
 export const account = pgTable('account', {
