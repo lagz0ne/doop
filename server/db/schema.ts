@@ -68,6 +68,9 @@ export const canvases = pgTable('canvases', {
   ownerId: text('owner_id'),
   /** 'edit' | 'none'; null = 'none' (private — link sharing is opt-in) */
   linkAccess: text('link_access'),
+  /** the share link's password, hashed (scrypt, better-auth's hasher); null =
+   *  no password. Kept off the Canvas object (server/linkPasswords.ts). */
+  linkPassword: text('link_password'),
   /** set when the owner has listed this canvas in the community gallery;
    *  null = private to its collaborators. Publishing grants read-only
    *  previews and copies, never access to the canvas itself. */

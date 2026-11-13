@@ -356,6 +356,9 @@ export const api = {
   /* owner-only: what the share link grants people who aren't invited */
   setLinkAccess: (id: string, linkAccess: LinkAccess) =>
     req('/api/canvases/' + id, { method: 'PATCH', body: JSON.stringify({ linkAccess }) }),
+  /** the share link's password; null takes it away (server/shareLink.ts) */
+  setLinkPassword: (id: string, linkPassword: string | null) =>
+    req('/api/canvases/' + id, { method: 'PATCH', body: JSON.stringify({ linkPassword }) }),
   /* community gallery: owner-only listing, open browsing and copying */
   publishCanvas: (id: string, listing: { description: string; category: CommunityCategory }) =>
     req<Pick<Canvas, 'publishedAt' | 'description' | 'category'>>(`/api/canvases/${id}/publish`, {

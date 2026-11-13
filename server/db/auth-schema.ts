@@ -39,6 +39,11 @@ export const session = pgTable('session', {
      user, so it ends with it. */
   embedCanvasId: text('embed_canvas_id'),
   embedRole: text('embed_role'),
+  /* a share-link guest's session (server/shareLink.ts): the one canvas its
+     link opened, and the link's key when it was opened (a fingerprint of the
+     password then), so a new password ends every guest session at once */
+  linkCanvasId: text('link_canvas_id'),
+  linkKey: text('link_key'),
 })
 
 export const account = pgTable('account', {

@@ -220,9 +220,12 @@ export interface Canvas {
   name: string
   ownerId?: string
   /** what the share link grants people who are not the owner or invited:
-   *  'view', 'comment' or 'edit', or 'none' (private — the default; unset
-   *  means 'none'). See shared/canvasRole.ts. */
+   *  'view', 'comment', 'review' or 'edit', or 'none' (private — the default;
+   *  unset means 'none'). See shared/canvasRole.ts. */
   linkAccess?: LinkAccess
+  /** the link asks for a password (its hash stays on the server,
+   *  server/linkPasswords.ts); unset = anyone with the link gets its level */
+  linkPassword?: true
   /** the caller's own role, set on the copy a canvas GET or a room `init`
    *  hands one person; never stored */
   role?: CanvasRole

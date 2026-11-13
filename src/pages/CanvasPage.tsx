@@ -87,6 +87,7 @@ import { copyPicked, hasElementClip, pasteLayer } from '../lib/elementClipboard'
 import { isCanvasClipboard, writeCanvasClipboard } from '../lib/canvasClipboard'
 import { authClient } from '../lib/auth'
 import { FULL_UI } from '../lib/fullUi'
+import { useMe } from '../lib/me'
 import { avatarUrl } from '../../shared/avatar'
 import { posthog } from '../lib/posthog'
 import { useIsMobile } from '../hooks/use-mobile'
@@ -698,6 +699,11 @@ export function CanvasPage({
   /* the face's photo comes from the account, not the room: our own presence
      is never in the roster */
   const { data: session } = authClient.useSession()
+  /* a share-link guest (server/shareLink.ts) has this canvas and no account:
+     no way back to a canvas list, no settings, no sharing */
+  const linkGuest = !!useMe(session?.user.id)?.linkGuest
+  /* the full UI shares as upstream does; put away, the owner still shares */
+  const canShare = !guest && !linkGuest && (FULL_UI || (!!canvas?.ownerId && canvas.ownerId === session?.user.id))
   const others = useMemo(
     () => Object.values(presences).filter((p) => p.clientId !== me.clientId),
     [presences, me.clientId],
@@ -982,7 +988,7 @@ export function CanvasPage({
             </BarPill>
           )}
           <BarPill>
-            {FULL_UI && !guest && (
+            {canShare && (
               <Button variant="bare" className={barPillBtn} onClick={() => setShowShare(true)}>
                 <ShareUpIcon className="size-3.5" />
                 {t('canvas.share')}
@@ -1199,7 +1205,7 @@ export function CanvasPage({
               <CanvasDock
                 title={<CanvasName readOnly={readOnly} />}
                 idMenu={<CanvasIdMenu canvasId={canvasId} onCopied={showToast} compact />}
-                onBack={guest ? null : () => navigate('/')}
+                onBack={guest || linkGuest ? null : () => navigate('/')}
                 zoomSlot={setZoomSlot}
                 me={meFace}
                 others={others}
@@ -1217,7 +1223,7 @@ export function CanvasPage({
                         setShowActivity(true)
                       }
                 }
-                onConnect={readOnly ? null : openConnect}
+                onConnect={readOnly || linkGuest ? null : openConnect}
                 inspector={
                   readOnly
                     ? null
@@ -1227,7 +1233,8 @@ export function CanvasPage({
                         onToggle: toggleProperties,
                       }
                 }
-                onSettings={guest ? null : () => navigate('/settings')}
+                onSettings={guest || linkGuest ? null : () => navigate('/settings')}
+                onShare={canShare ? () => setShowShare(true) : null}
               />
             </>
           )}
@@ -1272,7 +1279,7 @@ export function CanvasPage({
                     <ImportIcon /> {t('canvas.importWebsite')}
                   </Button>
                 )}
-                {FULL_UI && !guest && (
+                {canShare && (
                   <Button
                     variant="ghost"
                     className="h-11 justify-start gap-2.5 border-line bg-surface px-4"

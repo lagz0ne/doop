@@ -19,13 +19,26 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Textarea } from './ui/textarea'
 import { ToggleChipGroup, ToggleChipItem } from './ui/toggle-chip'
 import { useT, type PlainMessageKey } from '@/lib/i18n'
+import { FULL_UI } from '../lib/fullUi'
 
 type ShareableCanvas = Pick<
   Canvas,
-  'id' | 'name' | 'ownerId' | 'linkAccess' | 'memberIds' | 'workspaceId' | 'publishedAt' | 'description' | 'category'
+  | 'id'
+  | 'name'
+  | 'ownerId'
+  | 'linkAccess'
+  | 'linkPassword'
+  | 'memberIds'
+  | 'workspaceId'
+  | 'publishedAt'
+  | 'description'
+  | 'category'
 >
 type SharePatch = Partial<
-  Pick<ShareableCanvas, 'linkAccess' | 'memberIds' | 'workspaceId' | 'publishedAt' | 'description' | 'category'>
+  Pick<
+    ShareableCanvas,
+    'linkAccess' | 'linkPassword' | 'memberIds' | 'workspaceId' | 'publishedAt' | 'description' | 'category'
+  >
 >
 
 /* What each share-link level grants, as the picker and the read-out say it. */
@@ -33,6 +46,7 @@ const LINK_ACCESS_LABELS: Record<LinkAccess, PlainMessageKey> = {
   none: 'panels.shareAccessNone',
   view: 'panels.shareAccessView',
   comment: 'panels.shareAccessComment',
+  review: 'panels.shareAccessReview',
   edit: 'panels.shareAccessEdit',
 }
 
@@ -40,6 +54,7 @@ const LINK_ACCESS_SUMMARY: Record<LinkAccess, PlainMessageKey> = {
   none: 'panels.shareSummaryNone',
   view: 'panels.shareSummaryView',
   comment: 'panels.shareSummaryComment',
+  review: 'panels.shareSummaryReview',
   edit: 'panels.shareSummaryEdit',
 }
 
@@ -53,7 +68,7 @@ const CATEGORY_LABELS: Record<CommunityCategory, PlainMessageKey> = {
   other: 'panels.shareCategoryOther',
 }
 
-const LINK_ACCESS_ORDER: readonly LinkAccess[] = ['none', 'view', 'comment', 'edit']
+const LINK_ACCESS_ORDER: readonly LinkAccess[] = ['none', 'view', 'comment', 'review', 'edit']
 
 /* One sharing surface for the canvas and dashboard. The caller owns canvas
    state; this component reports optimistic access changes back to it. */
@@ -327,7 +342,10 @@ export function ShareModal({
             {t('panels.shareCopyLink')}
           </Button>
         </div>
-        {isOwner && (
+        {isOwner && linkAccess !== 'none' && (
+          <LinkPassword canvas={canvas} busy={busy} setBusy={setBusy} setError={setError} onChange={onChange} />
+        )}
+        {isOwner && FULL_UI && (
           <CommunityListing canvas={canvas} busy={busy} setBusy={setBusy} setError={setError} onChange={onChange} />
         )}
         {upgrade && (
@@ -339,6 +357,109 @@ export function ShareModal({
         )}
       </>
     </Modal>
+  )
+}
+
+/* The share link's password, the owner's choice: none (the link is enough)
+   or one that visitors type with their name before the canvas opens
+   (server/shareLink.ts). The password is never shown back; it can be set,
+   changed or removed, and a change sends earlier guests back to the door. */
+function LinkPassword({
+  canvas,
+  busy,
+  setBusy,
+  setError,
+  onChange,
+}: {
+  canvas: ShareableCanvas
+  busy: boolean
+  setBusy: (busy: boolean) => void
+  setError: (error: string | null) => void
+  onChange: (patch: SharePatch) => void
+}) {
+  const t = useT()
+  const on = !!canvas.linkPassword
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [note, setNote] = useState<string | null>(null)
+
+  async function save(next: string | null) {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    setNote(null)
+    try {
+      await api.setLinkPassword(canvas.id, next)
+      onChange({ linkPassword: next ? true : undefined })
+      setEditing(false)
+      setDraft('')
+      setNote(next ? t('panels.sharePasswordSaved') : t('panels.sharePasswordRemoved'))
+    } catch (caught) {
+      setError(
+        caught instanceof ApiError
+          ? String(caught.body.error ?? t('panels.sharePasswordFailed'))
+          : t('panels.sharePasswordFailed'),
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-3 flex flex-col gap-2 border-t border-line-soft pt-3.5">
+      <div className="flex items-center gap-2">
+        <span className="text-body font-medium text-ink">{t('panels.sharePassword')}</span>
+        <span className="text-label text-ink-faint">
+          {on ? t('panels.sharePasswordOn') : t('panels.sharePasswordOff')}
+        </span>
+        {!editing && (
+          <span className="ml-auto flex items-center gap-1.5">
+            <Button size="sm" disabled={busy} onClick={() => setEditing(true)}>
+              {on ? t('panels.sharePasswordChange') : t('panels.sharePasswordSet')}
+            </Button>
+            {on && (
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => void save(null)}>
+                {t('panels.sharePasswordRemove')}
+              </Button>
+            )}
+          </span>
+        )}
+      </div>
+      {editing && (
+        <form
+          className="flex gap-2"
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (draft) void save(draft)
+          }}
+        >
+          <Input
+            autoFocus
+            type="text"
+            autoComplete="off"
+            maxLength={200}
+            value={draft}
+            placeholder={t('panels.sharePasswordPlaceholder')}
+            aria-label={t('panels.sharePassword')}
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <Button type="submit" disabled={busy || !draft}>
+            {t('panels.sharePasswordSet')}
+          </Button>
+          <IconButton
+            size="md"
+            aria-label={t('common.cancel')}
+            onClick={() => {
+              setEditing(false)
+              setDraft('')
+            }}
+          >
+            <XIcon />
+          </IconButton>
+        </form>
+      )}
+      <p className="text-label leading-snug text-ink-faint">{note ?? t('panels.sharePasswordHint')}</p>
+    </div>
   )
 }
 

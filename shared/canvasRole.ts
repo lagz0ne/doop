@@ -2,13 +2,14 @@
    read-only mode. Spec: .context/specs/share-link-roles.md */
 
 /** What a canvas's share link grants people who are not its owner, an
- *  invited member or a member of its workspace. */
-export type LinkAccess = 'none' | 'view' | 'comment' | 'edit'
+ *  invited member or a member of its workspace. 'review' is comment plus the
+ *  frame verdict (approve, request changes). */
+export type LinkAccess = 'none' | 'view' | 'comment' | 'review' | 'edit'
 
 /** What one person may do on a canvas, from least to most. */
 export type CanvasRole = 'view' | 'comment' | 'review' | 'edit'
 
-export const LINK_ACCESS_LEVELS: readonly LinkAccess[] = ['none', 'view', 'comment', 'edit']
+export const LINK_ACCESS_LEVELS: readonly LinkAccess[] = ['none', 'view', 'comment', 'review', 'edit']
 
 /* review: comment, plus setting a frame's approval; never a design change */
 const RANK: Record<CanvasRole, number> = { view: 0, comment: 1, review: 2, edit: 3 }

@@ -634,9 +634,31 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
 ## 6. Build and Dependency Management
 
 - Canvas access: `canvasRole` in `server/access.ts` gives owners, members and workspace members
-  edit, and share-link visitors the link's level (`none` / `view` / `comment` / `edit`). REST,
-  the WebSocket room and MCP gate reads, comments and writes on it separately; spec in
-  `.context/specs/share-link-roles.md`.
+  edit, and share-link visitors the link's level (`none` / `view` / `comment` / `review` /
+  `edit`). REST, the WebSocket room and MCP gate reads, comments and writes on it separately;
+  spec in `.context/specs/share-link-roles.md`. A link with a password (`canvas.linkPassword`)
+  admits nobody by itself, account or not: its visitors come in as link guests.
+
+- Share-link guests (`server/shareLink.ts`, `src/pages/LinkJoin.tsx`): the owner sets the link's
+  level and, optionally, a password in the Share dialog (`PATCH /api/canvases/:id { linkAccess,
+linkPassword }`, null or '' removes it) or the operator API (`PUT
+/api/operator/canvases/:id/link { access, password }`). The hash (better-auth's scrypt) is
+  `canvases.link_password` (migration 0050), held in `server/linkPasswords.ts` and never on the
+  Canvas object, which carries only the flag. A signed-out visitor on a link that asks for a
+  password or grants more than a look gets a door (`GET /api/auth/link/info?canvas=` for the
+  level, the password flag and, without a password, the name): a name and the password go to
+  `POST /api/auth/link/session` (behind `formCsrfMiddleware`; ten wrong tries per visitor or a
+  hundred per canvas in 15 minutes answer 429), which makes a shadow user
+  `<random>@link.embed.invalid` under the typed name (`letIn`, hidden from lists) and a 30-day
+  session whose grant is on the session row (`link_canvas_id`, `link_key`, the password's
+  fingerprint). The role is read live (`linkRole`): the owner's level change applies at once,
+  the link off shuts guests out, and a new or removed password ends every earlier guest session
+  (rows deleted, room closed 4403). Guests reach their canvas through `linkRouteAllowed`: its
+  routes and its frames', comments', tasks' and feedback's, minus claim, duplicate, workspace,
+  members, sync keys, GitHub, publish and the canvas's own PATCH/DELETE, plus the guest's own
+  empty account reads; never the canvas list, new canvases or agent keys. `/api/me` carries
+  `linkGuest`, and the app keeps such a session on its canvas (anywhere else signs it out).
+  Tests: `shareLink.test.ts`.
 
 - Review verdicts (`shared/canvasRole.ts`, `server/actions.ts` `setFrameApproval`): roles rank view
   < comment < review < edit; `review` comments and gives a frame its verdict but never changes the

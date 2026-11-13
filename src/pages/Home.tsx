@@ -713,6 +713,9 @@ function CanvasActions({
   onDelete?: () => void
 }) {
   const t = useT()
+  /* with the team chrome put away, the owner still shares their own canvas */
+  const { data: session } = authClient.useSession()
+  const canShare = FULL_UI || (!!canvas.ownerId && canvas.ownerId === session?.user.id)
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -731,7 +734,7 @@ function CanvasActions({
         </IconButton>
       </DropdownMenuTrigger>
       <DropdownMenuContent width="md">
-        {FULL_UI && (
+        {canShare && (
           <DropdownMenuItem onSelect={onShare}>
             <ShareIcon className="size-4" /> {t('home.share')}
           </DropdownMenuItem>

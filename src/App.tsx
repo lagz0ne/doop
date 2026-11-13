@@ -5,6 +5,7 @@ import { Home } from './pages/Home'
 import { Community } from './pages/Community'
 import { Settings } from './pages/Settings'
 import { CanvasPage } from './pages/CanvasPage'
+import { LinkJoin } from './pages/LinkJoin'
 import { PrototypePage } from './pages/PrototypePage'
 import { AuthPage } from './pages/AuthPage'
 import { DesktopHandoff } from './pages/DesktopHandoff'
@@ -74,6 +75,20 @@ export function App() {
   /* the support chat bubble stays off the editor, where it would cover the
      zoom bar; every other page keeps it */
   useEffect(() => setSupportWidgetVisible(!canvasId), [canvasId])
+
+  /* A share-link guest (server/shareLink.ts) has its one canvas and no
+     account. Anywhere else (a canvas list it cannot read, another canvas's
+     link, or '/' after the room shut it out) it signs out first: at another
+     canvas's link that brings that link's door, and elsewhere the way back
+     to its own canvas is its door again, which knows whether the link still
+     stands. */
+  const guestCanvasId = me?.linkGuest?.canvasId
+  const guestAway = !!guestCanvasId && canvasId !== guestCanvasId
+  useEffect(() => {
+    if (!guestAway) return
+    const next = canvasId ? location.pathname + location.search : `/c/${guestCanvasId}`
+    void authClient.signOut().finally(() => location.assign(next))
+  }, [guestAway, canvasId, guestCanvasId])
 
   const returningToAdmin = !!me?.impersonating && path.startsWith('/admin')
   useEffect(() => {
@@ -167,12 +182,20 @@ export function App() {
     return (
       <>
         <ShellDragBar />
-        <CanvasPage
+        {/* a link with a password, or one that grants more than a look, asks
+            for a name (and the password) first (LinkJoin) */}
+        <LinkJoin
           canvasId={canvasId}
           key={canvasId}
-          guest
-          onSignUp={() => setGuestAuth('signup')}
           onSignIn={() => setGuestAuth('signin')}
+          fallback={
+            <CanvasPage
+              canvasId={canvasId}
+              guest
+              onSignUp={() => setGuestAuth('signup')}
+              onSignIn={() => setGuestAuth('signin')}
+            />
+          }
         />
       </>
     )
@@ -194,6 +217,7 @@ export function App() {
      its not-found screen. Also blank while the effect above swaps the
      session back and reloads. */
   if (path.startsWith('/admin') && (!me || returningToAdmin)) return <div className="auth-page" />
+  if (guestAway) return <AuthScreen />
 
   /* /c/<id>/proto: the prototype player, full page */
   const prototypeOf = path.match(/^\/c\/([^/]+)\/proto\/?$/)?.[1]

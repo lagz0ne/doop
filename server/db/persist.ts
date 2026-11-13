@@ -8,6 +8,7 @@ import { extractAssetIds } from '../assets.ts'
 import { roleByAgentName } from '../../shared/agents.ts'
 import { isCommunityCategory } from '../../shared/types.ts'
 import { storedLinkAccess } from '../../shared/canvasRole.ts'
+import { rememberLinkPassword } from '../linkPasswords.ts'
 import type { DesignToken, TokenType } from '../../shared/designTokens.ts'
 import { parseRunnerPick } from '../../shared/agentRunner.ts'
 import { byStack } from '../../shared/frameStack.ts'
@@ -65,6 +66,12 @@ export function saveCanvas(c: Canvas) {
       .values({ id: c.id, ...canvasColumns(c), createdAt: c.createdAt })
       .onConflictDoUpdate({ target: t.canvases.id, set: canvasColumns(c) }),
   )
+}
+
+/** The share link's password hash (null = none). Its own write, since
+ *  canvasColumns never carries it: the hash is not on the Canvas object. */
+export function saveLinkPassword(canvasId: string, hash: string | null) {
+  swallow(db.update(t.canvases).set({ linkPassword: hash }).where(eq(t.canvases.id, canvasId)))
 }
 
 /** Persist a newly duplicated canvas as one unit. Unlike ordinary live edits,
@@ -911,6 +918,7 @@ export async function hydrate(): Promise<Hydrated> {
     ownerId: c.ownerId ?? undefined,
     /* 'view' / 'comment' / 'edit'; null and anything unknown read as private */
     linkAccess: storedLinkAccess(c.linkAccess),
+    ...(c.linkPassword ? { linkPassword: true as const } : {}),
     ...(c.publishedAt != null ? { publishedAt: c.publishedAt } : {}),
     ...(c.description ? { description: c.description } : {}),
     ...(isCommunityCategory(c.category) ? { category: c.category } : {}),
@@ -921,6 +929,7 @@ export async function hydrate(): Promise<Hydrated> {
     frames: [],
   }))
   const byId = new Map(canvases.map((c) => [c.id, c]))
+  for (const c of canvasRows) rememberLinkPassword(c.id, c.linkPassword)
   for (const m of memberRows) {
     const c = byId.get(m.canvasId)
     if (c) (c.memberIds ??= []).push(m.userId)

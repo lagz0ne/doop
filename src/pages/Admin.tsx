@@ -40,12 +40,14 @@ type SharedAccess = Exclude<LinkAccess, 'none'>
 const LINK_BADGE = {
   view: 'admin.linkView',
   comment: 'admin.linkComment',
+  review: 'admin.linkReview',
   edit: 'admin.linkEdit',
 } as const satisfies Record<SharedAccess, PlainMessageKey>
 
 const LINK_TITLE = {
   view: 'admin.linkAccessView',
   comment: 'admin.linkAccessComment',
+  review: 'admin.linkAccessReview',
   edit: 'admin.linkAccessEdit',
 } as const satisfies Record<SharedAccess, PlainMessageKey>
 

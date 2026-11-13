@@ -16,6 +16,9 @@ export interface Me {
    *  impersonation replaces the session cookie outright — so this flag is the
    *  only way the app can tell it is in a borrowed session. */
   impersonating?: { byName: string }
+  /** set for a share-link guest (server/shareLink.ts): the one canvas this
+   *  session opens; there is no account behind it */
+  linkGuest?: { canvasId: string }
 }
 
 /* Keyed by the signed-in user id, and never caching a failure. Both matter:

@@ -9,6 +9,7 @@ import * as authSchema from './db/auth-schema.ts'
 import { store } from './store.ts'
 import * as demo from './demo.ts'
 import { embedPlugin } from './embed.ts'
+import { linkPlugin } from './shareLink.ts'
 import { mailerConfigured, sendMail } from './mailer.ts'
 import { acceptInvites } from './workspaces.ts'
 import { purgeUserData } from './accountDeletion.ts'
@@ -35,7 +36,8 @@ export function createdByOperator<T>(create: () => Promise<T>): Promise<T> {
  *  endpoint, since better-auth runs after-create hooks once the endpoint's
  *  transaction ends, outside any scope set inside the handler. */
 function letIn(ctx: unknown): boolean {
-  return !!operatorCreation.getStore() || (ctx as { path?: string } | null)?.path === '/embed/session'
+  const path = (ctx as { path?: string } | null)?.path
+  return !!operatorCreation.getStore() || path === '/embed/session' || path === '/link/session'
 }
 
 /**
@@ -547,6 +549,7 @@ function buildAuth() {
        actually decides linking, as intended. */
     plugins: [
       embedPlugin(),
+      linkPlugin(),
       mcp({
         loginPage: '/',
         oidcConfig: { loginPage: '/', consentPage: '/oauth/consent', refreshTokenExpiresIn: MCP_REFRESH_TOKEN_TTL_S },
