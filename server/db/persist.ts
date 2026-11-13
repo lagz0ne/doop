@@ -457,8 +457,11 @@ function queueVersionWrite(frameId: string, canvasId: string, work: () => Promis
   swallow(queued.finally(() => versionWrites.get(frameId)?.queued === queued && versionWrites.delete(frameId)))
 }
 
-export function saveFrameVersion(version: FrameVersion) {
-  queueVersionWrite(version.frameId, version.canvasId, () => appendFrameVersion(version))
+/** `always`: file it even when the newest row holds the same state, so a
+ *  caller that hands its id on (a verdict's reviewed state) never points at a
+ *  row that was skipped. */
+export function saveFrameVersion(version: FrameVersion, opts: { always?: boolean } = {}) {
+  queueVersionWrite(version.frameId, version.canvasId, () => appendFrameVersion(version, opts.always))
 }
 
 /** Settles once every queued version write the filter picks has landed. */
@@ -467,7 +470,7 @@ function pendingVersionWrites(pick: (frameId: string, canvasId: string) => boole
   return Promise.allSettled(queued)
 }
 
-async function appendFrameVersion(version: FrameVersion) {
+async function appendFrameVersion(version: FrameVersion, always = false) {
   /* a burst that ended where it began (an edit typed and reverted) would
      snapshot the same state twice — the newest row already holds it. Size
      counts: the same document at another frame size is a state of its own */
@@ -477,7 +480,13 @@ async function appendFrameVersion(version: FrameVersion) {
     .where(eq(t.frameVersions.frameId, version.frameId))
     .orderBy(desc(t.frameVersions.savedAt))
     .limit(1)
-  if (latest && latest.html === version.html && latest.width === version.width && latest.height === version.height)
+  if (
+    !always &&
+    latest &&
+    latest.html === version.html &&
+    latest.width === version.width &&
+    latest.height === version.height
+  )
     return
   await db.insert(t.frameVersions).values({
     id: version.id,

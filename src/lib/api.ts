@@ -519,7 +519,11 @@ export const api = {
     req<Frame[]>(`/api/canvases/${canvasId}/stack`, { method: 'PUT', body: JSON.stringify({ frames }) }),
   deleteFrame: (frameId: string, expectedUpdatedAt?: number) =>
     req('/api/frames/' + frameId, { method: 'DELETE', body: JSON.stringify({ expectedUpdatedAt, actor: actor() }) }),
-  setFrameApproval: (frameId: string, status: 'ready_for_dev' | 'draft', expectedUpdatedAt: number) =>
+  setFrameApproval: (
+    frameId: string,
+    status: 'ready_for_dev' | 'changes_requested' | 'draft',
+    expectedUpdatedAt: number,
+  ) =>
     req<Frame>(`/api/frames/${frameId}/approval`, {
       method: 'PUT',
       body: JSON.stringify({ status, expectedUpdatedAt }),

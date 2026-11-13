@@ -91,15 +91,22 @@ export const stage: Catalog['stage'] = {
   versionHistory: 'Histórico de versões…',
   markReadyForDev: 'Marcar como pronto para dev',
   moveToDraft: 'Voltar para rascunho',
+  requestChanges: 'Solicitar alterações',
 
   /* approval */
   readyForDev: 'Pronto para dev',
   needsReview: 'Precisa de revisão',
+  changesRequested: 'Alterações solicitadas',
+  changesRequestedByOn: 'Alterações solicitadas por {name} em {date}',
+  changesRequestedEditedByOn: 'Alterações solicitadas por {name} em {date}; revisado desde então',
   approvedByOn: 'Aprovado por {name} em {date}',
   previouslyApprovedByOn: 'Aprovado anteriormente por {name} em {date}',
   markAsApproved: 'Marcar como aprovado',
   approvalReady: 'Os agentes podem ver que esta tela está aprovada para implementação.',
   approvalChanged: 'Este design mudou depois da aprovação. Revise-o antes de marcá-lo como pronto de novo.',
+  approvalChangesRequested:
+    'Um revisor pediu alterações; os comentários dizem quais. Editar o design o envia de volta para revisão.',
+  approvalRevised: 'Revisado depois que um revisor pediu alterações. Revise-o de novo.',
   approvalPrompt: 'Aprove esta tela para avisar sua equipe e os agentes que ela está pronta para ser construída.',
   saving: 'Salvando…',
   approvalWait: 'Aguarde as alterações terminarem de salvar antes de aprovar.',

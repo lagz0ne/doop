@@ -151,7 +151,7 @@ async function workflow(steps: Step[] = [slack()]): Promise<Automation> {
   return result as Automation
 }
 function approve(frame = source) {
-  return actions.setFrameApproval(frame.id, true, owner)!
+  return actions.setFrameApproval(frame.id, 'ready_for_dev', owner)!
 }
 async function runs(id: string) {
   return (await listRuns(owner.id, id))!
@@ -244,7 +244,7 @@ it('does not replay older approvals on setup or re-enable; Run now can process e
   await runAutomation(a.id)
   expect(sent).toHaveLength(1)
   await updateAutomation(owner.id, a.id, { enabled: false })
-  actions.setFrameApproval(source.id, false, owner)
+  actions.setFrameApproval(source.id, 'draft', owner)
   approve()
   source.approval!.approvedAt -= 500
   await updateAutomation(owner.id, a.id, { enabled: true })
@@ -334,7 +334,7 @@ it('gives separate approvals distinct identities even within the same millisecon
     approve()
     const first = source.approval!.approvedAt
     await runAutomation(a.id)
-    actions.setFrameApproval(source.id, false, owner)
+    actions.setFrameApproval(source.id, 'draft', owner)
     approve()
     expect(source.approval!.approvedAt).toBeGreaterThan(first)
     await runAutomation(a.id)

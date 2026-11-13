@@ -39,12 +39,37 @@ export interface Frame {
 }
 
 export interface FrameApproval {
-  status: 'ready_for_dev' | 'needs_review'
+  /** ready_for_dev: approved; changes_requested: a reviewer sent it back;
+   *  needs_review: the design changed after either verdict */
+  status: 'ready_for_dev' | 'changes_requested' | 'needs_review'
   approvedBy: string
   approvedByUserId: string
   approvedAt: number
   /** The frame revision the person reviewed before approving. */
   approvedFrameUpdatedAt: number
+  /** The last verdict given, which an edit does not erase (status turns
+   *  needs_review, this stays). Unset on approvals older than verdicts:
+   *  read it as ready_for_dev. */
+  verdict?: ApprovalVerdictStatus
+  /** The frame's recent verdicts, oldest first, at most APPROVAL_HISTORY_MAX.
+   *  Moving the frame back to draft clears approval, history included. */
+  history?: ApprovalHistoryEntry[]
+}
+
+export type ApprovalVerdictStatus = 'ready_for_dev' | 'changes_requested'
+
+export const APPROVAL_HISTORY_MAX = 20
+
+export interface ApprovalHistoryEntry {
+  status: ApprovalVerdictStatus
+  by: string
+  byUserId: string
+  at: number
+  /** the frame's updatedAt when the verdict was given */
+  frameUpdatedAt: number
+  /** the reviewed state, filed as a design version when the verdict was given
+   *  (GET /api/frames/:id/versions/:versionId); unset when the frame had no HTML */
+  versionId?: string
 }
 
 /** One entry of a frame's design history: the HTML (and size) the frame had

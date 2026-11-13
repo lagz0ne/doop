@@ -91,15 +91,22 @@ export const stage = {
   versionHistory: 'Version history…',
   markReadyForDev: 'Mark ready for dev',
   moveToDraft: 'Move to draft',
+  requestChanges: 'Request changes',
 
   /* approval */
   readyForDev: 'Ready for dev',
   needsReview: 'Needs review',
+  changesRequested: 'Changes requested',
+  changesRequestedByOn: 'Changes requested by {name} on {date}',
+  changesRequestedEditedByOn: 'Changes requested by {name} on {date}; revised since',
   approvedByOn: 'Approved by {name} on {date}',
   previouslyApprovedByOn: 'Previously approved by {name} on {date}',
   markAsApproved: 'Mark as approved',
   approvalReady: 'Agents can see this screen is approved for implementation.',
   approvalChanged: 'This design changed after approval. Review it before marking it ready again.',
+  approvalChangesRequested:
+    'A reviewer asked for changes; their comments say what. Editing the design sends it back for review.',
+  approvalRevised: 'Revised after a reviewer asked for changes. Review it again.',
   approvalPrompt: 'Approve this screen to let your team and agents know it’s ready to build.',
   saving: 'Saving…',
   approvalWait: 'Wait for changes to finish saving before approving.',

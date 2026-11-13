@@ -5,6 +5,7 @@ export const WEBHOOK_EVENTS = [
   'comment.replied',
   'comment.resolved',
   'frame.created',
+  'frame.approval',
   'task.completed',
   'task.failed',
 ] as const
@@ -16,6 +17,7 @@ export const WEBHOOK_EVENT_LABELS: Record<WebhookEventType, string> = {
   'comment.replied': 'A reply lands in a comment thread',
   'comment.resolved': 'A comment thread is resolved',
   'frame.created': 'A frame is created',
+  'frame.approval': 'A frame is approved, sent back with changes requested, or returned to draft',
   'task.completed': 'An agent finishes a board card',
   'task.failed': 'An agent fails a board card',
 }

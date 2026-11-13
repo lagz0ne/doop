@@ -96,7 +96,12 @@ describe('room messages', () => {
 })
 
 describe('link access values', () => {
-  it('ranks roles view < comment < edit', () => {
+  it('ranks roles view < comment < review < edit', () => {
+    expect(roleAllows('review', 'comment')).toBe(true)
+    expect(roleAllows('review', 'review')).toBe(true)
+    expect(roleAllows('review', 'edit')).toBe(false)
+    expect(roleAllows('comment', 'review')).toBe(false)
+    expect(roleAllows('edit', 'review')).toBe(true)
     expect(roleAllows('edit', 'comment')).toBe(true)
     expect(roleAllows('comment', 'comment')).toBe(true)
     expect(roleAllows('comment', 'edit')).toBe(false)

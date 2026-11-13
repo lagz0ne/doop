@@ -6,7 +6,7 @@ import { writeCanvasClipboard } from '../lib/canvasClipboard'
 import { copyFramePng } from '../lib/frameExport'
 import { deleteFramesTracked } from '../lib/history'
 import { isStackLocked, setFramesHidden, setFramesLocked } from '../lib/layerEdits'
-import { canEditOpenCanvas, useStore } from '../lib/store'
+import { canEditOpenCanvas, canReviewOpenCanvas, useStore } from '../lib/store'
 import { setFramesApproval } from '../lib/frameApproval'
 import { useFrameSaves } from '../lib/frameSaves'
 import { MOD_KEY } from '../lib/keys'
@@ -52,6 +52,8 @@ export function FrameContextMenu({
   const selectedIds = useStore((s) => s.selectedIds)
   /* a view or comment link keeps the items that only read the frame */
   const readOnly = useStore((s) => !canEditOpenCanvas(s))
+  /* a reviewer gives the verdict without the editing items */
+  const canReview = useStore(canReviewOpenCanvas)
   const groupIds = selectedIds.includes(frame.id) ? selectedIds : [frame.id]
   const groupSize = groupIds.length
   const pendingSave = useFrameSaves((s) => groupIds.some((id) => !!s.pending[id]))
@@ -85,6 +87,20 @@ export function FrameContextMenu({
     const group = s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame]
     return group.every((f) => f.approval?.status === 'ready_for_dev')
   })
+  const allSentBack = useStore((s) => {
+    if (!open) return false
+    const ids = s.selectedIds.includes(frame.id) ? s.selectedIds : [frame.id]
+    const group = s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame]
+    return group.every((f) => f.approval?.status === 'changes_requested')
+  })
+  async function requestChanges() {
+    setSavingApproval(true)
+    try {
+      await setFramesApproval(groupFrames(), 'changes_requested')
+    } finally {
+      setSavingApproval(false)
+    }
+  }
   async function changeApproval() {
     setSavingApproval(true)
     try {
@@ -152,7 +168,7 @@ export function FrameContextMenu({
         <ContextMenuItem onSelect={() => void copyImageUrl(frame)}>{t('stage.copyImageUrl')}</ContextMenuItem>
         <ContextMenuItem onSelect={() => setExportFrames(groupFrames())}>{t('stage.exportEllipsis')}</ContextMenuItem>
         <ContextMenuItem onSelect={() => setHistoryOpen(true)}>{t('stage.versionHistory')}</ContextMenuItem>
-        {!readOnly && (
+        {canReview && (
           <>
             <ContextMenuSeparator />
             <ContextMenuItem
@@ -162,6 +178,19 @@ export function FrameContextMenu({
               {allReady ? t('stage.moveToDraft') : t('stage.markReadyForDev')}
               {groupSize > 1 && <MenuHint>{t('stage.framesCount', { count: groupSize })}</MenuHint>}
             </ContextMenuItem>
+            {!allSentBack && (
+              <ContextMenuItem
+                disabled={savingApproval || pendingSave || streaming}
+                onSelect={() => void requestChanges()}
+              >
+                {t('stage.requestChanges')}
+                {groupSize > 1 && <MenuHint>{t('stage.framesCount', { count: groupSize })}</MenuHint>}
+              </ContextMenuItem>
+            )}
+          </>
+        )}
+        {!readOnly && (
+          <>
             <ContextMenuSeparator />
             <ContextMenuItem onSelect={() => setFramesLocked(groupFrames(), !allLocked)}>
               {groupSize > 1

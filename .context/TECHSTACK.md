@@ -638,6 +638,24 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   the WebSocket room and MCP gate reads, comments and writes on it separately; spec in
   `.context/specs/share-link-roles.md`.
 
+- Review verdicts (`shared/canvasRole.ts`, `server/actions.ts` `setFrameApproval`): roles rank view
+  < comment < review < edit; `review` comments and gives a frame its verdict but never changes the
+  design (every frame write still needs `edit`). `PUT /api/frames/:id/approval` takes
+  `ready_for_dev`, `changes_requested` or `draft` at `review`; a design edit after either verdict
+  makes it `needs_review`. Each verdict is a `frame.approval` canvas event (webhook event of the
+  same name) and an activity line; MCP `get_canvas` filters `approval_status=changes_requested`. In
+  the editor the frame menu's verdict items (Mark ready for dev, Request changes) need `review`, the
+  rest of its editing items `edit`; the Inspector's Development group has Request changes beside the
+  approval switch. The approval keeps `verdict` (the last one given, which an edit's flip to
+  `needs_review` does not erase) and `history` (the last `APPROVAL_HISTORY_MAX` = 20 verdicts,
+  oldest first: status, by, at, `frameUpdatedAt`, `versionId`). A verdict files the state it was
+  given on as a design version (`fileReviewedState`, `saveFrameVersion(…, { always: true })`,
+  `savedAt` = the frame's `updatedAt` then), since versions are kept per burst and a tweak joining
+  the open burst would never file it; the review panel compares against that `versionId`. Moving to
+  draft clears the approval, history included; an approval older than history starts one from its
+  own record (`priorVerdicts`). Tests: `reviewVerdicts.test.ts`, `approvalHistory.test.ts`,
+  `frameApprovalControl.test.tsx`, `canvasRole.test.ts`.
+
 - Bun 1.3.10 - package manager; lockfile at `bun.lock`, installed with `bun install
 --frozen-lockfile` in CI.
 - Vite 8 (Rolldown-based) - frontend build tool (`vite build`), with `@vitejs/plugin-react` 6.

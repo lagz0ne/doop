@@ -4,7 +4,9 @@ import { useStore } from './store'
 import { useFrameSaves } from './frameSaves'
 
 /** Wait for server confirmation: a sign-off must never appear to succeed offline. */
-export async function setFramesApproval(frames: Frame[], status: 'ready_for_dev' | 'draft'): Promise<void> {
+export type ApprovalVerdict = 'ready_for_dev' | 'changes_requested' | 'draft'
+
+export async function setFramesApproval(frames: Frame[], status: ApprovalVerdict): Promise<void> {
   let saved = 0
   let failure: string | undefined
   for (const frame of frames) {

@@ -797,6 +797,11 @@ export function canEditOpenCanvas(s: Pick<State, 'canvas'>): boolean {
 }
 
 /** May the caller comment on the open canvas? */
+/** May the caller give a frame its verdict (approve, request changes)? */
+export function canReviewOpenCanvas(s: Pick<State, 'canvas'>): boolean {
+  return roleAllows(roleOf(s), 'review')
+}
+
 export function canCommentOpenCanvas(s: Pick<State, 'canvas'>): boolean {
   return roleAllows(roleOf(s), 'comment')
 }

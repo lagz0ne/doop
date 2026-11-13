@@ -338,6 +338,12 @@ export function payloadFor(event: CanvasEvent): Record<string, unknown> {
       }
     case 'frame.created':
       return { actor: { name: event.actor.name, kind: event.actor.kind }, frame: publicFrame(event.frame) }
+    case 'frame.approval':
+      return {
+        actor: { name: event.actor.name, kind: event.actor.kind },
+        status: event.status,
+        frame: publicFrame(event.frame),
+      }
     case 'task.completed':
       return { actor: { name: event.task.agentName, kind: 'agent' }, task: publicTask(event.task) }
     case 'task.failed':

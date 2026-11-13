@@ -29,6 +29,7 @@ const EVENT_LABELS: Record<WebhookEventType, PlainMessageKey> = {
   'comment.replied': 'webhooks.eventCommentReplied',
   'comment.resolved': 'webhooks.eventCommentResolved',
   'frame.created': 'webhooks.eventFrameCreated',
+  'frame.approval': 'webhooks.eventFrameApproval',
   'task.completed': 'webhooks.eventTaskCompleted',
   'task.failed': 'webhooks.eventTaskFailed',
 }

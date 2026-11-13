@@ -13,6 +13,7 @@ export const webhooks = {
   eventCommentReplied: 'A reply lands in a comment thread',
   eventCommentResolved: 'A comment thread is resolved',
   eventFrameCreated: 'A frame is created',
+  eventFrameApproval: 'A frame is approved, sent back with changes, or returned to draft',
   eventTaskCompleted: 'An agent finishes a board card',
   eventTaskFailed: 'An agent fails a board card',
 

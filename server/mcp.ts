@@ -90,7 +90,8 @@ const INSTRUCTIONS = `Doop is a shared multiplayer design canvas: humans and AI 
 You MUST call get_guide({ topic: "doop-instructions" }) once before using other Doop tools. Call it again if a long conversation may have compressed or dropped the guide text.
 
 - Context first: call get_canvas before adding or editing frames.
-- Implementation handoff: get_canvas and get_frame expose approvalStatus (draft, ready_for_dev, needs_review) and human approval attribution. Use get_canvas with approval_status="ready_for_dev" to find approved screens. Re-read get_frame before implementing; only ready_for_dev is current sign-off. HTML or size edits invalidate approval. Approval does not automatically start an implementation task; follow the human's implementation request.
+- Implementation handoff: get_canvas and get_frame expose approvalStatus (draft, ready_for_dev, changes_requested, needs_review) and human approval attribution. Use get_canvas with approval_status="ready_for_dev" to find approved screens. Re-read get_frame before implementing; only ready_for_dev is current sign-off. HTML or size edits invalidate approval.
+- Review verdicts: changes_requested means a reviewer sent the frame back; its comments say what to change. Find those frames with get_canvas approval_status="changes_requested", read the comments, and revise. Your edit moves the frame to needs_review for another look; do not approve it yourself. Approval does not automatically start an implementation task; follow the human's implementation request.
 - Element links: /c/<canvas_id>?frame=<frame_id>&element=<element_id> identifies one element: the one carrying data-doop-id="<element_id>" in that frame's HTML. Read get_canvas and get_frame and find that attribute before applying the feedback. If no element carries the id any more, ask for an updated reference.
 - Keep data-doop-* attributes on every element you rewrite: data-doop-id is how comments and links point at an element, data-doop-on / data-doop-action carry prototype wiring, data-doop-locked a layer lock. Drop one only together with its element.
 - Identity: pick an agent_name and reuse the SAME name on every call — your presence and edits are attributed live.
@@ -529,13 +530,13 @@ export function buildMcpServer(
       title: 'Get a canvas and its frames',
       _meta: previewToolMeta('Reading the canvas…', 'Canvas loaded'),
       description:
-        "Get a canvas: its name, its pages (id, name, prototype start frame) and its frames with pageId, position, size, approvalStatus and human approval attribution (not the HTML — use get_frame for that). Pass page_id to see one page's frames only; filter approval_status to ready_for_dev to find screens approved for implementation. Use this to see the current layout before adding or editing frames. Pass your agent_name so the result can tell you when human feedback is waiting (claim it with get_feedback).",
+        "Get a canvas: its name, its pages (id, name, prototype start frame) and its frames with pageId, position, size, approvalStatus and human approval attribution (not the HTML — use get_frame for that). Pass page_id to see one page's frames only; filter approval_status to ready_for_dev to find screens approved for implementation, or to changes_requested to find screens a reviewer sent back. Use this to see the current layout before adding or editing frames. Pass your agent_name so the result can tell you when human feedback is waiting (claim it with get_feedback).",
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         canvas_id: z.string(),
         agent_name: agentName.optional(),
         page_id: z.string().optional().describe("Only this page's frames (a page id from a previous get_canvas)"),
-        approval_status: z.enum(['draft', 'ready_for_dev', 'needs_review']).optional(),
+        approval_status: z.enum(['draft', 'ready_for_dev', 'changes_requested', 'needs_review']).optional(),
       },
     },
     async ({ canvas_id, agent_name, page_id, approval_status }) => {

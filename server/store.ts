@@ -873,7 +873,10 @@ class Store {
     Object.assign(frame, patch)
     if (patch.z !== undefined) c.frames.sort(byStack)
     // All writers (including streams, sync and restores) invalidate sign-off.
-    if (designChanged && frame.approval?.status === 'ready_for_dev') {
+    if (
+      designChanged &&
+      (frame.approval?.status === 'ready_for_dev' || frame.approval?.status === 'changes_requested')
+    ) {
       frame.approval = { ...frame.approval, status: 'needs_review' }
     }
     // Also serves as the optimistic-save version, including writes in the same millisecond.

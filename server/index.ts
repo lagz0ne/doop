@@ -897,6 +897,7 @@ function checkRole(req: express.Request, res: express.Response, canvas: Canvas, 
 const ROLE_DENIED: Record<CanvasRole, string> = {
   view: 'this canvas is private — ask the owner for access',
   comment: 'you can view this canvas but not comment — ask the owner for access',
+  review: 'you can view this canvas but not review it — ask the owner for access',
   edit: 'you can view this canvas but not edit it — ask the owner for edit access',
 }
 
@@ -2075,16 +2076,17 @@ app.patch('/api/frames/:id', (req, res) => {
 })
 
 app.put('/api/frames/:id/approval', (req, res) => {
-  const current = requireFrame(req, res, req.params.id, 'edit', req.body?.expectedUpdatedAt)
+  /* review: a reviewer gives the verdict without being able to change the design */
+  const current = requireFrame(req, res, req.params.id, 'review', req.body?.expectedUpdatedAt)
   if (!current) return
   const { status, expectedUpdatedAt } = req.body ?? {}
   if (expectedUpdatedAt === undefined)
     return res.status(400).json({ error: 'expectedUpdatedAt is required to approve the reviewed version' })
-  if (status !== 'ready_for_dev' && status !== 'draft')
-    return res.status(400).json({ error: 'status must be ready_for_dev or draft' })
+  if (status !== 'ready_for_dev' && status !== 'changes_requested' && status !== 'draft')
+    return res.status(400).json({ error: 'status must be ready_for_dev, changes_requested or draft' })
   if (status === 'ready_for_dev' && actions.isFrameStreaming(current.id))
     return res.status(409).json({ error: 'Wait for the design to finish before approving it.' })
-  res.json(actions.setFrameApproval(current.id, status === 'ready_for_dev', req.user!))
+  res.json(actions.setFrameApproval(current.id, status, req.user!))
 })
 
 app.post('/api/frames/:id/append', (req, res) => {
