@@ -46,6 +46,7 @@ import { auth, initAuth, syncAdmins, getUserName, loginProvidersConfig } from '.
 import { adminRouter } from './admin.ts'
 import { operatorRouter } from './operator.ts'
 import { frameHtmlByAgentKey, sendFrameHtml } from './frameHtml.ts'
+import { requestOrigin } from './requestOrigin.ts'
 import {
   canvasForReviewer,
   embedGrantOf,
@@ -2591,7 +2592,7 @@ app.all('/mcp', handleMcpRequest)
    handlers into Express) */
 function bridge(handler: (req: globalThis.Request) => Promise<globalThis.Response>) {
   return async (req: express.Request, res: express.Response) => {
-    const out = await handler(new globalThis.Request(`${req.protocol}://${req.get('host')}${req.originalUrl}`))
+    const out = await handler(new globalThis.Request(`${requestOrigin(req)}${req.originalUrl}`))
     res.status(out.status)
     out.headers.forEach((v, k) => res.setHeader(k, v))
     res.send(await out.text())
@@ -2608,11 +2609,13 @@ app.get('/.well-known/openid-configuration', (req, res) => bridge(oAuthDiscovery
    that differs from the URL they called, so it is `<origin>/mcp`, never the bare
    origin), while the authorization server stays on the canonical origin. In dev
    the app may be reached via :4300, :4301 (vite port bump) or :4400 — all must
-   validate, so the origin is echoed from the request. Both well-known paths
+   validate, so the origin is echoed from the request — except on the public
+   host, where it is BETTER_AUTH_URL's (server/requestOrigin.ts: a proxy may
+   hand us http while clients call https). Both well-known paths
    serve the same document, the shape Linear ships. */
 function protectedResourceMetadata(req: express.Request, res: express.Response) {
   res.json({
-    resource: `${req.protocol}://${req.get('host')}/mcp`,
+    resource: `${requestOrigin(req)}/mcp`,
     authorization_servers: [env.BETTER_AUTH_URL],
     jwks_uri: `${env.BETTER_AUTH_URL}/api/auth/mcp/jwks`,
     scopes_supported: ['openid', 'profile', 'email', 'offline_access'],
