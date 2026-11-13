@@ -75,8 +75,20 @@ let pendingDrawing: Promise<void> = Promise.resolve()
 /** Standalone elements use the same persistence, layers and export as frames,
  *  with transparent chrome. The marker stays in HTML through undo and copying. */
 export function isCanvasElement(html: string): boolean {
-  return /<body\b[^>]*\bdata-doop-canvas-element=/i.test(html)
+  /* Asked several times per frame on every render of the canvas, and the
+     answer takes a scan of the whole document (a frame without the marker
+     has no early match): 30 ms of a 188-frame page's opening went here.
+     Frame HTML is immutable, so the answer is kept per string. */
+  let known = canvasElementAnswers.get(html)
+  if (known === undefined) {
+    known = /<body\b[^>]*\bdata-doop-canvas-element=/i.test(html)
+    if (canvasElementAnswers.size >= CANVAS_ELEMENT_ANSWERS_MAX) canvasElementAnswers.clear()
+    canvasElementAnswers.set(html, known)
+  }
+  return known
 }
+const CANVAS_ELEMENT_ANSWERS_MAX = 2000
+const canvasElementAnswers = new Map<string, boolean>()
 
 export function drawingTarget(point: Point, tool: DrawingTool): DrawingTarget | null {
   const canvas = currentPageCanvas()
