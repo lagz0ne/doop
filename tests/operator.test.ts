@@ -70,6 +70,25 @@ describe('operator API: the token', () => {
     }
   }, 70_000)
 
+  it('serves proxied calls unless DOOP_OPERATOR_DIRECT_ONLY is set', async () => {
+    const proxied = { 'X-Forwarded-For': '203.0.113.7' }
+    const viaProxy = await fetch(`${server.base}/api/operator/users`, {
+      headers: { Authorization: `Bearer ${TOKEN}`, ...proxied },
+    })
+    expect(viaProxy.status).toBe(200)
+
+    const direct = await startServer({ DOOP_ADMIN_TOKEN: TOKEN, DOOP_OPERATOR_DIRECT_ONLY: 'true' })
+    try {
+      const call = (headers: Record<string, string>) =>
+        fetch(`${direct.base}/api/operator/users`, { headers: { Authorization: `Bearer ${TOKEN}`, ...headers } })
+      expect((await call({})).status).toBe(200)
+      expect((await call(proxied)).status).toBe(404)
+      expect((await call({ Forwarded: 'for=203.0.113.7;proto=https' })).status).toBe(404)
+    } finally {
+      direct.stop()
+    }
+  }, 70_000)
+
   describe('env', () => {
     afterEach(() => unstubAllEnvs())
     it('rejects a token shorter than 32 characters at boot', () => {

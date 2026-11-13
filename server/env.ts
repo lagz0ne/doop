@@ -126,6 +126,9 @@ const schema = {
   ADMIN_EMAILS: list({ default: [] }),
   /* unset = the operator API (server/operator.ts) does not exist */
   DOOP_ADMIN_TOKEN: secret({ default: undefined }),
+  /* true = the operator API refuses (404) any request that came through a proxy
+     (X-Forwarded-For or Forwarded set): only direct calls to doop's own port reach it */
+  DOOP_OPERATOR_DIRECT_ONLY: bool({ default: false }),
   /* JSON {"<host id>": {"secret": "<32+ chars>", "origin": "https://…"}};
      unset = no embedded review panel (server/embed.ts) */
   DOOP_EMBED_HOSTS: str({ default: undefined }),
