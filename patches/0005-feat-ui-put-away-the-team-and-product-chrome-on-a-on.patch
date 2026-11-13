@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Thu, 12 Nov 2026 04:40:02 +0000
-Subject: [PATCH 05/19] feat(ui): put away the team and product chrome on a
+Subject: [PATCH 05/20] feat(ui): put away the team and product chrome on a
  one-person instance
 
 This doop is used for the canvas (sign-up is closed; one person and their

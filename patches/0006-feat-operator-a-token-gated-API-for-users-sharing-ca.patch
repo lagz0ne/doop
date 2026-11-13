@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Thu, 12 Nov 2026 04:53:20 +0000
-Subject: [PATCH 06/19] feat(operator): a token-gated API for users, sharing,
+Subject: [PATCH 06/20] feat(operator): a token-gated API for users, sharing,
  canvas owners and agent keys
 
 Running a one-person instance with sign-up closed left no way to manage it:

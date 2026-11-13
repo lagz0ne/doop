@@ -59,9 +59,12 @@ canvases and sharing
   share <canvas>                     who can open it, and the link setting
   share add <canvas> <user>...       make them members (they must have an account)
   share remove <canvas> <user>                                          (confirms)
-  share link <canvas> none|view|comment|edit
-                                     anyone with the link; doop v0.14+ lets signed-out
-                                     visitors view too (comment/edit need an account)
+  share link <canvas> [none|view|comment|review|edit] [--password-stdin | --no-password]
+                                     anyone with the link, at that level. Without a
+                                     password, signed-out visitors may look, and give a
+                                     name to do more; with one (--password-stdin) they
+                                     give a name and the password first, and a new or
+                                     removed password signs earlier guests out
                                                                         (confirms unless none)
   share owner <canvas> <user> [--drop-previous]
                                      hand the canvas over; the previous owner stays
@@ -229,7 +232,8 @@ const day = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : '')
 function showAccess(a) {
   console.log(`${a.name}  (${a.id})`)
   console.log(`  owner  ${a.owner ? `${a.owner.email}` : '(none)'}`)
-  console.log(`  link   ${a.linkAccess}${a.linkAccess === 'none' ? '' : '  (anyone with the link; from doop v0.14 that includes signed-out visitors, view only)'}`)
+  const guarded = a.linkPassword ? 'with a password: a name and the password open it' : 'no password: anyone with the link, a name to go past viewing'
+  console.log(`  link   ${a.linkAccess}${a.linkAccess === 'none' ? '' : `  (${guarded})`}`)
   if (a.workspaceId) console.log(`  workspace  ${a.workspaceId}`)
   console.log(`  members${a.members.length ? '' : '  (none)'}`)
   for (const m of a.members) console.log(`    ${m.email}`)
@@ -409,7 +413,8 @@ async function share() {
   const actions = new Set(['add', 'remove', 'link', 'owner'])
   if (!sub) fail('usage: doopctl share <canvas> | share add|remove|link|owner <canvas> ...', 2)
   if (!actions.has(sub)) return out(await api(`/canvases/${enc(await canvasId(sub))}`), showAccess)
-  need(4, `share ${sub} <canvas> ...`)
+  /* share link may take only a password flag, no level */
+  need(sub === 'link' ? 3 : 4, `share ${sub} <canvas> ...`)
   const id = await canvasId(rest[0])
   const targets = rest.slice(1)
   switch (sub) {
@@ -425,9 +430,28 @@ async function share() {
     }
     case 'link': {
       const [access] = targets
-      if (!['none', 'view', 'comment', 'edit'].includes(access)) fail('link access is none, view, comment or edit', 2)
-      if (access !== 'none') await confirm(`Let anyone with the link ${access} canvas ${id} (from doop v0.14, signed-out visitors can view it too).`)
-      return out(await api(`/canvases/${enc(id)}/link`, { method: 'PUT', body: { access } }), showAccess)
+      const setPw = !!opts['password-stdin']
+      const dropPw = !!opts['no-password']
+      if (setPw && dropPw) fail('--password-stdin or --no-password, not both', 2)
+      if (access === undefined && !setPw && !dropPw) fail('share link <canvas> [level] [--password-stdin | --no-password]', 2)
+      if (access !== undefined && !['none', 'view', 'comment', 'review', 'edit'].includes(access))
+        fail('link access is none, view, comment, review or edit', 2)
+      const body = {}
+      if (access !== undefined) body.access = access
+      if (dropPw) body.password = null
+      if (setPw) {
+        body.password = await passwordFromStdin()
+        if (!body.password) fail('the password is empty', 2)
+      }
+      if (access && access !== 'none')
+        await confirm(
+          setPw
+            ? `Let anyone with the link and the password ${access} canvas ${id}; earlier guests are signed out.`
+            : dropPw
+              ? `Let anyone with the link ${access} canvas ${id}, no password; earlier guests are signed out.`
+              : `Let anyone with the link ${access} canvas ${id} (signed-out visitors may look, and give a name to do more, unless the link has a password).`,
+        )
+      return out(await api(`/canvases/${enc(id)}/link`, { method: 'PUT', body }), showAccess)
     }
     case 'owner': {
       const [who] = targets

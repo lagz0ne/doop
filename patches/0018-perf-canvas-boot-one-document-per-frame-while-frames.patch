@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 05:09:38 +0000
-Subject: [PATCH 18/19] perf(canvas): boot one document per frame while frames
+Subject: [PATCH 18/20] perf(canvas): boot one document per frame while frames
  come late
 
 Documents went live two per animation frame. Each one costs the editor's

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 05:09:37 +0000
-Subject: [PATCH 16/19] perf(canvas): a pan press restyles nothing
+Subject: [PATCH 16/20] perf(canvas): a pan press restyles nothing
 
 With the Hand tool (the first tool in the reviewer layout) every press on
 the canvas starts a pan, and each press and each release restyled the
