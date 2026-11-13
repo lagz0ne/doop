@@ -31,6 +31,7 @@ patches and transforms**, plus the tool that combines them.
 | `build/base` | generated: the pristine pin, for A/B perf runs |
 | `perf/` | render-perf harness and results (`perf/README.md`); traces in `perf/out/` (ignored) |
 | `docs/history.md` | what we changed and why, deploy history, decisions |
+| `README.md` | the public front page: this repo is `main` of github.com/the fork/doop |
 
 ## bin/doop
 
@@ -116,6 +117,14 @@ re-clones it. Agents share the local workspace and take turns on `build/doop` (`
 refuse to clobber unexported work).
 
 ## Facts
+
+- **This repo lives at github.com/the fork/doop, branch `main`** (public; the human's call,
+  2026-11-13). Trunk-based: commit straight to `main` and push every commit. The same repo
+  carries the built doop source: branch `patched` and the `vX.Y.Z-patched.N` tags that the deployer
+  deploys (pushed by `bin/doop release`). `upstream-main` keeps what the fork's main held before.
+  Being public, nothing of the host's goes in: its canvas copies and scripts used by `perf/` stay
+  local and git-ignored (`.gitignore`). The earlier private repo example/doop-build is
+  archived.
 
 - Builds are reproducible. `git am --committer-date-is-author-date` with a fixed committer
   (`lagz0ne`, overridable via `DOOP_COMMITTER_NAME/EMAIL`) means the same pin and patches

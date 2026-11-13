@@ -3,3 +3,8 @@
 # perf outputs (Chrome traces are 60-320 MB each) and local perf-account logins
 /perf/out/
 /perf/**/local*.json
+# the host's material, used locally for perf runs; never published (this repo is public)
+/perf/canvas.json
+/perf/base/canvas.json
+/perf/probes/ds-head.ts
+/perf/probes/layout.new.py
