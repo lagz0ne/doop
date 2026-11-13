@@ -12,7 +12,8 @@ for i in $(seq 1 "$runs"); do
   for side in $order; do
     url=$A; [ $side = B ] && url=$B
     echo "load $(cut -d' ' -f1-3 /proc/loadavg)" >> "$txt"
-    DOOP=$url NAME="$side $i" JSON_OUT=$json node bench.mjs >> "$txt" 2>&1 || echo "run $side $i failed" >> "$txt"
+    ls=${A_LS:-}; [ $side = B ] && ls=${B_LS:-}   # localStorage per side, e.g. A_LS='{"doop:park":"off"}' with one server on both sides
+    DOOP=$url LS=$ls NAME="$side $i" JSON_OUT=$json node bench.mjs >> "$txt" 2>&1 || echo "run $side $i failed" >> "$txt"
   done
 done
 node - "$json" <<'JS'
@@ -23,5 +24,7 @@ const names = Object.keys(rows[0]?.raw || {});
 console.log("scenario".padEnd(20), "main thread ms A -> B".padEnd(26), "worst frame A -> B".padEnd(22), "slow frames A -> B");
 for (const n of names) { const g = (k, f) => med(side(k).map((r) => r.raw[n]?.[f]).filter((x) => x != null));
   console.log(n.padEnd(20), `${g("A", "task")} -> ${g("B", "task")}`.padEnd(26), `${g("A", "worst")} -> ${g("B", "worst")}`.padEnd(22), `${g("A", "slow")} -> ${g("B", "slow")}`); }
+if (rows.some((r) => Object.values(r.raw).some((x) => x.shown != null))) for (const n of names) { const v = (k) => med(side(k).map((r) => r.raw[n]?.shown).filter((x) => x != null)); if (!Number.isNaN(v("A"))) console.log(n.padEnd(20), `every frame shown after ${v("A")} -> ${v("B")} ms`); }
+for (const n of names) { const v = (k) => med(side(k).map((r) => r.raw[n]?.live).filter((x) => x != null)); if (!Number.isNaN(v("A")) && (v("A") || v("B"))) console.log(n.padEnd(20), `live documents after ${v("A")} -> ${v("B")}`); }
 console.log(`runs: A ${side("A").length}, B ${side("B").length}`);
 JS
