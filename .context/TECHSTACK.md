@@ -674,6 +674,29 @@ hostOrigin, expiresAt, user: { name } }`. An embed session opens its one canvas 
   server on a second hostname included; vitest's `TEST=true` turns better-auth's origin check off,
   so that case clears it).
 
+- Embedded review panel (`embed.html`, `src/embed/`, served by `server/embedPage.ts`): what a host
+  app puts in an iframe, `/embed#token=<jwt>&frame=<id>`. A second Vite entry with its own bundle
+  (React, the frame runtime and its own files: about 270 KB of script and CSS against the editor's
+  2 MB; none of the editor, store, i18n or Tailwind). `/embed` answers 404 while
+  `DOOP_EMBED_HOSTS` is empty, else the page with `Content-Security-Policy: frame-ancestors` naming
+  the host origins, `no-store` and `no-referrer`; `/embed.html` is a 404 so the file is never
+  served without those rules. The page reads the token from the fragment once and wipes it
+  (`takeLaunchParams`), trades it for its session with `fetch` (`exchange`; the exchange's Origin
+  check refuses a cross-site form post), joins the canvas room for frames and comments, and draws
+  a frame with the editor's own sandboxed iframe and runtime (`FrameDoc`, whole-number CSS zoom
+  plus a transform, as the stage does), so a pinned comment carries the runtime's probe of the
+  element under the pointer (`selector`, `elementId`, `elementOrigin`). The reviewer comments,
+  replies, resolves, and with the `review` role requests changes (the verdict first, then the
+  pinned comment, since a stamp moves the frame's version on) or approves. Compare puts the frame
+  beside the version filed with its last verdict (`history.at(-1).versionId`, offered once the
+  status is `needs_review`) at one scale, with the text runs that changed (`textChanges`, an LCS
+  over `textRuns`). The host page hears `doop:ready`, `doop:open`, `doop:verdict` (frame, status,
+  by, `frameUpdatedAt`, `versionId`), `doop:comment` and `doop:need-token`, sent to its origin
+  only; it may send `doop:token` (a fresh token after the two-hour session ends) and `doop:open`,
+  read from that origin only (`readHostMessage`). English only for now. Tests:
+  `embedPage.test.ts`, `embedChanges.test.ts`; end to end in a browser with a stand-in host app:
+  `perf/embed-e2e.mjs` in the build repo.
+
 - Bun 1.3.10 - package manager; lockfile at `bun.lock`, installed with `bun install
 --frozen-lockfile` in CI.
 - Vite 8 (Rolldown-based) - frontend build tool (`vite build`), with `@vitejs/plugin-react` 6.

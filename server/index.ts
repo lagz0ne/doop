@@ -55,6 +55,7 @@ import {
   presenceForReviewer,
   type EmbedGrant,
 } from './embed.ts'
+import { serveEmbedPage } from './embedPage.ts'
 import { communityRouter, parseListing, publishableFrames } from './community.ts'
 import { automationsRouter, startScheduler } from './automations.ts'
 import { startMcpTokenPrune } from './mcpTokens.ts'
@@ -2604,6 +2605,9 @@ app.get('/sitemap.xml', (_req, res) => {
 /* production: serve the built client */
 if (env.isProduction) {
   const dist = path.join(process.cwd(), 'dist')
+  /* the review panel host apps embed, ahead of the static files so its raw
+     file is never served without its framing rules (server/embedPage.ts) */
+  serveEmbedPage(app, dist)
   app.use(express.static(dist))
   /* a missing bundle or source map is a 404, not the app shell: HTML served
      as a .js or .map breaks module loads and source map resolution */
