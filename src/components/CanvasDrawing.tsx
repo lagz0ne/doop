@@ -278,7 +278,11 @@ export function useCanvasDrawing(stage: RefObject<HTMLDivElement>) {
       onFinish={() => finish()}
     />
   )
-  const penZoom = useStore((s) => s.viewport.zoom)
+  /* The zoom matters here only while a path is being drawn (the snap radius
+     is in screen px). This hook runs inside the Stage, so reading the zoom
+     at all times re-rendered the whole Stage on every step of a zoom. */
+  const drawingPath = draft?.drawing.tool === 'path'
+  const penZoom = useStore((s) => (drawingPath ? s.viewport.zoom : 1))
   /* what the pen's badge says a press would do: close the path, land on an
      anchor it already placed, or just add the next point */
   const penCursor = (() => {
