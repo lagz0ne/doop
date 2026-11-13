@@ -56,10 +56,22 @@ export function cullingEnabled(): boolean {
 /** Below this zoom a frame is too small on screen for its live document to
  *  matter: it shows its preview image even in view. */
 export const LIVE_MIN_ZOOM = 0.3
-/** A frame comes alive when it is within this many viewports of the view… */
-export const ENTER_MARGIN = 0.5
+/** A frame comes alive when it is within this many viewports of the view…
+ *
+ *  The margin was half a viewport, so that a short pan showed documents, not
+ *  blanks. A frame without its document shows a sharp picture of itself now,
+ *  and keeps it until the document has painted, so the margin only decides
+ *  how many documents boot that nobody is looking at: at 60% on a page of
+ *  desktop screens, 12 went live at every rest of the camera where 4 to 6
+ *  were on screen. Each boot is a FrameView mounted on the editor's main
+ *  thread and a document started in the frames' process. */
+export const ENTER_MARGIN = 0.1
 /** …and stays alive until it is farther than this (no flicker at the edge). */
-export const KEEP_MARGIN = 1
+export const KEEP_MARGIN = 0.5
+/** The frames within this many viewports of the resting view get their
+ *  picture at the sharp level: wider than the live margin, so what a pan
+ *  brings in is already crisp. */
+export const SHARP_MARGIN = 0.5
 /** At most this many live documents besides the pinned ones; the nearest win. */
 export const MAX_LIVE = 24
 /** A selection this large pins nothing: selecting a whole page must not boot
@@ -121,7 +133,7 @@ export function computeLiveFrames(
 }
 
 /** The frames whose previews are worth a sharper picture than the smallest:
- *  the ones within the entry margin of the resting view (those the camera
+ *  the ones within SHARP_MARGIN of the resting view (those the camera
  *  shows, or will with a short pan). Everything farther keeps the smallest
  *  level. Without that limit a zoom-in changed every preview on the page to
  *  the large picture; the far ones only queued it (they load lazily), and a
@@ -130,7 +142,7 @@ export function computeLiveFrames(
 export function sharpPreviews(frames: readonly FrameBox[], camera: Camera, stage: Size): Set<string> {
   const sharp = new Set<string>()
   if (stage.width <= 0 || stage.height <= 0 || camera.zoom <= 0) return sharp
-  const near = viewRect(camera, stage, ENTER_MARGIN)
+  const near = viewRect(camera, stage, SHARP_MARGIN)
   for (const f of frames) if (!f.element && intersects(f, near)) sharp.add(f.id)
   return sharp
 }
