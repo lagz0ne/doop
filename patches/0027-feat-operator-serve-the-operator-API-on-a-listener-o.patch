@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 08:25:05 +0000
-Subject: [PATCH 27/27] feat(operator): serve the operator API on a listener of
+Subject: [PATCH 27/28] feat(operator): serve the operator API on a listener of
  its own
 
 DOOP_OPERATOR_DIRECT_ONLY tells a proxied request by X-Forwarded-For or

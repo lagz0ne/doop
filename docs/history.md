@@ -30,6 +30,7 @@ outside this repo.)
 | 2026-11-14 | Issue #2: agents could reply to and resolve comments but not start one, read a frame's HTML only through MCP, and hear comment webhooks for every canvas without the element named; with FULL_UI off nobody could set a hook. Decided: 0022 `add_comment` (the browser's anchors, an element by id or selector, refused when it is not there rather than falling back to the frame; an @mention needs edit and is metered like the browser's), 0023 `GET /api/frames/:id/html` for agent keys and sessions (no public URL: that would be new exposure; served under a sandbox CSP, since frame HTML carries scripts), 0024 hooks limited to listed canvases, `elementId` and `snippet` in the payload, and hooks managed through the operator API (`bin/doopctl webhooks`) rather than unhiding the Settings pane. 0024 adds migration 0051 |
 | 2026-11-14 | PR #1 (written against 0001-0020) carried over as 0025-0026. Its review found the direct-only switch trusts the proxy to add `X-Forwarded-For`/`Forwarded`; rather than drop it, 0027 adds a separate listener for the operator API (the admin-port model of Caddy and Envoy), and the switch's limit is documented |
 | 2026-11-14 | Upstream checked: no release after v0.14.0; 44 commits on `main`, none covering #2. Its migrations 0049-0052 are dated before ours (see Upgrading) |
+| 2026-11-14 | On phones a finger on a frame in the Comment tool commented instead of panning, a pinch or double tap could zoom the page, and a frame's menu opened mid-pan or while a finger rested (Radix's 700 ms touch press is cancelled only by a move over the trigger, and the stage captures the pointer for a pan). Decided: a phone only reviews, 0028 feat(ui). A touch pans in Hand and Comment, a tap comments; the page is held still as tldraw and Excalidraw do it (`user-scalable=no`, WebKit gesture events cancelled, `touch-action: manipulation`); the menu waits for a 1600 ms hold (the platforms' long press is about 500 ms) that a drift of 10 px, a lift or a second finger ends; the role counts as review at most on the client (the server's role is untouched), so every edit control steps aside |
 
 ## Patches
 
@@ -62,6 +63,7 @@ outside this repo.)
 | 0025 | fix(mcp): name the configured origin on the public host, not the proxy's scheme | behind a proxy that speaks http to doop and sets `X-Forwarded-Proto: http`, the OAuth protected-resource metadata and the MCP 401 challenge said `http://<host>/mcp`, and strict MCP clients refuse it. On `BETTER_AUTH_URL`'s host they now name that origin; other hosts (dev ports) are echoed as before (PR #1) |
 | 0026 | feat(operator): a direct-only switch keeps the operator API off the public edge | `DOOP_OPERATOR_DIRECT_ONLY=true`: `/api/operator` is 404 for any request a proxy forwarded (`X-Forwarded-For` / `Forwarded`), token or not; only direct calls to doop's port reach it. Holds only behind a proxy that adds one of those headers (a bare nginx `proxy_pass` adds neither). Default off (PR #1) |
 | 0027 | feat(operator): serve the operator API on a listener of its own | the form of 0026 that does not depend on the proxy (review of PR #1): `DOOP_OPERATOR_LISTEN=[host:]port` (host 127.0.0.1 by default) serves the API there and nowhere on `PORT`, as Caddy keeps its admin API on `localhost:2019`. Default off |
+| 0028 | feat(ui): a phone reviews: one finger pans, a long hold for menus, no editing | reviewer layout on a phone: `reviewOnly` caps `roleOf` at review (`grantedRole` keeps the server's), dock is back, Hand, Comment, Comments, Layers, •••; a touch pans in Hand and Comment and a tap comments; viewport `maximum-scale=1, user-scalable=no` while mounted; `useTouchHold` replaces Radix's 700 ms touch press with a 1600 ms hold tracked on window. Mouse unchanged |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -146,6 +148,10 @@ Tests for 0025-0027 (2026-11-14): `bin/doop check --browser` 2635 pass, 11 fail:
 `elementPanelBrowser` failures, and a `drawingBrowser` drag; run alone, three of its path-snap
 tests then failed as well, and failed the same way on the 0001-0024 tree, so they are this
 machine's, not the patches' (which touch the server only). `operator` and `access`: 31 of 31.
+
+Tests for 0028 (2026-11-14): `bin/doop check --test` 2264 pass, 0 fail; the new
+`phoneReviewBrowser` (390x844 touch) and the reviewer layout, clipboard, context menu and comment
+browser files: 78 of 78.
 
 Upgrading past v0.14.0 (found 2026-11-14): drizzle's migrator applies a migration only when it is
 newer than the last one applied (`created_at` < the journal's `when`), not by name. Upstream's

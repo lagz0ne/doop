@@ -1,0 +1,788 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 09:21:34 +0000
+Subject: [PATCH 28/28] feat(ui): a phone reviews: one finger pans, a long hold
+ for menus, no editing
+
+A phone in the reviewer layout (FULL_UI off, <= 900px) is for reading and
+answering a design, and three things got in the way.
+
+Panning. A finger on a frame in the Comment tool did not pan: it went to the
+frame and commented. Now a touch pans in the Hand and in Comment alike, and
+a comment is a tap (the finger lifts within 6 px, no pinch, no hold).
+
+The page zoomed. A pinch that landed outside the canvas's own handling, or a
+double tap, zoomed the whole page, chrome and all. On phones the editor adds
+maximum-scale=1, user-scalable=no to the viewport tag while it is mounted,
+cancels WebKit's gesturestart/gesturechange, and sets touch-action:
+manipulation on its root, which is what tldraw and Excalidraw do. The canvas
+pinch still zooms the canvas.
+
+Menus opened by accident. Radix's context menu opens on a 700 ms touch press
+and only cancels it on a move over the trigger itself. The stage captures the
+pointer for a pan, so the frame never saw the finger move and its menu opened
+mid-pan; a finger resting while reading opened it too. The Radix timer is
+replaced (useTouchHold, src/lib/touchHold.ts): a hold opens the menu after
+1600 ms, well past the platforms' own ~500 ms long press, and ends when the
+finger lifts, drifts more than 10 px (tracked on window, so a captured pan
+counts) or a second finger lands. The browser's own long-press contextmenu
+is turned away. The finger that opened a menu holds the pan still until it
+lifts. The mouse and right-click are unchanged.
+
+No editing. A phone's role counts as review at most (roleOf caps edit at
+review while store.reviewOnly is set; grantedRole is what the server gave,
+so the access banner does not call it view-only). Every edit control that
+gates on canEditOpenCanvas steps aside: the frame menu keeps Copy link,
+export and the verdicts, drops Duplicate and Delete. The dock holds the Hand
+and Comment and no tool list, setTool refuses the others, and Prototype mode
+is off. Nothing here is a permission: the server's role is untouched, and a
+wider window gets the full editor back.
+
+Tests: tests/phoneReviewBrowser.test.ts (390x844 touch): the cap, the
+viewport tag, a 1.2 s moving drag pans with no menu, no menu at 1000 ms and
+one after the hold with its review items only, Comment pans and a tap
+selects.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/components/AccessBanner.tsx  |   5 +-
+ src/components/CanvasDock.tsx    | 106 ++++++++++-----------
+ src/components/FrameView.tsx     |  33 ++++++-
+ src/components/Stage.tsx         |  18 +++-
+ src/lib/gesture.ts               |   6 +-
+ src/lib/store.ts                 |  41 ++++++--
+ src/lib/touchHold.ts             | 103 +++++++++++++++++++++
+ src/pages/CanvasPage.tsx         |  39 +++++++-
+ tests/phoneReviewBrowser.test.ts | 154 +++++++++++++++++++++++++++++++
+ 9 files changed, 430 insertions(+), 75 deletions(-)
+ create mode 100644 src/lib/touchHold.ts
+ create mode 100644 tests/phoneReviewBrowser.test.ts
+
+diff --git a/src/components/AccessBanner.tsx b/src/components/AccessBanner.tsx
+index c7ad8ba..f638e91 100644
+--- a/src/components/AccessBanner.tsx
++++ b/src/components/AccessBanner.tsx
+@@ -1,5 +1,5 @@
+ import { useState } from 'react'
+-import { useStore, roleOf } from '../lib/store'
++import { useStore, grantedRole } from '../lib/store'
+ import { useT } from '../lib/i18n'
+ import { cn } from '../lib/utils'
+ import { Button } from './ui/button'
+@@ -24,7 +24,8 @@ export function AccessBanner({
+   className?: string
+ }) {
+   const t = useT()
+-  const role = useStore(roleOf)
++  /* the role the server gave: a phone's review-only cap is not a lesser role */
++  const role = useStore(grantedRole)
+   const loaded = useStore((s) => !!s.canvas)
+   const [dismissed, setDismissed] = useState(false)
+   if (!loaded || role === 'edit' || dismissed) return null
+diff --git a/src/components/CanvasDock.tsx b/src/components/CanvasDock.tsx
+index 6c64f98..26d551c 100644
+--- a/src/components/CanvasDock.tsx
++++ b/src/components/CanvasDock.tsx
+@@ -49,13 +49,12 @@ import {
+  * and you. The page decides what each may do and passes null for what this
+  * person is not offered.
+  *
+- * On a phone (`phone`) the same dock holds what reviewing needs within a
+- * thumb's reach, at the 40px touch size and no wider than a 320px screen:
+- * back, Hand, Comment and the tool list (a tool picked from it takes the
+- * list's button), the Comments sheet (whose tabs hold AI activity), Pages
+- * and layers, and ••• for the rest (the canvas actions sheet: its name,
+- * import, export, share, Connect AI, settings). Pinching zooms; the zoom
+- * pill floats above it.
++ * On a phone (`phone`) the canvas is review-only (State.reviewOnly) and the
++ * same dock holds what reviewing needs within a thumb's reach, at the 40px
++ * touch size: back, Hand, Comment, the Comments sheet (whose tabs hold AI
++ * activity), Pages and layers, and ••• for the rest (the canvas actions
++ * sheet: its name, export, share, settings). No tool list: every other tool
++ * edits. Pinching zooms; the zoom pill floats above it.
+  */
+ export function CanvasDock(props: DockProps & { phone?: false }): ReactNode
+ export function CanvasDock(props: PhoneDockProps & { phone: true }): ReactNode
+@@ -268,8 +267,8 @@ function DesktopDock({
+ }
+ 
+ /** Hand, Comment and Prototype mode, as the rail's foot had them, and every
+- *  other tool in a list that opens upwards. A phone has no room for the
+- *  Prototype button; the list holds it there, and its opener is narrower. */
++ *  other tool in a list that opens upwards. A phone reviews, so it gets the
++ *  Hand and Comment alone. */
+ function DockTools({ phone = false }: { phone?: boolean }) {
+   const t = useT()
+   const tool = useStore((s) => s.tool)
+@@ -305,52 +304,53 @@ function DockTools({ phone = false }: { phone?: boolean }) {
+           {TOOL_ICONS.comment}
+         </ToolbarControl>
+       )}
++      {/* a phone stops here: the rest is for editing */}
+       {!phone && (
+-        <ToolbarControl
+-          side="top"
+-          label={t('stage.modePrototype')}
+-          aria-pressed={prototypeMode}
+-          className={pressed}
+-          onClick={() => useStore.getState().setPrototypeMode(!prototypeMode)}
+-        >
+-          <PrototypeModeIcon />
+-        </ToolbarControl>
+-      )}
+-      {/* a tool picked from the list shows here, so the current one is always in view; on a phone it
+-          takes the list's own button instead, so the dock keeps its width */}
+-      {!phone && picked && (
+-        <ToolbarControl side="top" label={label(tool)} aria-pressed className={pressed}>
+-          {TOOL_ICONS[tool]}
+-        </ToolbarControl>
++        <>
++          <ToolbarControl
++            side="top"
++            label={t('stage.modePrototype')}
++            aria-pressed={prototypeMode}
++            className={pressed}
++            onClick={() => useStore.getState().setPrototypeMode(!prototypeMode)}
++          >
++            <PrototypeModeIcon />
++          </ToolbarControl>
++          {/* a tool picked from the list shows here, so the current one is always in view */}
++          {picked && (
++            <ToolbarControl side="top" label={label(tool)} aria-pressed className={pressed}>
++              {TOOL_ICONS[tool]}
++            </ToolbarControl>
++          )}
++          <DropdownMenu>
++            <Tooltip label={t('stage.moreTools')} side="top">
++              <DropdownMenuTrigger asChild>
++                <ToolbarButton
++                  aria-label={t('stage.moreTools')}
++                  className={cn('data-[state=open]:bg-paper-deep', pressed)}
++                >
++                  <ChevronDownIcon className={cn('rotate-180')} />
++                </ToolbarButton>
++              </DropdownMenuTrigger>
++            </Tooltip>
++            <DropdownMenuContent side="top" align="start" width="sm">
++              {listed.map((entry) => (
++                <DropdownMenuItem key={entry.id} onSelect={() => setTool(entry.id)}>
++                  {TOOL_ICONS[entry.id]}
++                  {t(entry.label)}
++                  {tool === entry.id ? <CheckIcon size="rail" className="ml-auto" /> : <MenuHint>{entry.key}</MenuHint>}
++                </DropdownMenuItem>
++              ))}
++              <DropdownMenuSeparator />
++              <DropdownMenuItem onSelect={() => useStore.getState().setPrototypeMode(!prototypeMode)}>
++                <PrototypeModeIcon size="rail" />
++                {t('stage.modePrototypeShort')}
++                {prototypeMode && <CheckIcon size="rail" className="ml-auto" />}
++              </DropdownMenuItem>
++            </DropdownMenuContent>
++          </DropdownMenu>
++        </>
+       )}
+-      <DropdownMenu>
+-        <Tooltip label={t('stage.moreTools')} side="top">
+-          <DropdownMenuTrigger asChild>
+-            <ToolbarButton
+-              aria-label={phone && picked ? label(tool) : t('stage.moreTools')}
+-              aria-pressed={phone && picked ? true : undefined}
+-              className={cn('data-[state=open]:bg-paper-deep', pressed, phone && !picked && 'min-w-7 px-0')}
+-            >
+-              {phone && picked ? TOOL_ICONS[tool] : <ChevronDownIcon className={cn('rotate-180')} />}
+-            </ToolbarButton>
+-          </DropdownMenuTrigger>
+-        </Tooltip>
+-        <DropdownMenuContent side="top" align="start" width="sm">
+-          {listed.map((entry) => (
+-            <DropdownMenuItem key={entry.id} onSelect={() => setTool(entry.id)}>
+-              {TOOL_ICONS[entry.id]}
+-              {t(entry.label)}
+-              {tool === entry.id ? <CheckIcon size="rail" className="ml-auto" /> : <MenuHint>{entry.key}</MenuHint>}
+-            </DropdownMenuItem>
+-          ))}
+-          <DropdownMenuSeparator />
+-          <DropdownMenuItem onSelect={() => useStore.getState().setPrototypeMode(!prototypeMode)}>
+-            <PrototypeModeIcon size="rail" />
+-            {t('stage.modePrototypeShort')}
+-            {prototypeMode && <CheckIcon size="rail" className="ml-auto" />}
+-          </DropdownMenuItem>
+-        </DropdownMenuContent>
+-      </DropdownMenu>
+     </>
+   )
+ }
+diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
+index 2176115..8cee3b3 100644
+--- a/src/components/FrameView.tsx
++++ b/src/components/FrameView.tsx
+@@ -23,6 +23,7 @@ import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type H
+ import { snapFrame } from '../lib/snap'
+ import { visibleGuides } from '../lib/guides'
+ import { gesture } from '../lib/gesture'
++import { useTouchHold } from '../lib/touchHold'
+ import { resolvePointerAction } from '../lib/tools'
+ import { FrameContextMenu } from './FrameContextMenu'
+ import { FrameApprovalBadge } from './FrameApproval'
+@@ -267,6 +268,8 @@ export const FrameView = memo(function FrameView({
+      moved, resized or edited — the server refuses those writes anyway */
+   const readOnly = useStore((s) => !canEditOpenCanvas(s))
+   const select = useStore((s) => s.select)
++  /* a long touch press opens the frame's menu, later than Radix would */
++  const hold = useTouchHold()
+   const flash = useStore((s) => s.flashes[frame.id])
+   const stream = useStore((s) => s.streams[frame.id])
+   /* select the stable presences map, derive in render — a selector that
+@@ -340,13 +343,30 @@ export const FrameView = memo(function FrameView({
+     if (action === 'comment') {
+       /* the Comment tool: no drag — the frame is selected and a click on its
+          surface opens the composer on the element under the pointer */
++      const comment = () => {
++        if (!useStore.getState().selectedIds.includes(frame.id)) select(frame.id)
++        if (probeOnClick) probeAt(at.x, at.y, 'comment')
++      }
++      const at = designOffset(e, frame.rotation)
++      /* by finger it is a tap that comments: the press goes on to the Stage,
++         which pans a finger that moves, and the comment opens on a release
++         in place (as on the empty canvas), never after a pan or a pinch */
++      if (e.pointerType === 'touch') {
++        const { pointerId, clientX, clientY } = e
++        const onUp = (ev: PointerEvent) => {
++          if (ev.pointerId !== pointerId) return
++          window.removeEventListener('pointerup', onUp)
++          window.removeEventListener('pointercancel', onUp)
++          const still = Math.abs(ev.clientX - clientX) + Math.abs(ev.clientY - clientY) <= 6
++          if (ev.type === 'pointerup' && still && !gesture.pinching && gesture.held !== pointerId) comment()
++        }
++        window.addEventListener('pointerup', onUp)
++        window.addEventListener('pointercancel', onUp)
++        return
++      }
+       e.stopPropagation()
+       e.preventDefault()
+-      if (!s.selectedIds.includes(frame.id)) select(frame.id)
+-      if (probeOnClick) {
+-        const at = designOffset(e, frame.rotation)
+-        probeAt(at.x, at.y, 'comment')
+-      }
++      comment()
+       return
+     }
+     /* a locked frame is not the stage's to select, move or resize: the press
+@@ -1513,10 +1533,13 @@ export const FrameView = memo(function FrameView({
+           }
+           /* stop the event here so the Stage's background menu — whose trigger
+          wraps this one — does not open a second menu behind ours */
++          onPointerDown={hold.onPointerDown}
+           onContextMenu={(e) => {
+             /* stop here so the Stage's background trigger, which wraps this
+                one, does not open a second menu behind ours */
+             e.stopPropagation()
++            /* a finger opens it by holding (useTouchHold), not the browser's long press */
++            if (hold.blocks(e)) return
+             menuAt.current = { x: e.clientX, y: e.clientY }
+             const target = e.target as HTMLElement
+             const request = ++menuRequest.current
+diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
+index 2e2a83e..b9688df 100644
+--- a/src/components/Stage.tsx
++++ b/src/components/Stage.tsx
+@@ -26,6 +26,7 @@ import { useIsMobile } from '../hooks/use-mobile'
+ import { isTypingTarget, MOD_KEY } from '../lib/keys'
+ import { cn } from '../lib/utils'
+ import { gesture } from '../lib/gesture'
++import { useTouchHold } from '../lib/touchHold'
+ import { hasFrameClip, pasteFrameAtScreen } from '../lib/frameClipboard'
+ import { MenuHint } from './ui/menu'
+ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from './ui/context-menu'
+@@ -1150,7 +1151,11 @@ export function Stage({
+     }
+   }, [tool])
+ 
+-  function onPointerDown(e: React.PointerEvent) {
++  /* a long touch press opens the background menu, later than Radix would */
++  const hold = useTouchHold()
++
++  function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
++    hold.onPointerDown(e)
+     const target = e.target as HTMLElement
+     /* a locked frame lets the press through (FrameView.startDrag), and the
+        stage treats it as empty canvas: a click clears, a drag marquees */
+@@ -1176,6 +1181,10 @@ export function Stage({
+       if (e.pointerType === 'touch') startPan(e, isBackground)
+       startCanvasComment(e)
+     }
++    /* the Comment tool on a frame, by finger: the frame opens the comment
++       on a tap (FrameView) and lets the press through, so a finger that
++       moves pans here, as it does on the empty canvas */
++    if (action === 'comment' && e.pointerType === 'touch') startPan(e, isBackground)
+   }
+ 
+   /* the Comment tool on empty canvas: a click (not a drag) opens the composer
+@@ -1212,8 +1221,9 @@ export function Stage({
+       if (Math.abs(dx) + Math.abs(dy) > 2) moved = true
+       last = { x: ev.clientX, y: ev.clientY }
+       /* a pinch owns the viewport while it lasts; keep tracking the finger
+-         so the pan resumes from where it is, not from where the pinch began */
+-      if (gesture.pinching) return
++         so the pan resumes from where it is, not from where the pinch began.
++         A finger whose hold opened a menu holds the canvas still. */
++      if (gesture.pinching || gesture.held === e.pointerId) return
+       const vp = useStore.getState().viewport
+       useStore.getState().setViewport({ ...vp, x: vp.x + dx, y: vp.y + dy })
+     }
+@@ -1411,6 +1421,8 @@ export function Stage({
+             onPointerDown={onPointerDown}
+             onPointerMove={onPointerMove}
+             onContextMenu={(e) => {
++              /* a finger opens it by holding (useTouchHold), not the browser's long press */
++              if (hold.blocks(e)) return
+               /* frames stop the event on their own trigger, so anything arriving
+                  here is the empty canvas — except a right-click on a frame's
+                  chrome overlay, which is not a menu target at all */
+diff --git a/src/lib/gesture.ts b/src/lib/gesture.ts
+index 2e19cb4..f74d48d 100644
+--- a/src/lib/gesture.ts
++++ b/src/lib/gesture.ts
+@@ -2,5 +2,7 @@
+    the stage has to silence whatever single-pointer drag the first finger
+    started (a canvas pan, a frame move), and those drags live in other
+    components — so the flag is a plain module value they can read on every
+-   pointermove without subscribing to anything. */
+-export const gesture = { pinching: false }
++   pointermove without subscribing to anything. `held` is the finger whose
++   long press opened a context menu (touchHold.ts): what it started holds
++   still until it lifts. */
++export const gesture: { pinching: boolean; held: number | null } = { pinching: false, held: null }
+diff --git a/src/lib/store.ts b/src/lib/store.ts
+index 74faf08..cc132ad 100644
+--- a/src/lib/store.ts
++++ b/src/lib/store.ts
+@@ -68,6 +68,11 @@ interface State {
+   selectedId: string | null
+   /** the active canvas tool in the bottom toolbar */
+   tool: Tool
++  /** a phone in the reviewer layout: the canvas is for reviewing there, so
++   *  the caller's role counts as review at most (roleOf) and only the Hand
++   *  and the Comment tool are offered. Nothing here is a permission: the
++   *  server's role is untouched and still enforced. */
++  reviewOnly: boolean
+   /** space bar held: the stage pans on drag instead of drawing a marquee */
+   panMode: boolean
+   /** a file is being dragged over the page: every frame keeps its shield up,
+@@ -259,6 +264,7 @@ interface State {
+   setLayersTab(tab: 'layers' | 'tokens'): void
+   toggleUiHidden(): void
+   setPrototypeMode(on: boolean): void
++  setReviewOnly(on: boolean): void
+   setViewport(v: Viewport): void
+   setSnapGuides(guides: SnapGuide[]): void
+   toggleRulers(): void
+@@ -315,6 +321,7 @@ export const useStore = create<State>((set, get) => ({
+   selectedIds: [],
+   selectedId: null,
+   tool: 'select',
++  reviewOnly: false,
+   panMode: false,
+   fileDragging: false,
+   inspectorOpen: false,
+@@ -639,7 +646,8 @@ export const useStore = create<State>((set, get) => ({
+         : { selectedIds: ids, selectedId, inspectorOpen: false, selectedElement: null, elementPanelOpen: false }
+     })
+   },
+-  setTool: (tool) => set((s) => (toolAllowed(tool, roleOf(s)) ? { tool } : {})),
++  setTool: (tool) =>
++    set((s) => (toolAllowed(tool, roleOf(s)) && (!s.reviewOnly || REVIEW_TOOLS.has(tool)) ? { tool } : {})),
+   setRole: (role) =>
+     set((s) => {
+       if (!s.canvas) return {}
+@@ -718,6 +726,14 @@ export const useStore = create<State>((set, get) => ({
+   /* hidden guides cannot stay selected: Delete would remove one unseen */
+   toggleUiHidden: () => set((s) => ({ uiHidden: !s.uiHidden, ...(s.uiHidden ? {} : { selectedGuideId: null }) })),
+   setPrototypeMode: (prototypeMode) => set({ prototypeMode }),
++  /* entering it puts away whatever editing was under way: a tool other than
++     the Hand or Comment, and Prototype mode's connectors */
++  setReviewOnly: (reviewOnly) =>
++    set((s) =>
++      reviewOnly
++        ? { reviewOnly, prototypeMode: false, ...(REVIEW_TOOLS.has(s.tool) ? {} : { tool: 'hand' as const }) }
++        : { reviewOnly },
++    ),
+   /* every ordinary camera move (pan, zoom, fit, fly-to) is ours, so it ends a follow */
+   setViewport: (viewport) => set({ viewport, following: null }),
+   /* fires on every pointermove during a drag — skip the no-op transitions
+@@ -785,24 +801,35 @@ export function pickedSelectors(s: Pick<State, 'selectedElement' | 'selectedElem
+   return s.selectedElements.at(-1) === primary ? s.selectedElements : [primary]
+ }
+ 
+-/** The caller's role on the open canvas. A canvas without one (an older
+- *  server) is treated as editable; the server enforces it either way. */
+-export function roleOf(s: Pick<State, 'canvas'>): CanvasRole {
++/** The role the server gave the caller on the open canvas. A canvas without
++ *  one (an older server) is treated as editable; the server enforces it
++ *  either way. */
++export function grantedRole(s: Pick<State, 'canvas'>): CanvasRole {
+   return s.canvas?.role ?? 'edit'
+ }
+ 
++/** The tools a review-only canvas offers (State.reviewOnly). */
++const REVIEW_TOOLS: ReadonlySet<Tool> = new Set<Tool>(['hand', 'comment'])
++
++/** The role the UI works with: the granted one, capped at review while the
++ *  canvas is review-only (a phone), so every edit stays out of reach. */
++export function roleOf(s: Pick<State, 'canvas'> & { reviewOnly?: boolean }): CanvasRole {
++  const role = grantedRole(s)
++  return s.reviewOnly && roleAllows(role, 'edit') ? 'review' : role
++}
++
+ /** May the caller change the open canvas? View and comment links may not. */
+-export function canEditOpenCanvas(s: Pick<State, 'canvas'>): boolean {
++export function canEditOpenCanvas(s: Pick<State, 'canvas'> & { reviewOnly?: boolean }): boolean {
+   return roleAllows(roleOf(s), 'edit')
+ }
+ 
+ /** May the caller comment on the open canvas? */
+ /** May the caller give a frame its verdict (approve, request changes)? */
+-export function canReviewOpenCanvas(s: Pick<State, 'canvas'>): boolean {
++export function canReviewOpenCanvas(s: Pick<State, 'canvas'> & { reviewOnly?: boolean }): boolean {
+   return roleAllows(roleOf(s), 'review')
+ }
+ 
+-export function canCommentOpenCanvas(s: Pick<State, 'canvas'>): boolean {
++export function canCommentOpenCanvas(s: Pick<State, 'canvas'> & { reviewOnly?: boolean }): boolean {
+   return roleAllows(roleOf(s), 'comment')
+ }
+ 
+diff --git a/src/lib/touchHold.ts b/src/lib/touchHold.ts
+new file mode 100644
+index 0000000..4ade663
+--- /dev/null
++++ b/src/lib/touchHold.ts
+@@ -0,0 +1,103 @@
++import { useEffect, useRef, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
++import { gesture } from './gesture'
++
++/** How long a finger rests in place before a context menu opens. Radix's own
++ *  long press is 700 ms and is only cancelled by a move over the trigger
++ *  itself, so a pan across a frame (the stage captures the pointer) opened
++ *  the frame's menu mid-pan, and a finger that paused while reading did too.
++ *  A menu on a phone is the deliberate gesture, so it waits well past the
++ *  platform's long press (about 500 ms on iOS and Android). */
++export const TOUCH_HOLD_MS = 1600
++/** how far a resting finger may drift (CSS px) and still be holding */
++const HOLD_SLOP = 10
++
++/** the contextmenu events a hold sent, which are let through to Radix */
++const sent = new WeakSet<Event>()
++/** presses a trigger nearer the finger already holds, so the triggers that
++ *  wrap it (a frame inside the stage) do not start a hold of their own */
++const claimed = new WeakSet<Event>()
++
++/**
++ * A long touch press opens a Radix context menu after TOUCH_HOLD_MS instead
++ * of Radix's 700 ms. Wire both handlers on the trigger's child, before the
++ * child's own logic: `onPointerDown` replaces Radix's timer (Radix skips a
++ * press that is defaultPrevented), and `blocks` turns away the browser's own
++ * long-press contextmenu (Android) so only the hold opens the menu. The hold
++ * ends when the finger lifts, drifts, or a second finger lands (a pinch);
++ * the mouse and its right-click are untouched.
++ */
++export function useTouchHold(): {
++  onPointerDown: (e: ReactPointerEvent<HTMLElement>) => void
++  blocks: (e: ReactMouseEvent<HTMLElement>) => boolean
++} {
++  const stop = useRef<(() => void) | null>(null)
++  useEffect(() => () => stop.current?.(), [])
++
++  function onPointerDown(e: ReactPointerEvent<HTMLElement>) {
++    if (e.pointerType === 'mouse' || claimed.has(e.nativeEvent)) return
++    claimed.add(e.nativeEvent)
++    e.preventDefault()
++    stop.current?.()
++    if (!e.isPrimary) return
++    const { pointerId, clientX, clientY } = e
++    const trigger = e.currentTarget
++    const pressed = e.target instanceof Element ? e.target : trigger
++
++    const timer = window.setTimeout(() => {
++      end()
++      if (gesture.pinching || !trigger.isConnected) return
++      /* the press's own target, so the trigger reads what the finger is on
++         (a frame's title or its surface) as a right-click there would */
++      const menu = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX, clientY })
++      sent.add(menu)
++      holdStill(pointerId)
++      ;(pressed.isConnected ? pressed : trigger).dispatchEvent(menu)
++    }, TOUCH_HOLD_MS)
++    function onMove(ev: PointerEvent) {
++      if (ev.pointerId === pointerId && Math.hypot(ev.clientX - clientX, ev.clientY - clientY) > HOLD_SLOP) end()
++    }
++    function onOther(ev: PointerEvent) {
++      if (ev.pointerId !== pointerId) end()
++    }
++    function onUp(ev: PointerEvent) {
++      if (ev.pointerId === pointerId) end()
++    }
++    function end() {
++      window.clearTimeout(timer)
++      window.removeEventListener('pointermove', onMove)
++      window.removeEventListener('pointerdown', onOther)
++      window.removeEventListener('pointerup', onUp)
++      window.removeEventListener('pointercancel', onUp)
++      stop.current = null
++    }
++    window.addEventListener('pointermove', onMove)
++    window.addEventListener('pointerdown', onOther)
++    window.addEventListener('pointerup', onUp)
++    window.addEventListener('pointercancel', onUp)
++    stop.current = end
++  }
++
++  function blocks(e: ReactMouseEvent<HTMLElement>): boolean {
++    if (sent.has(e.nativeEvent)) return false
++    const type = (e.nativeEvent as Partial<PointerEvent>).pointerType
++    if (type !== 'touch' && type !== 'pen' && !stop.current) return false
++    e.preventDefault()
++    return true
++  }
++
++  return { onPointerDown, blocks }
++}
++
++/** The finger that opened a menu stays down: whatever it started (a pan)
++ *  holds still until it lifts, so the canvas does not slide under the menu. */
++function holdStill(pointerId: number) {
++  gesture.held = pointerId
++  function release(ev: PointerEvent) {
++    if (ev.pointerId !== pointerId) return
++    gesture.held = null
++    window.removeEventListener('pointerup', release, true)
++    window.removeEventListener('pointercancel', release, true)
++  }
++  window.addEventListener('pointerup', release, true)
++  window.addEventListener('pointercancel', release, true)
++}
+diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
+index 844d710..f1a38c0 100644
+--- a/src/pages/CanvasPage.tsx
++++ b/src/pages/CanvasPage.tsx
+@@ -751,6 +751,31 @@ export function CanvasPage({
+   useEffect(() => {
+     if (reviewerLayout) useStore.getState().setTool('hand')
+   }, [canvasId, reviewerLayout])
++  /* A phone reviews: no editing there at all (State.reviewOnly caps the
++     role at review, so the edit chrome, shortcuts, menus and gestures all
++     step aside), and the page itself does not zoom: a pinch is the canvas's
++     own zoom, and a pinch or double tap on the dock must not magnify the
++     page under it, after which a drag would move the page instead of
++     panning the canvas. tldraw and Excalidraw hold the page still the same
++     way: a viewport that does not scale (Android) and the WebKit gesture
++     events cancelled (iOS ignores user-scalable=no). */
++  const phoneReview = reviewerLayout && isMobile
++  useEffect(() => {
++    if (!phoneReview) return
++    useStore.getState().setReviewOnly(true)
++    const meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]')
++    const content = meta?.content
++    if (meta && content) meta.content = `${content}, maximum-scale=1, user-scalable=no`
++    const still = (e: Event) => e.preventDefault()
++    document.addEventListener('gesturestart', still)
++    document.addEventListener('gesturechange', still)
++    return () => {
++      useStore.getState().setReviewOnly(false)
++      if (meta && content) meta.content = content
++      document.removeEventListener('gesturestart', still)
++      document.removeEventListener('gesturechange', still)
++    }
++  }, [phoneReview])
+   /* docked, the rulers sit on the stage's own edges inside the columns, so
+      nothing steps in past them */
+   const rulerInset = rulersShown && !docked ? RULER_PX : 0
+@@ -914,7 +939,13 @@ export function CanvasPage({
+   return (
+     /* --app-inset is 0 normally; the impersonation shell raises it so this
+        fixed layer starts below the banner instead of under it */
+-    <div className="fixed inset-x-0 bottom-0 top-[var(--app-inset,0px)] bg-canvas">
++    <div
++      className={cn(
++        'fixed inset-x-0 bottom-0 top-[var(--app-inset,0px)] bg-canvas',
++        /* no double-tap zoom of the page on a phone (see phoneReview) */
++        phoneReview && 'touch-manipulation',
++      )}
++    >
+       {/* Floating pills over the canvas, which shows through the transparent
+           bar: the title pill on the left, live presence centred, sharing on
+           the right. Tablet (xs..md) folds the text actions into the •••
+@@ -1282,8 +1313,10 @@ export function CanvasPage({
+               </div>
+               {/* the same glyphs as the desktop bar and islands; pages live
+                   in the Layers sheet, as on desktop. In the reviewer layout
+-                  the dock has Layers and Prototype mode, and this sheet takes
+-                  what the desktop dock holds beyond them. */}
++                  the dock has Layers, and this sheet takes what the desktop
++                  dock holds beyond it that reviewing uses: share, export, your
++                  name and settings (a phone is review-only, so no import,
++                  Connect AI or Prototype mode) */}
+               <div className="grid gap-2 p-4 [&_svg]:size-3.5 [&_svg]:text-ink-soft">
+                 {!reviewerLayout && (
+                   <Button
+diff --git a/tests/phoneReviewBrowser.test.ts b/tests/phoneReviewBrowser.test.ts
+new file mode 100644
+index 0000000..8ee1693
+--- /dev/null
++++ b/tests/phoneReviewBrowser.test.ts
+@@ -0,0 +1,154 @@
++import { afterAll, beforeAll, describe, expect, it } from 'vitest'
++import type { Page } from 'puppeteer-core'
++import type { Frame } from '../shared/types'
++import { findBrowserPath } from '../server/screenshot'
++import { fixtureUrl, openBrowser, type TestBrowser } from './browser'
++import { TOUCH_HOLD_MS } from '../src/lib/touchHold'
++
++/* A phone in the reviewer layout (FULL_UI off, <= 900px) reviews: the role
++   counts as review at most, the dock holds the Hand and Comment and no tool
++   list, a finger pans over frames in either tool, the page does not zoom,
++   and a context menu waits for a long hold that a pan or a short pause does
++   not reach. The editor page itself, mounted by the clipboard fixture. */
++
++type Harness = { canvasClipboardHarness: { seed: (frames: Frame[]) => void } }
++
++const FRAME: Frame = {
++  id: 'f',
++  canvasId: 'c',
++  name: 'Frame',
++  x: 0,
++  y: 0,
++  width: 600,
++  height: 900,
++  html: '<!doctype html><html><body><h1>Hello</h1></body></html>',
++  createdAt: 0,
++  updatedAt: 0,
++  updatedBy: 'Tester',
++}
++
++const store = (page: Page, expr: string) =>
++  page.evaluate(`import('/src/lib/store.ts').then((m) => { const s = m.useStore.getState(); return ${expr} })`)
++const dock = '[aria-label="Canvas dock"]'
++const menuOpen = (page: Page) => page.evaluate(() => !!document.querySelector('[role="menu"]'))
++const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
++
++/** a point on the frame, clear of the dock and the zoom pill */
++async function onFrame(page: Page) {
++  return page.evaluate(() => {
++    const r = document.querySelector('[data-frame-surface]')!.getBoundingClientRect()
++    const x = Math.min(r.right, innerWidth) / 2 + Math.max(r.left, 0) / 2
++    const y = Math.max(r.top, 0) + 120
++    return { x, y }
++  })
++}
++
++describe.skipIf(!findBrowserPath())('a phone in the reviewer layout', () => {
++  let browser: TestBrowser
++  let page: Page
++  beforeAll(async () => {
++    browser = await openBrowser()
++    page = await browser.newPage()
++    await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true })
++    await page.evaluateOnNewDocument(() => {
++      localStorage.setItem('doop:full-ui', 'off')
++      /* the fixture has no viewport tag, which a phone lays out at 980px:
++         add index.html's before the page's modules run */
++      document.addEventListener('readystatechange', () => {
++        if (document.readyState !== 'interactive') return
++        const meta = document.createElement('meta')
++        meta.name = 'viewport'
++        meta.content = 'width=device-width, initial-scale=1.0, viewport-fit=cover'
++        document.head.append(meta)
++      })
++    })
++    await page.goto(fixtureUrl('canvasClipboard.html'))
++    await page.waitForFunction(
++      () => !!(window as unknown as Harness).canvasClipboardHarness && !!document.querySelector('.stage'),
++    )
++    await page.evaluate((frame) => (window as unknown as Harness).canvasClipboardHarness.seed([frame]), FRAME)
++    await store(page, `(m.useStore.setState({ uiHidden: false, viewport: { x: 0, y: 0, zoom: 1 } }), true)`)
++    await page.waitForSelector(dock)
++    await page.waitForSelector('[data-frame-surface]')
++  }, 60_000)
++  afterAll(async () => {
++    await page?.close()
++    await browser?.close()
++  })
++
++  it('is review-only: the role counts as review and only the Hand and Comment are offered', async () => {
++    expect(await store(page, 's.reviewOnly')).toBe(true)
++    expect(await store(page, 'm.roleOf(s)')).toBe('review')
++    expect(await store(page, 'm.grantedRole(s)')).toBe('edit')
++    expect(await store(page, 'm.canEditOpenCanvas(s)')).toBe(false)
++    expect(await store(page, 'm.canReviewOpenCanvas(s)')).toBe(true)
++    expect(await store(page, 's.tool')).toBe('hand')
++    expect(await page.$(`${dock} [aria-label="More tools"]`)).toBe(null)
++    const labels = await page.$$eval(`${dock} [aria-label]`, (els) => els.map((el) => el.getAttribute('aria-label')))
++    expect(labels).toEqual(expect.arrayContaining(['Hand (H)', 'Comment (C)']))
++    expect(labels.some((label) => label?.startsWith('Prototype'))).toBe(false)
++    await store(page, `(s.setTool('select'), s.setTool('rect'), s.setTool('zoom'), true)`)
++    expect(await store(page, 's.tool')).toBe('hand')
++    /* no "view only" banner: the cap is the layout's, not a lesser role */
++    expect(await page.$('[role="status"]')).toBe(null)
++  })
++
++  it('holds the page still: no browser zoom, no double-tap zoom', async () => {
++    const meta = await page.$eval('meta[name="viewport"]', (el) => (el as HTMLMetaElement).content)
++    expect(meta).toContain('user-scalable=no')
++    expect(meta).toContain('maximum-scale=1')
++  })
++
++  it('pans with a finger dragged slowly across a frame, and opens no menu on the way', async () => {
++    const at = await onFrame(page)
++    const before = (await store(page, 's.viewport')) as { x: number; y: number }
++    await page.touchscreen.touchStart(at.x, at.y)
++    /* longer than Radix's 700 ms long press, moving all the while */
++    for (let i = 1; i <= 12; i++) {
++      await wait(100)
++      await page.touchscreen.touchMove(at.x - i * 6, at.y - i * 8)
++    }
++    expect(await menuOpen(page)).toBe(false)
++    await page.touchscreen.touchEnd()
++    const after = (await store(page, 's.viewport')) as { x: number; y: number }
++    expect(after.y).toBeLessThan(before.y - 60)
++    expect(await store(page, 's.selectedIds.length')).toBe(0)
++    expect(await menuOpen(page)).toBe(false)
++  }, 20_000)
++
++  it('opens the frame menu only after a long hold, with its review half alone', async () => {
++    const at = await onFrame(page)
++    await page.touchscreen.touchStart(at.x, at.y)
++    await wait(1000)
++    /* past Radix's 700 ms and the platforms' long press: still nothing */
++    expect(await menuOpen(page)).toBe(false)
++    await page.waitForSelector('[role="menu"]', { timeout: TOUCH_HOLD_MS + 2000 })
++    await page.touchscreen.touchEnd()
++    const items = await page.$$eval('[role="menuitem"]', (els) => els.map((el) => el.textContent?.trim() ?? ''))
++    expect(items.some((text) => text.startsWith('Copy link'))).toBe(true)
++    expect(items.some((text) => text.startsWith('Request changes'))).toBe(true)
++    expect(items.some((text) => text.startsWith('Duplicate') || text.startsWith('Delete'))).toBe(false)
++    await page.keyboard.press('Escape')
++    await page.waitForFunction(() => !document.querySelector('[role="menu"]'))
++  }, 20_000)
++
++  it('pans in the Comment tool too, and a tap on a frame is what comments', async () => {
++    await store(page, `(s.setTool('comment'), s.select(null), true)`)
++    const at = await onFrame(page)
++    const before = (await store(page, 's.viewport')) as { x: number; y: number }
++    await page.touchscreen.touchStart(at.x, at.y)
++    for (let i = 1; i <= 6; i++) await page.touchscreen.touchMove(at.x, at.y - i * 15)
++    await page.touchscreen.touchEnd()
++    const after = (await store(page, 's.viewport')) as { x: number; y: number }
++    expect(after.y).toBeLessThan(before.y - 60)
++    /* the pan neither selected the frame nor opened a comment */
++    expect(await store(page, 's.selectedIds.length')).toBe(0)
++    const tap = await onFrame(page)
++    await page.touchscreen.tap(tap.x, tap.y)
++    /* a string: the test file's own transform would rewrite a function's import() */
++    await page.waitForFunction(
++      `import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().selectedIds.includes('f'))`,
++      { polling: 100 },
++    )
++  }, 20_000)
++})

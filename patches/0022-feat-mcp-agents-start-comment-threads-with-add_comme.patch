@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 08:04:40 +0000
-Subject: [PATCH 22/27] feat(mcp): agents start comment threads with
+Subject: [PATCH 22/28] feat(mcp): agents start comment threads with
  add_comment
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

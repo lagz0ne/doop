@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 05:09:37 +0000
-Subject: [PATCH 15/27] perf(canvas): a zoom step restyles the canvas only when
+Subject: [PATCH 15/28] perf(canvas): a zoom step restyles the canvas only when
  its chrome has drifted
 
 Chrome drawn inside the world at a fixed screen size (frame names, rings,

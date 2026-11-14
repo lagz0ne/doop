@@ -142,5 +142,8 @@ transform still applies, then `bin/doop check --test` and commit (`vendor/doop` 
   With FULL_UI off the editor also uses a reviewer layout (patch 0013, `CanvasDock.tsx`): one
   dock along the bottom instead of the top bar, tool rail and side rail, the Hand first, Layers
   folded; the review panel at `/embed` uses the same layout (0014), and so do phones (0021: back,
-  Hand, Comment, tools, Comments, Layers and ••• in one thumb-sized dock).
+  Hand, Comment, Comments, Layers and ••• in one thumb-sized dock). A phone only reviews (0028:
+  `store.reviewOnly` caps the role at review on the client, no tool list or Prototype mode, a finger
+  pans in Hand and Comment, the page itself does not zoom, a context menu needs a 1600 ms hold,
+  `TOUCH_HOLD_MS` in `src/lib/touchHold.ts`).
   `localStorage['doop:full-ui']='on'` plus a reload brings it back in one browser.

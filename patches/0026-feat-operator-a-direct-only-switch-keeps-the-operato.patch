@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 07:39:24 +0000
-Subject: [PATCH 26/27] feat(operator): a direct-only switch keeps the operator
+Subject: [PATCH 26/28] feat(operator): a direct-only switch keeps the operator
  API off the public edge
 
 The operator API is guarded by its bearer token alone. Keeping it off the

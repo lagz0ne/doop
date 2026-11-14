@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 08:07:09 +0000
-Subject: [PATCH 23/27] feat(api): read a frame's HTML over HTTP with an agent
+Subject: [PATCH 23/28] feat(api): read a frame's HTML over HTTP with an agent
  key
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
