@@ -98,6 +98,20 @@ const secret = makeExactValidator<string>((input) => {
 })
 const nonNegativeInt = int(0)
 
+export interface ListenAddress {
+  host: string
+  port: number
+}
+/** `[host:]port` (`4401`, `127.0.0.1:4401`, `[::1]:4401`); the host defaults to loopback */
+const listenAddress = makeExactValidator<ListenAddress>((input) => {
+  const match = /^(?:\[([^\]]+)\]:|([^:[\]]+):)?(\d{1,5})$/.exec(input.trim())
+  const port = Number(match?.[3])
+  if (!match || port < 1 || port > 65535) {
+    throw new TypeError(`Invalid listen address (expected [host:]port): "${input}"`)
+  }
+  return { host: match[1] ?? match[2] ?? '127.0.0.1', port }
+})
+
 /* ------------------------------------------------------------------ */
 /* schema                                                              */
 /* ------------------------------------------------------------------ */
@@ -129,6 +143,9 @@ const schema = {
   /* true = the operator API refuses (404) any request that came through a proxy
      (X-Forwarded-For or Forwarded set): only direct calls to doop's own port reach it */
   DOOP_OPERATOR_DIRECT_ONLY: bool({ default: false }),
+  /* [host:]port = the operator API is served on a listener of its own (host
+     defaults to 127.0.0.1) and PORT has none; unset = it shares PORT */
+  DOOP_OPERATOR_LISTEN: listenAddress({ default: undefined }),
   /* JSON {"<host id>": {"secret": "<32+ chars>", "origin": "https://…"}};
      unset = no embedded review panel (server/embed.ts) */
   DOOP_EMBED_HOSTS: str({ default: undefined }),

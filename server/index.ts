@@ -738,7 +738,10 @@ app.post('/ingest/:key', express.json({ limit: '10mb', type: () => true }), (req
 
 /* the operator API (doopctl): bearer DOOP_ADMIN_TOKEN only, absent while it
    is unset — see server/operator.ts. Ahead of the session gate on purpose. */
-app.use('/api/operator', operatorRouter(refreshRoomRoles))
+const operatorApi = operatorRouter(refreshRoomRoles)
+/* DOOP_OPERATOR_LISTEN: the API lives on its own listener (below), and the
+   public port has no such surface, whatever a proxy in front forwards */
+app.use('/api/operator', env.DOOP_OPERATOR_LISTEN ? (_req, res) => res.status(404).end() : operatorApi)
 
 /* a frame's HTML for scripts holding an agent key (server/frameHtml.ts);
    other requests go on to the session gate and the route below it */
@@ -2839,6 +2842,22 @@ wss.on('connection', (ws, upgradeReq) => {
     broadcast(conn.canvasId, { type: 'presence:leave', clientId: conn.presence.clientId })
   })
 })
+
+/* The operator API on a listener of its own (DOOP_OPERATOR_LISTEN), as Caddy
+   keeps its admin API on localhost:2019: a proxy in front of PORT cannot reach
+   it, however it is configured, unless it is pointed at this address too. */
+if (env.DOOP_OPERATOR_LISTEN) {
+  const { host, port } = env.DOOP_OPERATOR_LISTEN
+  const operatorApp = express()
+  operatorApp.disable('x-powered-by')
+  operatorApp.use(express.json({ limit: '10mb' }))
+  operatorApp.use('/api/operator', operatorApi)
+  operatorApp.use((_req, res) => res.status(404).end())
+  const where = host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`
+  http
+    .createServer(operatorApp)
+    .listen(port, host, () => console.log(`⟡ operator api      http://${where}/api/operator`))
+}
 
 server.listen(PORT, () => {
   console.log(`⟡ doop server     http://localhost:${PORT}`)
