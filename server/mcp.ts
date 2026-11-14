@@ -26,6 +26,7 @@ import {
 } from '../shared/designTokens.ts'
 import { webFontFamilies, webFontsBrief } from '../shared/webFonts.ts'
 import * as actions from './actions.ts'
+import { elementSnippet, hasElementId } from './elementIds.ts'
 import { canvasRole } from './access.ts'
 import { roleAllows, type CanvasRole } from '../shared/canvasRole.ts'
 import { isAgentKeySecret, verifyAgentKey } from './agentKeys.ts'
@@ -1071,6 +1072,114 @@ export function buildMcpServer(
         return err('thread resolved meanwhile')
       }
       return withFeedback(text(reply), canvas_id, actor)
+    },
+  )
+
+  server.registerTool(
+    'add_comment',
+    {
+      title: 'Comment on an element, a frame or the canvas',
+      description:
+        'Start a new comment thread that people see in the editor, with you as its author — the MCP counterpart of dropping a comment pin. Pin it to an element of a frame with frame_id plus element_id (its data-doop-id attribute, from get_frame) or selector (an "#id > …" or "body > …" path; the element gets a data-doop-id, returned as the comment’s elementId). frame_id with x, y (frame-local design px) pins it to a point in the frame; frame_id alone comments on the frame as a whole. page_id with x, y (canvas coordinates) leaves it on the canvas outside any frame. An element that is not in the frame’s saved HTML is an error, not a silent fallback. Needs comment access; an @mention of a resident role (e.g. "@Doop") needs edit access and counts as a new resident task against the account’s meter, exactly like a comment left in the browser. Answer threads with reply_to_comment, close them with resolve_comment.',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        canvas_id: z.string(),
+        frame_id: z
+          .string()
+          .optional()
+          .describe('The frame the comment is in (from get_canvas). Omit for a canvas comment.'),
+        element_id: z
+          .string()
+          .optional()
+          .describe('The element’s data-doop-id in the frame HTML (get_frame). Needs frame_id.'),
+        selector: z
+          .string()
+          .max(actions.MAX_ELEMENT_SELECTOR_CHARS)
+          .optional()
+          .describe(
+            'Instead of element_id: a path to the element in the frame’s saved HTML, from an HTML id ("#pricing > h2:nth-of-type(1)") or from the body ("body > main:nth-of-type(1) > button:nth-of-type(2)"). Needs frame_id.',
+          ),
+        page_id: z
+          .string()
+          .optional()
+          .describe('For a canvas comment: the page it is on (from get_canvas), with x and y. Omit with frame_id.'),
+        x: z.number().optional().describe('With frame_id: frame-local design px. With page_id: canvas coordinates.'),
+        y: z.number().optional().describe('Pairs with x.'),
+        text: z.string().describe('The comment text. Trimmed; empty comments are rejected.'),
+        agent_name: agentName,
+      },
+    },
+    async ({ canvas_id, frame_id, element_id, selector, page_id, x, y, text: body, agent_name }) => {
+      const canvas = canvasFor(canvas_id, 'comment')
+      if (!canvas) return noCanvas(canvas_id)
+      if (!body.trim()) return err('empty text')
+      if ((x === undefined) !== (y === undefined)) return err('give x and y together')
+      const point = x !== undefined && y !== undefined ? { x, y } : undefined
+      if (!!frame_id === !!page_id)
+        return err('pass frame_id (a comment in a frame) or page_id with x, y (a comment on the canvas)')
+      if (element_id && selector) return err('pass element_id or selector, not both')
+      if (page_id && (element_id || selector)) return err('an element needs its frame_id, not a page_id')
+      if (page_id && !point) return err('a canvas comment needs x and y')
+      if (mentionedRole(body) && !canvasFor(canvas_id, 'edit'))
+        return err('asking an agent to change the canvas needs edit access')
+      const frame = frame_id ? frameFor(frame_id, 'comment') : undefined
+      if (frame_id && (!frame || frame.canvasId !== canvas_id)) return noFrame(frame_id)
+      if (page_id && !canvasPages(canvas).some((p) => p.id === page_id))
+        return err(`no page with id ${page_id} on canvas ${canvas_id} (page ids come from get_canvas)`)
+      const actor = actorFrom(agent_name)
+      arrive(canvas_id, agent_name)
+      /* the element is found before anything is spent or posted: the browser
+         falls back to a frame comment when a pin's element has drifted, but an
+         agent named the element on purpose and should hear that it is wrong */
+      let elementId = element_id
+      if (frame && selector) {
+        const stamped = await actions.ensureElementId(frame.id, selector, actor.name)
+        if (!stamped)
+          return err(
+            `no element at "${selector}" in the saved HTML of frame ${frame.id} (or the frame is still streaming) — use a data-doop-id from get_frame, an "#id > …" path or a "body > …" path`,
+          )
+        elementId = stamped.id
+      }
+      const html = frame ? (store.getFrame(frame.id)?.html ?? '') : ''
+      if (frame && elementId && !hasElementId(html, elementId))
+        return err(`no element with data-doop-id="${elementId}" in frame ${frame.id} — read it with get_frame`)
+      let gate: Awaited<ReturnType<typeof allowance.consumeResidentTask>> | undefined
+      if (mentionedRole(body) && ownerId) {
+        gate = await allowance.consumeResidentTask(ownerId)
+        if (!gate.ok)
+          return err(
+            `resident task limit reached (${gate.used}/${gate.limit}) — connect a model account or retry later`,
+          )
+      }
+      /* attributed to the agent, billed to the connecting user, as in reply_to_comment */
+      const comment = frame
+        ? await actions.addElementComment(
+            frame.id,
+            {
+              ...(elementId ? { elementId, snippet: elementSnippet(html, elementId) ?? '' } : {}),
+              ...point,
+              text: body,
+            },
+            actor.name,
+            ownerId,
+            'agent',
+          )
+        : actions.addCanvasComment(
+            canvas_id,
+            { pageId: page_id ?? '', x: x ?? NaN, y: y ?? NaN, text: body },
+            actor.name,
+            ownerId,
+            'agent',
+          )
+      if (!comment) {
+        if (gate && ownerId) {
+          await allowance
+            .refundResidentTask(gate, ownerId)
+            .catch((e) => console.error(`[mcp] could not refund a resident task for ${ownerId}:`, e))
+        }
+        return err(frame ? 'the frame was deleted meanwhile' : 'the page was deleted meanwhile')
+      }
+      return withFeedback(text(comment), canvas_id, actor)
     },
   )
 

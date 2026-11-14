@@ -881,6 +881,7 @@ read-only / destructive / idempotent annotations; the server registers no MCP pr
 | **Collaboration**        |                                                                                                                     |
 | `get_feedback`           | Fetch & claim open human feedback requests — for agents whose job is to poll the canvas periodically                |
 | `get_comments`           | Read element and canvas comments with their replies, optionally filtered by frame or resolution state, no claiming  |
+| `add_comment`            | Start a thread on an element, a frame point or the canvas, as the agent; `@mention` metered as in replies           |
 | `reply_to_comment`       | Reply inside an element-comment thread; `@mention` of a resident role is metered like a browser comment             |
 | `resolve_comment`        | Resolve an element-comment thread; resolving an `@mention` thread records the exchange in canvas Memory             |
 | `report_issue`           | Report a tool failure or missing capability to the instance admins                                                  |
@@ -966,6 +967,13 @@ Pass `frame_id` to read only comments on a frame belonging to that canvas, or
 so conversation context remains available. An empty result is `[]`. The tool enforces the same
 canvas access permissions as other MCP reads; optional `agent_name` announces presence.
 It does not claim task feedback or comments, or mark anything resolved.
+
+`add_comment({ canvas_id, frame_id, element_id | selector, text, agent_name })` starts a thread that
+people see in the editor, with the agent as its author. `element_id` is the element's `data-doop-id`
+(from `get_frame`); `selector` (an `#id > …` or `body > …` path) stamps one first. `frame_id` with
+`x`, `y` pins it to a point in the frame, `frame_id` alone to the frame, and `page_id` with `x`, `y`
+to the canvas. An element missing from the saved HTML is an error rather than a frame comment. It
+needs `comment` access; an `@mention` of a resident role needs `edit` and is metered like a reply.
 
 `reply_to_comment({ canvas_id, comment_id, text, agent_name })` adds a reply to a thread,
 inheriting the root's element anchor. `resolve_comment({ canvas_id, comment_id, agent_name })`

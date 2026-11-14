@@ -126,6 +126,13 @@ Add frame_id to focus on one frame. Resolved comments are included by default to
 conversation context; include_resolved: false returns only unresolved entries. The result
 is newest first and covers the retained history (up to 100 entries per canvas).
 
+Start a thread yourself with add_comment({ canvas_id, frame_id, element_id, text, agent_name }):
+people see it pinned to the element in the editor, with you as its author. element_id is the
+element's data-doop-id from get_frame; pass selector instead ("#id > …" or "body > …") to pin an
+element that has none yet, x, y (frame-local) for a point in the frame, or page_id with x, y for
+the canvas. A missing element is an error, not a silent frame comment. It needs comment access;
+an @mention of a resident role needs edit and is metered like a reply.
+
 Answer a thread with reply_to_comment({ canvas_id, comment_id, text, agent_name }) — the
 reply inherits the root's element anchor, so an @mention reaches the resident agent with
 the same context the conversation is about. Close the thread with resolve_comment once the

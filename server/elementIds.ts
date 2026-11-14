@@ -220,6 +220,16 @@ export function stampElementId(html: string, selector: string, opts: StampOption
   return hasElementId(next, id) ? { html: next, id } : undefined
 }
 
+/** The stamped element's markup as the runtime's probe excerpts it (its
+ *  outerHTML, cut to 400 characters ending in `...`), from the saved source:
+ *  what a comment an agent pins to the element shows as its snippet. */
+export function elementSnippet(html: string, id: string): string | undefined {
+  const loc = findByElementId(parseDocument(html), id)?.sourceCodeLocation
+  if (!loc) return undefined
+  const markup = html.slice(loc.startOffset, loc.endOffset)
+  return markup.length > 400 ? markup.slice(0, 397) + '...' : markup
+}
+
 /** Whether a stamped element is still in the HTML. */
 export function hasElementId(html: string, id: string): boolean {
   /* by the parsed attribute, whatever its quoting or case in the source */

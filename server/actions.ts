@@ -675,13 +675,14 @@ export async function addElementComment(
   input: FrameAnchorInput & { text: string },
   from: string,
   fromUserId?: string,
+  kind: ActorKind = 'user',
 ): Promise<ElementComment | undefined> {
   const frame = store.getFrame(frameId)
   if (!frame || !input.text.trim()) return undefined
   const anchor = await frameAnchor(frame, input, from)
   /* a frame deleted while its element was being stamped takes no comment */
   if (!store.getFrame(frameId)) return undefined
-  return postComment(frame.canvasId, anchor, input.text, from, fromUserId)
+  return postComment(frame.canvasId, anchor, input.text, from, fromUserId, kind)
 }
 
 /** The anchor as it is written onto a comment; what the anchor does not
@@ -843,11 +844,12 @@ export function addCanvasComment(
   input: { pageId: string; x: number; y: number; text: string },
   from: string,
   fromUserId?: string,
+  kind: ActorKind = 'user',
 ): ElementComment | undefined {
   const canvas = store.getCanvas(canvasId)
   if (!canvas || !canvasPages(canvas).some((page) => page.id === input.pageId)) return undefined
   if (!Number.isFinite(input.x) || !Number.isFinite(input.y)) return undefined
-  return postComment(canvasId, { pageId: input.pageId, x: input.x, y: input.y }, input.text, from, fromUserId)
+  return postComment(canvasId, { pageId: input.pageId, x: input.x, y: input.y }, input.text, from, fromUserId, kind)
 }
 
 /** Reply inside a thread: the reply inherits the root comment's anchor (its

@@ -39,6 +39,7 @@ const MISSING = [
   'set_page_background',
   'export_frame',
   'upload_asset',
+  'add_comment', // a resident run answers the threads it is handed (reply_to_comment); starting its own is undecided
   'list_linear_issues', // integration tools, registered by their connections
   'get_linear_issue',
 ]
