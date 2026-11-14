@@ -1,0 +1,217 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 08:25:05 +0000
+Subject: [PATCH 27/27] feat(operator): serve the operator API on a listener of
+ its own
+
+DOOP_OPERATOR_DIRECT_ONLY tells a proxied request by X-Forwarded-For or
+Forwarded, so it holds only behind a proxy that adds one. Traefik, Caddy and
+Cloudflare do; a bare nginx proxy_pass adds neither, and its public requests
+pass for direct calls (review of the direct-only patch).
+
+DOOP_OPERATOR_LISTEN=[host:]port takes the API off PORT altogether and serves
+it on a second listener (host defaults to 127.0.0.1), as Caddy keeps its admin
+API on localhost:2019 and Envoy its admin port: a proxy in front of PORT cannot
+reach it, whatever headers it sends, unless it is pointed at that address too.
+PORT then answers 404 for /api/operator; the listener serves only the operator
+API (404 for anything else) and needs no trust-proxy setting, so the audit log
+shows the real peer. doopctl --url http://<that address>. Unset, nothing changes.
+
+The direct-only note in .env.example and operator.ts now states its limit.
+
+Tests (tests/operator.test.ts): with the listener set, PORT is 404 with the
+token; the listener serves GET and a JSON POST, 401 without the token, 404 off
+the API; [host:]port parsing (port only, IPv4, bracketed IPv6; bad values fail
+at boot).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .env.example           |  7 +++++++
+ server/env.ts          | 17 ++++++++++++++++
+ server/index.ts        | 21 +++++++++++++++++++-
+ server/operator.ts     |  4 +++-
+ tests/operator.test.ts | 44 ++++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 91 insertions(+), 2 deletions(-)
+
+diff --git a/.env.example b/.env.example
+index 2b2a735..fbcc5c5 100644
+--- a/.env.example
++++ b/.env.example
+@@ -66,7 +66,14 @@
+ # 404, token or not. For an instance whose public edge should never offer
+ # /api/operator, without relying on a proxy path rule. doopctl then talks to
+ # the port directly (--url http://<container or host address>:<PORT>).
++# It tells a proxied request by those headers, so it holds only behind a proxy
++# that adds one (Traefik, Caddy and Cloudflare do; nginx only with
++# proxy_set_header X-Forwarded-For). DOOP_OPERATOR_LISTEN does not depend on it.
+ #DOOP_OPERATOR_DIRECT_ONLY=true
++# [host:]port = serve the operator API on a listener of its own and not on
++# PORT at all (host defaults to 127.0.0.1; 0.0.0.0:4401 for a port the host
++# reaches but the proxy is not pointed at). doopctl --url http://<that address>.
++#DOOP_OPERATOR_LISTEN=127.0.0.1:4401
+ 
+ # Embedded review panel: host apps (each with its own page origin) show doop's
+ # review panel in an iframe and sign their users in with a short-lived HS256
+diff --git a/server/env.ts b/server/env.ts
+index 95aadbf..b5d93e8 100644
+--- a/server/env.ts
++++ b/server/env.ts
+@@ -98,6 +98,20 @@ const secret = makeExactValidator<string>((input) => {
+ })
+ const nonNegativeInt = int(0)
+ 
++export interface ListenAddress {
++  host: string
++  port: number
++}
++/** `[host:]port` (`4401`, `127.0.0.1:4401`, `[::1]:4401`); the host defaults to loopback */
++const listenAddress = makeExactValidator<ListenAddress>((input) => {
++  const match = /^(?:\[([^\]]+)\]:|([^:[\]]+):)?(\d{1,5})$/.exec(input.trim())
++  const port = Number(match?.[3])
++  if (!match || port < 1 || port > 65535) {
++    throw new TypeError(`Invalid listen address (expected [host:]port): "${input}"`)
++  }
++  return { host: match[1] ?? match[2] ?? '127.0.0.1', port }
++})
++
+ /* ------------------------------------------------------------------ */
+ /* schema                                                              */
+ /* ------------------------------------------------------------------ */
+@@ -129,6 +143,9 @@ const schema = {
+   /* true = the operator API refuses (404) any request that came through a proxy
+      (X-Forwarded-For or Forwarded set): only direct calls to doop's own port reach it */
+   DOOP_OPERATOR_DIRECT_ONLY: bool({ default: false }),
++  /* [host:]port = the operator API is served on a listener of its own (host
++     defaults to 127.0.0.1) and PORT has none; unset = it shares PORT */
++  DOOP_OPERATOR_LISTEN: listenAddress({ default: undefined }),
+   /* JSON {"<host id>": {"secret": "<32+ chars>", "origin": "https://…"}};
+      unset = no embedded review panel (server/embed.ts) */
+   DOOP_EMBED_HOSTS: str({ default: undefined }),
+diff --git a/server/index.ts b/server/index.ts
+index 95945cb..4aae220 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -738,7 +738,10 @@ app.post('/ingest/:key', express.json({ limit: '10mb', type: () => true }), (req
+ 
+ /* the operator API (doopctl): bearer DOOP_ADMIN_TOKEN only, absent while it
+    is unset — see server/operator.ts. Ahead of the session gate on purpose. */
+-app.use('/api/operator', operatorRouter(refreshRoomRoles))
++const operatorApi = operatorRouter(refreshRoomRoles)
++/* DOOP_OPERATOR_LISTEN: the API lives on its own listener (below), and the
++   public port has no such surface, whatever a proxy in front forwards */
++app.use('/api/operator', env.DOOP_OPERATOR_LISTEN ? (_req, res) => res.status(404).end() : operatorApi)
+ 
+ /* a frame's HTML for scripts holding an agent key (server/frameHtml.ts);
+    other requests go on to the session gate and the route below it */
+@@ -2840,6 +2843,22 @@ wss.on('connection', (ws, upgradeReq) => {
+   })
+ })
+ 
++/* The operator API on a listener of its own (DOOP_OPERATOR_LISTEN), as Caddy
++   keeps its admin API on localhost:2019: a proxy in front of PORT cannot reach
++   it, however it is configured, unless it is pointed at this address too. */
++if (env.DOOP_OPERATOR_LISTEN) {
++  const { host, port } = env.DOOP_OPERATOR_LISTEN
++  const operatorApp = express()
++  operatorApp.disable('x-powered-by')
++  operatorApp.use(express.json({ limit: '10mb' }))
++  operatorApp.use('/api/operator', operatorApi)
++  operatorApp.use((_req, res) => res.status(404).end())
++  const where = host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`
++  http
++    .createServer(operatorApp)
++    .listen(port, host, () => console.log(`⟡ operator api      http://${where}/api/operator`))
++}
++
+ server.listen(PORT, () => {
+   console.log(`⟡ doop server     http://localhost:${PORT}`)
+   /* comments anchored before element ids: stamped now, while serving, so a
+diff --git a/server/operator.ts b/server/operator.ts
+index 3bc95e4..77445d6 100644
+--- a/server/operator.ts
++++ b/server/operator.ts
+@@ -134,7 +134,9 @@ export function operatorRouter(refreshRoomRoles: Refresh): express.Router {
+     /* DOOP_OPERATOR_DIRECT_ONLY: a request a proxy forwarded (the public edge)
+        finds no surface either, token or not; only a caller on doop's own port
+        (the host, a sidecar, an ssh tunnel) gets past. This does not depend on
+-       the proxy's own path rules, and a missed one exposes nothing. */
++       the proxy's own path rules, and a missed one exposes nothing. It does
++       depend on the proxy adding X-Forwarded-For or Forwarded (a bare nginx
++       proxy_pass adds neither): DOOP_OPERATOR_LISTEN is the form that does not. */
+     if (env.DOOP_OPERATOR_DIRECT_ONLY && (req.headers['x-forwarded-for'] || req.headers.forwarded)) {
+       audit(`refused ${req.method} ${req.path} from ${req.ip}: proxied, and DOOP_OPERATOR_DIRECT_ONLY is set`)
+       return res.status(404).end()
+diff --git a/tests/operator.test.ts b/tests/operator.test.ts
+index dc7adfd..2ce9154 100644
+--- a/tests/operator.test.ts
++++ b/tests/operator.test.ts
+@@ -2,6 +2,7 @@ import { createServer } from 'node:http'
+ import type { AddressInfo } from 'node:net'
+ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+ import { Client, startServer, type Server } from './harness.ts'
++import { env } from '../server/env.ts'
+ import { stubEnv, unstubAllEnvs } from './envStub.ts'
+ 
+ /* The operator API (server/operator.ts) on a real server whose sign-up is
+@@ -31,6 +32,15 @@ function op(path: string, init: { method?: string; body?: unknown; token?: strin
+   })
+ }
+ 
++function freePort(): Promise<number> {
++  return new Promise((resolve) => {
++    const probe = createServer().listen(0, '127.0.0.1', () => {
++      const { port } = probe.address() as AddressInfo
++      probe.close(() => resolve(port))
++    })
++  })
++}
++
+ async function json<T = Record<string, unknown>>(res: Response, status: number): Promise<T> {
+   const text = await res.text()
+   expect(res.status, text).toBe(status)
+@@ -89,11 +99,45 @@ describe('operator API: the token', () => {
+     }
+   }, 70_000)
+ 
++  it('moves to a listener of its own with DOOP_OPERATOR_LISTEN, and the public port has none', async () => {
++    const port = await freePort()
++    const split = await startServer({ DOOP_ADMIN_TOKEN: TOKEN, DOOP_OPERATOR_LISTEN: `127.0.0.1:${port}` })
++    try {
++      const auth = { Authorization: `Bearer ${TOKEN}` }
++      /* the public port: no operator surface, token or not, proxy headers or not */
++      expect((await fetch(`${split.base}/api/operator/users`, { headers: auth })).status).toBe(404)
++      /* its own listener: the whole API, JSON bodies included */
++      const own = `http://127.0.0.1:${port}/api/operator`
++      expect((await fetch(`${own}/users`, { headers: auth })).status).toBe(200)
++      expect((await fetch(`${own}/users`)).status).toBe(401)
++      const created = await fetch(`${own}/users`, {
++        method: 'POST',
++        headers: { ...auth, 'Content-Type': 'application/json' },
++        body: JSON.stringify({ email: 'listener@example.com', name: 'Listener', password: 'password12345' }),
++      })
++      expect(created.status).toBe(201)
++      /* and nothing else lives there */
++      expect((await fetch(`http://127.0.0.1:${port}/api/me`, { headers: auth })).status).toBe(404)
++    } finally {
++      split.stop()
++    }
++  }, 70_000)
++
+   describe('env', () => {
+     afterEach(() => unstubAllEnvs())
+     it('rejects a token shorter than 32 characters at boot', () => {
+       expect(() => stubEnv('DOOP_ADMIN_TOKEN', 'short')).toThrow(/DOOP_ADMIN_TOKEN/)
+     })
++    it('reads DOOP_OPERATOR_LISTEN as [host:]port, loopback by default', () => {
++      stubEnv('DOOP_OPERATOR_LISTEN', '4401')
++      expect(env.DOOP_OPERATOR_LISTEN).toEqual({ host: '127.0.0.1', port: 4401 })
++      stubEnv('DOOP_OPERATOR_LISTEN', '0.0.0.0:4401')
++      expect(env.DOOP_OPERATOR_LISTEN).toEqual({ host: '0.0.0.0', port: 4401 })
++      stubEnv('DOOP_OPERATOR_LISTEN', '[::1]:4401')
++      expect(env.DOOP_OPERATOR_LISTEN).toEqual({ host: '::1', port: 4401 })
++      for (const bad of ['host', '::1:4401', '127.0.0.1:0', '127.0.0.1:70000'])
++        expect(() => stubEnv('DOOP_OPERATOR_LISTEN', bad), bad).toThrow(/DOOP_OPERATOR_LISTEN/)
++    })
+   })
+ })
+ 

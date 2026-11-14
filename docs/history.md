@@ -28,6 +28,7 @@ outside this repo.)
 | 2026-11-14 | Phones still showed the editor's phone layout (top bar, tool strip, Layers and Prototype mode first) while desktop and the panel used the reviewer layout. Decided: the same layout on phones, review first, as phone design viewers do it (a bottom bar within thumb reach, the rest behind •••): 0021 feat(ui). The dock holds back, Hand, Comment, the tool list, Comments, Pages and layers and •••, at the 40px touch size, and fits a 320 px screen (283 px; a tool picked from the list takes the list's button, Prototype mode stays in the list, AI activity is a tab of the Comments sheet) |
 | 2026-11-14 | v0.14.0 + 0001-0021 released and deployed |
 | 2026-11-14 | Issue #2: agents could reply to and resolve comments but not start one, read a frame's HTML only through MCP, and hear comment webhooks for every canvas without the element named; with FULL_UI off nobody could set a hook. Decided: 0022 `add_comment` (the browser's anchors, an element by id or selector, refused when it is not there rather than falling back to the frame; an @mention needs edit and is metered like the browser's), 0023 `GET /api/frames/:id/html` for agent keys and sessions (no public URL: that would be new exposure; served under a sandbox CSP, since frame HTML carries scripts), 0024 hooks limited to listed canvases, `elementId` and `snippet` in the payload, and hooks managed through the operator API (`bin/doopctl webhooks`) rather than unhiding the Settings pane. 0024 adds migration 0051 |
+| 2026-11-14 | PR #1 (written against 0001-0020) carried over as 0025-0026. Its review found the direct-only switch trusts the proxy to add `X-Forwarded-For`/`Forwarded`; rather than drop it, 0027 adds a separate listener for the operator API (the admin-port model of Caddy and Envoy), and the switch's limit is documented |
 | 2026-11-14 | Upstream checked: no release after v0.14.0; 44 commits on `main`, none covering #2. Its migrations 0049-0052 are dated before ours (see Upgrading) |
 
 ## Patches
@@ -58,6 +59,9 @@ outside this repo.)
 | 0022 | feat(mcp): agents start comment threads with `add_comment` | the MCP side of POST `/api/frames/:id/comments` and canvas comments: an element (`element_id` or `selector`, stamped like the browser does), a point on a frame, or a point on a page; the agent is the author; comment role, an @mention needs edit and uses a resident task |
 | 0023 | feat(api): read a frame's HTML over HTTP with an agent key | `GET /api/frames/:id/html` for a script holding an agent key (`dpk_…` bearer, view role) or a session; `no-store`, `sandbox` CSP, `x-doop-frame-updated-at`. The key opens this route only |
 | 0024 | feat(webhooks): limit hooks to canvases, name the element, manage them from the operator API | `canvasIds` per hook (empty = all, checked on create and on every delivery; migration 0051), `elementId` + `snippet` in comment payloads, `/api/operator/users/:user/webhooks` behind `bin/doopctl webhooks list\|create\|enable\|disable\|test\|delete` (secret printed once). The Settings pane does not edit `canvasIds` yet |
+| 0025 | fix(mcp): name the configured origin on the public host, not the proxy's scheme | behind a proxy that speaks http to doop and sets `X-Forwarded-Proto: http`, the OAuth protected-resource metadata and the MCP 401 challenge said `http://<host>/mcp`, and strict MCP clients refuse it. On `BETTER_AUTH_URL`'s host they now name that origin; other hosts (dev ports) are echoed as before (PR #1) |
+| 0026 | feat(operator): a direct-only switch keeps the operator API off the public edge | `DOOP_OPERATOR_DIRECT_ONLY=true`: `/api/operator` is 404 for any request a proxy forwarded (`X-Forwarded-For` / `Forwarded`), token or not; only direct calls to doop's port reach it. Holds only behind a proxy that adds one of those headers (a bare nginx `proxy_pass` adds neither). Default off (PR #1) |
+| 0027 | feat(operator): serve the operator API on a listener of its own | the form of 0026 that does not depend on the proxy (review of PR #1): `DOOP_OPERATOR_LISTEN=[host:]port` (host 127.0.0.1 by default) serves the API there and nowhere on `PORT`, as Caddy keeps its admin API on `localhost:2019`. Default off |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -137,6 +141,11 @@ Tests for 0022-0024 (2026-11-14): `bin/doop check --browser` 2631 pass, 11 fail:
 `elementPanelBrowser` failures pristine v0.14.0 has here, and `agentToolParity`, which asked
 whether resident agents get `add_comment` (not yet: they answer the threads they are handed; now
 listed as a gap). `bin/doopctl webhooks` smoke-tested against a local server.
+
+Tests for 0025-0027 (2026-11-14): `bin/doop check --browser` 2635 pass, 11 fail: the same 10
+`elementPanelBrowser` failures, and a `drawingBrowser` drag; run alone, three of its path-snap
+tests then failed as well, and failed the same way on the 0001-0024 tree, so they are this
+machine's, not the patches' (which touch the server only). `operator` and `access`: 31 of 31.
 
 Upgrading past v0.14.0 (found 2026-11-14): drizzle's migrator applies a migration only when it is
 newer than the last one applied (`created_at` < the journal's `when`), not by name. Upstream's

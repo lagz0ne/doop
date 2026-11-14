@@ -91,6 +91,10 @@ over MCP with `add_comment` (`feat(mcp)`).
 - **Target:** `--url` / `DOOP_URL`, default `http://localhost:4477` (`bin/doop serve`).
   `--connect` / `DOOP_CONNECT` opens the connection to another address with TLS and Host kept,
   for an instance whose proxy admits `/api/operator` from loopback only.
+  Or keep the API off the proxy in doop itself: `DOOP_OPERATOR_LISTEN=[host:]port` (patch 0027)
+  serves it on a listener of its own and not on `PORT`, and `--url` points there;
+  `DOOP_OPERATOR_DIRECT_ONLY=true` (0026) refuses proxied requests, but only behind a proxy that
+  adds `X-Forwarded-For` or `Forwarded`.
 - **Safety:** passwords never go in argv (`--password-stdin`, or the server generates one).
   Destructive commands ask for "yes", or need `--yes` when there is no terminal. `users delete`
   shows which canvases go with the account first. Every write is logged by the server as

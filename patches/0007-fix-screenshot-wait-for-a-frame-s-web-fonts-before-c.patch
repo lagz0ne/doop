@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Thu, 12 Nov 2026 04:20:59 +0000
-Subject: [PATCH 07/24] fix(screenshot): wait for a frame's web fonts before
+Subject: [PATCH 07/27] fix(screenshot): wait for a frame's web fonts before
  capturing it
 
 A frame render waited for `load` plus 120 ms. That does not cover web

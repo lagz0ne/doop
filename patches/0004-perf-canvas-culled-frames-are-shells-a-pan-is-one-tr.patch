@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 06:23:06 +0000
-Subject: [PATCH 04/24] perf(canvas): culled frames are shells, a pan is one
+Subject: [PATCH 04/27] perf(canvas): culled frames are shells, a pan is one
  transform, documents boot in turn
 
 Profiled with Chrome traces on a 188-frame page of real screens
