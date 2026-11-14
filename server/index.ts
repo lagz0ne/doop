@@ -45,6 +45,7 @@ import { isLinkAccess, roleAllows, type CanvasRole } from '../shared/canvasRole.
 import { auth, initAuth, syncAdmins, getUserName, loginProvidersConfig } from './auth.ts'
 import { adminRouter } from './admin.ts'
 import { operatorRouter } from './operator.ts'
+import { frameHtmlByAgentKey, sendFrameHtml } from './frameHtml.ts'
 import {
   canvasForReviewer,
   embedGrantOf,
@@ -737,6 +738,10 @@ app.post('/ingest/:key', express.json({ limit: '10mb', type: () => true }), (req
 /* the operator API (doopctl): bearer DOOP_ADMIN_TOKEN only, absent while it
    is unset — see server/operator.ts. Ahead of the session gate on purpose. */
 app.use('/api/operator', operatorRouter(refreshRoomRoles))
+
+/* a frame's HTML for scripts holding an agent key (server/frameHtml.ts);
+   other requests go on to the session gate and the route below it */
+app.get('/api/frames/:id/html', frameHtmlByAgentKey)
 
 /* everything else under /api requires a logged-in user; the session's user
    is authoritative for names — clients don't get to pick who they are */
@@ -2166,6 +2171,11 @@ app.delete('/api/frames/:id', (req, res) => {
 /* design history: the states a frame had before later edits replaced them,
    newest first and without HTML; one version in full; restore (same
    permission model as editing — anyone with access to the canvas) */
+app.get('/api/frames/:id/html', (req, res) => {
+  const frame = requireFrame(req, res, req.params.id, 'view')
+  if (frame) sendFrameHtml(res, frame)
+})
+
 app.get('/api/frames/:id/versions', async (req, res) => {
   if (!requireFrame(req, res, req.params.id, 'view')) return
   res.json(await persist.listFrameVersions(req.params.id))

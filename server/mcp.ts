@@ -1498,7 +1498,8 @@ export function buildMcpServer(
     'get_frame',
     {
       title: 'Get a frame and its HTML',
-      description: 'Get a frame including its full HTML content.',
+      description:
+        'Get a frame including its full HTML content. A script holding an agent key can read the same HTML without MCP: GET /api/frames/<frame_id>/html with Authorization: Bearer dpk_… (read-only, needs view access).',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: { frame_id: z.string(), agent_name: agentName.optional() },
     },
@@ -1553,7 +1554,7 @@ export function buildMcpServer(
     {
       title: 'Export frame as image or PDF',
       description:
-        "Export the frame's CURRENT design. PNG/JPG return public URLs for publishing it elsewhere (CMS media library, social post, og:image; the URL re-renders when the frame changes) at `scale` (default 2x; 1, 3 or 4 for other sizes). PDF returns the file itself (an embedded application/pdf resource): vector, text selectable, one page per frame sized to the frame; pass frame_ids to put several frames of the same canvas into one multi-page PDF (pages in the order given: frame_id first, then frame_ids as listed).",
+        "Export the frame's CURRENT design. PNG/JPG return public URLs for publishing it elsewhere (CMS media library, social post, og:image; the URL re-renders when the frame changes) at `scale` (default 2x; 1, 3 or 4 for other sizes). PDF returns the file itself (an embedded application/pdf resource): vector, text selectable, one page per frame sized to the frame; pass frame_ids to put several frames of the same canvas into one multi-page PDF (pages in the order given: frame_id first, then frame_ids as listed). For the HTML itself use get_frame, or GET /api/frames/<frame_id>/html with an agent key as the bearer.",
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         frame_id: z.string(),

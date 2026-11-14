@@ -785,6 +785,11 @@ Then tell the agent something like:
 
 Screenshots render in your system Chrome/Chromium via `puppeteer-core` (set `CHROME_PATH` if it isn't
 auto-detected). Humans can hit the same renderer at `GET /api/frames/:id/screenshot.png?scale=2`.
+
+A script that only needs a frame's markup can skip MCP: `GET /api/frames/:id/html` with the same
+`Authorization: Bearer dpk_…` header returns the saved HTML that `get_frame` returns, as
+`text/html`. It is read-only, needs `view` access to the canvas (a frame you cannot open is a 404),
+and is sandboxed and never cached; a signed-in session can use it too.
 For website viewing/imports, setting `CONTEXT_DEV_API_KEY` makes Context.dev acquire the rendered
 HTML while Doop still sanitizes it and renders the preview locally; without the key, Doop navigates
 to the public page directly in Chromium.
@@ -1045,7 +1050,7 @@ applies the same canvas access rules. Route handlers live in
 | Prefix                                                      | What it covers                                                                                                                           |
 | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `/api/canvases`                                             | Canvases and their members, pages, flow start, guides, guidelines, references, cards, comments, imports, sync keys, assets, `export.pdf` |
-| `/api/frames`                                               | Frames: edit, stream (`/append`), versions and restore, approval, comments, `screenshot.png`                                             |
+| `/api/frames`                                               | Frames: edit, stream (`/append`), versions and restore, approval, comments, `screenshot.png`, `html`                                     |
 | `/api/comments`, `/api/tasks`, `/api/feedback`              | Replies, resolve and retry; task feedback                                                                                                |
 | `/api/workspaces`, `/api/billing`                           | Workspaces, people, roles, Stripe checkout                                                                                               |
 | `/api/automations`, `/api/integrations`, `/api/webhooks`    | Automations, connected tools, outbound webhooks                                                                                          |

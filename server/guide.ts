@@ -448,6 +448,13 @@ For print, a client handoff or a deck, export_frame with format "pdf" returns th
 at the frame's own size. Pass frame_ids to bind several frames of one canvas into one multi-page
 PDF; pages follow the order given (frame_id first, then frame_ids as listed).
 
+## Frame HTML over plain HTTP
+
+get_frame returns a frame's HTML. A script that holds an agent key and does not speak MCP
+(a build step, a diff against a repo) can read the same markup with
+GET /api/frames/<frameId>/html and the header Authorization: Bearer dpk_… — read-only, the
+account needs view access to the canvas, and the body is the saved HTML as text/html.
+
 ## Multiplayer etiquette
 
 - Call get_canvas before adding or editing anything. Note each frame's updatedBy and
