@@ -3,6 +3,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as actions from '../server/actions.ts'
 import * as allowance from '../server/allowance.ts'
+import * as events_ from '../server/events.ts'
 import { buildMcpServer } from '../server/mcp.ts'
 import { store } from '../server/store.ts'
 import type { Canvas, ElementComment, Frame } from '../shared/types.ts'
@@ -484,6 +485,152 @@ describe('MCP comment write tools over real action state', () => {
       expect(newest.message).toContain('replied to a comment')
     } finally {
       await close()
+    }
+  })
+
+  it('add_comment pins a new thread to an element by selector, as the agent', async () => {
+    FRAME.html = '<main><h1>Hi</h1><p id="lead">Lead <b>copy</b></p></main>'
+    const events = vi.spyOn(events_, 'emitCanvasEvent')
+    const { client, close } = await connect()
+    try {
+      const { parsed, isError } = await call(client, 'add_comment', {
+        canvas_id: CANVAS.id,
+        frame_id: FRAME.id,
+        selector: '#lead',
+        text: 'Shorter lead, please',
+        agent_name: 'Claude',
+      })
+      expect(isError).toBeFalsy()
+      const made = parsed as ElementComment
+      expect(made).toMatchObject({ from: 'Claude', frameId: FRAME.id, text: 'Shorter lead, please' })
+      expect(made.elementId).toMatch(/\w+/)
+      expect(made.parentId).toBeUndefined()
+      /* the element now carries the id, and the snippet is its saved markup */
+      expect(FRAME.html).toContain(`data-doop-id="${made.elementId}"`)
+      expect(made.snippet).toMatch(/^<p id="lead".*copy<\/b><\/p>$/)
+      expect(actions.getComments(CANVAS.id)[0]).toMatchObject({ id: made.id, fromUserId: OWNER_ID })
+      expect(actions.getActivity(CANVAS.id)[0]).toMatchObject({ actorName: 'Claude', actorKind: 'agent' })
+      expect(events).toHaveBeenCalledWith(
+        CANVAS.id,
+        expect.objectContaining({ type: 'comment.created', actorKind: 'agent' }),
+      )
+
+      /* the same element by its data-doop-id lands on it too */
+      const again = await call(client, 'add_comment', {
+        canvas_id: CANVAS.id,
+        frame_id: FRAME.id,
+        element_id: made.elementId,
+        text: 'And bolder',
+        agent_name: 'Claude',
+      })
+      expect(again.isError).toBeFalsy()
+      expect(again.parsed).toMatchObject({ elementId: made.elementId, snippet: made.snippet })
+    } finally {
+      await close()
+    }
+  })
+
+  it('add_comment refuses an element that is not in the frame instead of falling back', async () => {
+    FRAME.html = '<h1>Hi</h1>'
+    const { client, close } = await connect()
+    try {
+      for (const where of [{ selector: '#nope' }, { element_id: 'zzzzzzzz' }]) {
+        const { raw, isError } = await call(client, 'add_comment', {
+          canvas_id: CANVAS.id,
+          frame_id: FRAME.id,
+          ...where,
+          text: 'x',
+          agent_name: 'Claude',
+        })
+        expect(isError).toBe(true)
+        expect(raw).toMatch(/no element/)
+      }
+      expect(actions.getComments(CANVAS.id)).toHaveLength(0)
+    } finally {
+      await close()
+    }
+  })
+
+  it('add_comment leaves a frame point or a canvas comment, and checks its arguments', async () => {
+    const { client, close } = await connect()
+    try {
+      const point = await call(client, 'add_comment', {
+        canvas_id: CANVAS.id,
+        frame_id: FRAME.id,
+        x: 12,
+        y: 34,
+        text: 'here',
+        agent_name: 'Claude',
+      })
+      expect(point.parsed).toMatchObject({ frameId: FRAME.id, x: 12, y: 34 })
+      expect((point.parsed as ElementComment).elementId).toBeUndefined()
+
+      const onCanvas = await call(client, 'add_comment', {
+        canvas_id: CANVAS.id,
+        page_id: `${CANVAS.id}:page1`,
+        x: 900,
+        y: 40,
+        text: 'a note beside the frames',
+        agent_name: 'Claude',
+      })
+      expect(onCanvas.parsed).toMatchObject({ pageId: `${CANVAS.id}:page1`, x: 900, y: 40, from: 'Claude' })
+
+      const bad = [
+        { page_id: 'nope', x: 1, y: 1 },
+        { page_id: `${CANVAS.id}:page1` },
+        { frame_id: FRAME.id, page_id: `${CANVAS.id}:page1`, x: 1, y: 1 },
+        {},
+        { frame_id: FRAME.id, x: 1 },
+        { frame_id: 'other' },
+      ]
+      for (const args of bad) {
+        const r = await call(client, 'add_comment', { canvas_id: CANVAS.id, text: 'x', agent_name: 'Claude', ...args })
+        expect(r.isError, JSON.stringify(args)).toBe(true)
+      }
+      expect(actions.getComments(CANVAS.id)).toHaveLength(2)
+    } finally {
+      await close()
+    }
+  })
+
+  it('add_comment holds comment access, edit for an @mention, and meters the mention', async () => {
+    stubCanvas({ ...CANVAS, ownerId: 'someone-else', linkAccess: 'comment' } as Canvas)
+    const consume = vi.spyOn(allowance, 'consumeResidentTask').mockResolvedValue(gate())
+    const { client, close } = await connect('visitor-1')
+    try {
+      const plain = await call(client, 'add_comment', {
+        canvas_id: CANVAS.id,
+        frame_id: FRAME.id,
+        text: 'looks good',
+        agent_name: 'Claude',
+      })
+      expect(plain.isError, plain.raw).toBeFalsy()
+      const mention = await call(client, 'add_comment', {
+        canvas_id: CANVAS.id,
+        frame_id: FRAME.id,
+        text: '@Doop make it blue',
+        agent_name: 'Claude',
+      })
+      expect(mention.isError).toBe(true)
+      expect(mention.raw).toMatch(/edit access/)
+      expect(consume).not.toHaveBeenCalled()
+    } finally {
+      await close()
+    }
+    stubCanvas(CANVAS)
+    const owner = await connect()
+    try {
+      const mention = await call(owner.client, 'add_comment', {
+        canvas_id: CANVAS.id,
+        frame_id: FRAME.id,
+        text: '@Doop make it blue',
+        agent_name: 'Claude',
+      })
+      expect(mention.isError).toBeFalsy()
+      expect(mention.parsed).toMatchObject({ forAgent: true })
+      expect(consume).toHaveBeenCalledWith(OWNER_ID)
+    } finally {
+      await owner.close()
     }
   })
 
