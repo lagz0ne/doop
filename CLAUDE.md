@@ -130,5 +130,6 @@ transform still applies, then `bin/doop check --test` and commit (`vendor/doop` 
   the link's level and an optional password; visitors give a name, and the password, at a door).
   With FULL_UI off the editor also uses a reviewer layout (patch 0013, `CanvasDock.tsx`): one
   dock along the bottom instead of the top bar, tool rail and side rail, the Hand first, Layers
-  folded; the review panel at `/embed` uses the same layout (0014).
+  folded; the review panel at `/embed` uses the same layout (0014), and so do phones (0021: back,
+  Hand, Comment, tools, Comments, Layers and ••• in one thumb-sized dock).
   `localStorage['doop:full-ui']='on'` plus a reload brings it back in one browser.
