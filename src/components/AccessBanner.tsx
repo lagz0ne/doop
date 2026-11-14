@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useStore, roleOf } from '../lib/store'
+import { useStore, grantedRole } from '../lib/store'
 import { useT } from '../lib/i18n'
 import { cn } from '../lib/utils'
 import { Button } from './ui/button'
@@ -24,7 +24,8 @@ export function AccessBanner({
   className?: string
 }) {
   const t = useT()
-  const role = useStore(roleOf)
+  /* the role the server gave: a phone's review-only cap is not a lesser role */
+  const role = useStore(grantedRole)
   const loaded = useStore((s) => !!s.canvas)
   const [dismissed, setDismissed] = useState(false)
   if (!loaded || role === 'edit' || dismissed) return null

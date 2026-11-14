@@ -751,6 +751,31 @@ export function CanvasPage({
   useEffect(() => {
     if (reviewerLayout) useStore.getState().setTool('hand')
   }, [canvasId, reviewerLayout])
+  /* A phone reviews: no editing there at all (State.reviewOnly caps the
+     role at review, so the edit chrome, shortcuts, menus and gestures all
+     step aside), and the page itself does not zoom: a pinch is the canvas's
+     own zoom, and a pinch or double tap on the dock must not magnify the
+     page under it, after which a drag would move the page instead of
+     panning the canvas. tldraw and Excalidraw hold the page still the same
+     way: a viewport that does not scale (Android) and the WebKit gesture
+     events cancelled (iOS ignores user-scalable=no). */
+  const phoneReview = reviewerLayout && isMobile
+  useEffect(() => {
+    if (!phoneReview) return
+    useStore.getState().setReviewOnly(true)
+    const meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]')
+    const content = meta?.content
+    if (meta && content) meta.content = `${content}, maximum-scale=1, user-scalable=no`
+    const still = (e: Event) => e.preventDefault()
+    document.addEventListener('gesturestart', still)
+    document.addEventListener('gesturechange', still)
+    return () => {
+      useStore.getState().setReviewOnly(false)
+      if (meta && content) meta.content = content
+      document.removeEventListener('gesturestart', still)
+      document.removeEventListener('gesturechange', still)
+    }
+  }, [phoneReview])
   /* docked, the rulers sit on the stage's own edges inside the columns, so
      nothing steps in past them */
   const rulerInset = rulersShown && !docked ? RULER_PX : 0
@@ -914,7 +939,13 @@ export function CanvasPage({
   return (
     /* --app-inset is 0 normally; the impersonation shell raises it so this
        fixed layer starts below the banner instead of under it */
-    <div className="fixed inset-x-0 bottom-0 top-[var(--app-inset,0px)] bg-canvas">
+    <div
+      className={cn(
+        'fixed inset-x-0 bottom-0 top-[var(--app-inset,0px)] bg-canvas',
+        /* no double-tap zoom of the page on a phone (see phoneReview) */
+        phoneReview && 'touch-manipulation',
+      )}
+    >
       {/* Floating pills over the canvas, which shows through the transparent
           bar: the title pill on the left, live presence centred, sharing on
           the right. Tablet (xs..md) folds the text actions into the •••
@@ -1282,8 +1313,10 @@ export function CanvasPage({
               </div>
               {/* the same glyphs as the desktop bar and islands; pages live
                   in the Layers sheet, as on desktop. In the reviewer layout
-                  the dock has Layers and Prototype mode, and this sheet takes
-                  what the desktop dock holds beyond them. */}
+                  the dock has Layers, and this sheet takes what the desktop
+                  dock holds beyond it that reviewing uses: share, export, your
+                  name and settings (a phone is review-only, so no import,
+                  Connect AI or Prototype mode) */}
               <div className="grid gap-2 p-4 [&_svg]:size-3.5 [&_svg]:text-ink-soft">
                 {!reviewerLayout && (
                   <Button

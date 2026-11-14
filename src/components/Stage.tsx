@@ -26,6 +26,7 @@ import { useIsMobile } from '../hooks/use-mobile'
 import { isTypingTarget, MOD_KEY } from '../lib/keys'
 import { cn } from '../lib/utils'
 import { gesture } from '../lib/gesture'
+import { useTouchHold } from '../lib/touchHold'
 import { hasFrameClip, pasteFrameAtScreen } from '../lib/frameClipboard'
 import { MenuHint } from './ui/menu'
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from './ui/context-menu'
@@ -1150,7 +1151,11 @@ export function Stage({
     }
   }, [tool])
 
-  function onPointerDown(e: React.PointerEvent) {
+  /* a long touch press opens the background menu, later than Radix would */
+  const hold = useTouchHold()
+
+  function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    hold.onPointerDown(e)
     const target = e.target as HTMLElement
     /* a locked frame lets the press through (FrameView.startDrag), and the
        stage treats it as empty canvas: a click clears, a drag marquees */
@@ -1176,6 +1181,10 @@ export function Stage({
       if (e.pointerType === 'touch') startPan(e, isBackground)
       startCanvasComment(e)
     }
+    /* the Comment tool on a frame, by finger: the frame opens the comment
+       on a tap (FrameView) and lets the press through, so a finger that
+       moves pans here, as it does on the empty canvas */
+    if (action === 'comment' && e.pointerType === 'touch') startPan(e, isBackground)
   }
 
   /* the Comment tool on empty canvas: a click (not a drag) opens the composer
@@ -1212,8 +1221,9 @@ export function Stage({
       if (Math.abs(dx) + Math.abs(dy) > 2) moved = true
       last = { x: ev.clientX, y: ev.clientY }
       /* a pinch owns the viewport while it lasts; keep tracking the finger
-         so the pan resumes from where it is, not from where the pinch began */
-      if (gesture.pinching) return
+         so the pan resumes from where it is, not from where the pinch began.
+         A finger whose hold opened a menu holds the canvas still. */
+      if (gesture.pinching || gesture.held === e.pointerId) return
       const vp = useStore.getState().viewport
       useStore.getState().setViewport({ ...vp, x: vp.x + dx, y: vp.y + dy })
     }
@@ -1411,6 +1421,8 @@ export function Stage({
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onContextMenu={(e) => {
+              /* a finger opens it by holding (useTouchHold), not the browser's long press */
+              if (hold.blocks(e)) return
               /* frames stop the event on their own trigger, so anything arriving
                  here is the empty canvas — except a right-click on a frame's
                  chrome overlay, which is not a menu target at all */
