@@ -2,6 +2,7 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { Client, startServer, type Server } from './harness.ts'
+import { env } from '../server/env.ts'
 import { stubEnv, unstubAllEnvs } from './envStub.ts'
 
 /* The operator API (server/operator.ts) on a real server whose sign-up is
@@ -28,6 +29,15 @@ function op(path: string, init: { method?: string; body?: unknown; token?: strin
     method: init.method ?? (init.body === undefined ? 'GET' : 'POST'),
     headers: { 'Content-Type': 'application/json', ...(token && { Authorization: `Bearer ${token}` }) },
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
+  })
+}
+
+function freePort(): Promise<number> {
+  return new Promise((resolve) => {
+    const probe = createServer().listen(0, '127.0.0.1', () => {
+      const { port } = probe.address() as AddressInfo
+      probe.close(() => resolve(port))
+    })
   })
 }
 
@@ -89,10 +99,44 @@ describe('operator API: the token', () => {
     }
   }, 70_000)
 
+  it('moves to a listener of its own with DOOP_OPERATOR_LISTEN, and the public port has none', async () => {
+    const port = await freePort()
+    const split = await startServer({ DOOP_ADMIN_TOKEN: TOKEN, DOOP_OPERATOR_LISTEN: `127.0.0.1:${port}` })
+    try {
+      const auth = { Authorization: `Bearer ${TOKEN}` }
+      /* the public port: no operator surface, token or not, proxy headers or not */
+      expect((await fetch(`${split.base}/api/operator/users`, { headers: auth })).status).toBe(404)
+      /* its own listener: the whole API, JSON bodies included */
+      const own = `http://127.0.0.1:${port}/api/operator`
+      expect((await fetch(`${own}/users`, { headers: auth })).status).toBe(200)
+      expect((await fetch(`${own}/users`)).status).toBe(401)
+      const created = await fetch(`${own}/users`, {
+        method: 'POST',
+        headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'listener@example.com', name: 'Listener', password: 'password12345' }),
+      })
+      expect(created.status).toBe(201)
+      /* and nothing else lives there */
+      expect((await fetch(`http://127.0.0.1:${port}/api/me`, { headers: auth })).status).toBe(404)
+    } finally {
+      split.stop()
+    }
+  }, 70_000)
+
   describe('env', () => {
     afterEach(() => unstubAllEnvs())
     it('rejects a token shorter than 32 characters at boot', () => {
       expect(() => stubEnv('DOOP_ADMIN_TOKEN', 'short')).toThrow(/DOOP_ADMIN_TOKEN/)
+    })
+    it('reads DOOP_OPERATOR_LISTEN as [host:]port, loopback by default', () => {
+      stubEnv('DOOP_OPERATOR_LISTEN', '4401')
+      expect(env.DOOP_OPERATOR_LISTEN).toEqual({ host: '127.0.0.1', port: 4401 })
+      stubEnv('DOOP_OPERATOR_LISTEN', '0.0.0.0:4401')
+      expect(env.DOOP_OPERATOR_LISTEN).toEqual({ host: '0.0.0.0', port: 4401 })
+      stubEnv('DOOP_OPERATOR_LISTEN', '[::1]:4401')
+      expect(env.DOOP_OPERATOR_LISTEN).toEqual({ host: '::1', port: 4401 })
+      for (const bad of ['host', '::1:4401', '127.0.0.1:0', '127.0.0.1:70000'])
+        expect(() => stubEnv('DOOP_OPERATOR_LISTEN', bad), bad).toThrow(/DOOP_OPERATOR_LISTEN/)
     })
   })
 })

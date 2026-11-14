@@ -134,7 +134,9 @@ export function operatorRouter(refreshRoomRoles: Refresh): express.Router {
     /* DOOP_OPERATOR_DIRECT_ONLY: a request a proxy forwarded (the public edge)
        finds no surface either, token or not; only a caller on doop's own port
        (the host, a sidecar, an ssh tunnel) gets past. This does not depend on
-       the proxy's own path rules, and a missed one exposes nothing. */
+       the proxy's own path rules, and a missed one exposes nothing. It does
+       depend on the proxy adding X-Forwarded-For or Forwarded (a bare nginx
+       proxy_pass adds neither): DOOP_OPERATOR_LISTEN is the form that does not. */
     if (env.DOOP_OPERATOR_DIRECT_ONLY && (req.headers['x-forwarded-for'] || req.headers.forwarded)) {
       audit(`refused ${req.method} ${req.path} from ${req.ip}: proxied, and DOOP_OPERATOR_DIRECT_ONLY is set`)
       return res.status(404).end()
