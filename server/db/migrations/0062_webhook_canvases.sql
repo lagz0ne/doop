@@ -1,0 +1,1 @@
+ALTER TABLE "webhooks" ADD COLUMN IF NOT EXISTS "canvas_ids" jsonb DEFAULT '[]'::jsonb NOT NULL;

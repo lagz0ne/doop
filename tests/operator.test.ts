@@ -1,3 +1,5 @@
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { Client, startServer, type Server } from './harness.ts'
 import { stubEnv, unstubAllEnvs } from './envStub.ts'
@@ -10,7 +12,12 @@ const TOKEN = 'operator-test-token-0123456789abcdef'
 let server: Server
 
 beforeAll(async () => {
-  server = await startServer({ DOOP_ADMIN_TOKEN: TOKEN, SIGNUP_EMAIL_DOMAINS: 'signup-closed.invalid' })
+  server = await startServer({
+    DOOP_ADMIN_TOKEN: TOKEN,
+    SIGNUP_EMAIL_DOMAINS: 'signup-closed.invalid',
+    /* the webhook tests deliver to a receiver on this machine */
+    WEBHOOK_ALLOW_PRIVATE_URLS: 'true',
+  })
 }, 70_000)
 
 afterAll(() => server?.stop())
@@ -183,5 +190,133 @@ describe('operator API: sharing', () => {
     const { client } = await signIn('lonely@example.com', 'password12345')
     const { id } = await json<{ id: string }>(await client.post('/api/canvases', { name: 'Mine' }), 200)
     expect((await op(`/canvases/${id}/members`, { body: { user: 'ghost@example.com' } })).status).toBe(404)
+  })
+})
+
+/** A webhook receiver on a free local port: every delivery's parsed body. */
+async function receiver() {
+  const bodies: Record<string, unknown>[] = []
+  const http = createServer((req, res) => {
+    let data = ''
+    req.on('data', (chunk) => (data += chunk))
+    req.on('end', () => {
+      bodies.push(JSON.parse(data) as Record<string, unknown>)
+      res.end('ok')
+    })
+  })
+  await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve))
+  const { port } = http.address() as AddressInfo
+  return { url: `http://127.0.0.1:${port}/hook`, bodies, close: () => http.close() }
+}
+
+async function until<T>(read: () => T | undefined, ms = 5000): Promise<T> {
+  const deadline = Date.now() + ms
+  for (;;) {
+    const value = read()
+    if (value !== undefined) return value
+    if (Date.now() > deadline) throw new Error('timed out')
+    await new Promise((r) => setTimeout(r, 25))
+  }
+}
+
+describe('operator API: webhooks', () => {
+  it('creates a hook limited to one canvas, whose comment payloads name the element', async () => {
+    await createUser('hooks@example.com')
+    const { client } = await signIn('hooks@example.com', 'password12345')
+    const watched = await json<{ id: string }>(await client.post('/api/canvases', { name: 'Watched' }), 200)
+    const other = await json<{ id: string }>(await client.post('/api/canvases', { name: 'Other' }), 200)
+    const frameIn = async (canvasId: string) => {
+      const f = await json<{ id: string }>(await client.post(`/api/canvases/${canvasId}/frames`, { name: 'F' }), 200)
+      await json(await client.patch(`/api/frames/${f.id}`, { html: '<main><h1 id="t">Hello</h1></main>' }), 200)
+      return f.id
+    }
+    const watchedFrame = await frameIn(watched.id)
+    const otherFrame = await frameIn(other.id)
+    const rx = await receiver()
+    try {
+      /* a canvas the account cannot open is refused with the reason */
+      const stranger = await createUser('hooks-stranger@example.com')
+      expect(stranger.user.id).toBeTruthy()
+      const refused = await op('/users/hooks-stranger@example.com/webhooks', {
+        body: { url: rx.url, events: ['comment.created'], canvasIds: [watched.id] },
+      })
+      expect(refused.status).toBe(400)
+      expect(((await refused.json()) as { error: string }).error).toMatch(/no canvas/)
+
+      const hook = await json<{ id: string; secret: string; canvasIds: string[] }>(
+        await op('/users/hooks@example.com/webhooks', {
+          body: { url: rx.url, events: ['comment.created'], canvasIds: [watched.id] },
+        }),
+        201,
+      )
+      expect(hook.secret).toMatch(/^whsec_/)
+      expect(hook.canvasIds).toEqual([watched.id])
+      const listed = await json<{ id: string }[]>(await op('/users/hooks@example.com/webhooks'), 200)
+      expect(listed.map((h) => h.id)).toEqual([hook.id])
+      expect(listed[0]).not.toHaveProperty('secret')
+
+      /* an agent comment on the other canvas is not delivered; one on the watched canvas is */
+      const key = await json<{ secret: string }>(
+        await op('/users/hooks@example.com/keys', { body: { name: 'a' } }),
+        201,
+      )
+      const addComment = async (canvasId: string, frameId: string) => {
+        const res = await fetch(`${server.base}/mcp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+            Authorization: `Bearer ${key.secret}`,
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: {
+              name: 'add_comment',
+              arguments: { canvas_id: canvasId, frame_id: frameId, selector: '#t', text: 'Bigger', agent_name: 'Bot' },
+            },
+          }),
+        })
+        const body = (await res.json()) as { result: { isError?: boolean; content: { text: string }[] } }
+        expect(body.result.isError, body.result.content[0]?.text).toBeFalsy()
+        return JSON.parse(body.result.content[0]!.text) as { id: string; elementId: string }
+      }
+      await addComment(other.id, otherFrame)
+      const made = await addComment(watched.id, watchedFrame)
+      const delivered = await until(() => rx.bodies.find((b) => b.type === 'comment.created'))
+      expect(rx.bodies).toHaveLength(1)
+      expect(delivered).toMatchObject({
+        canvas: { id: watched.id },
+        actor: { kind: 'agent' },
+        comment: { id: made.id, frameId: watchedFrame, elementId: made.elementId },
+      })
+      expect((delivered.comment as { snippet: string }).snippet).toMatch(/^<h1 id="t" data-doop-id=.*Hello<\/h1>$/)
+
+      /* disable, test, widen to every canvas, delete */
+      const off = await json<{ enabled: boolean }>(
+        await op(`/users/hooks@example.com/webhooks/${hook.id}`, { method: 'PATCH', body: { enabled: false } }),
+        200,
+      )
+      expect(off.enabled).toBe(false)
+      const ping = await json<{ ok: boolean }>(
+        await op(`/users/hooks@example.com/webhooks/${hook.id}/test`, { body: {} }),
+        200,
+      )
+      expect(ping.ok).toBe(true)
+      const all = await json<{ canvasIds: string[]; enabled: boolean }>(
+        await op(`/users/hooks@example.com/webhooks/${hook.id}`, {
+          method: 'PATCH',
+          body: { canvasIds: [], enabled: true },
+        }),
+        200,
+      )
+      expect(all).toMatchObject({ canvasIds: [], enabled: true })
+      expect((await op(`/users/hooks-stranger@example.com/webhooks/${hook.id}`, { method: 'DELETE' })).status).toBe(404)
+      await json(await op(`/users/hooks@example.com/webhooks/${hook.id}`, { method: 'DELETE' }), 200)
+      expect(await json(await op('/users/hooks@example.com/webhooks'), 200)).toEqual([])
+    } finally {
+      rx.close()
+    }
   })
 })

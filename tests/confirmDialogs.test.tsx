@@ -82,6 +82,7 @@ const hook = (id: string, url: string): WebhookInfo => ({
   id,
   url,
   events: [],
+  canvasIds: [],
   enabled: true,
   createdAt: 0,
   lastStatus: null,
