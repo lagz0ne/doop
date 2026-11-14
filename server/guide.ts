@@ -564,6 +564,13 @@ them; the rest is open to you. get_guide({ topic: "comments-and-agents" }) has b
 Every frame result carries image_url, a public render of its current HTML. export_frame
 gives PNG, JPG or PDF, export_layer one element (get_guide export).
 
+## Frame HTML over plain HTTP
+
+get_frame returns a frame's HTML. A script that holds an agent key and does not speak MCP
+(a build step, a diff against a repo) can read the same markup with
+GET /api/frames/<frameId>/html and the header Authorization: Bearer dpk_… — read-only, the
+account needs view access to the canvas, and the body is the saved HTML as text/html.
+
 ## Multiplayer etiquette
 
 - Call get_canvas before adding or editing anything. Note each frame's updatedBy and
