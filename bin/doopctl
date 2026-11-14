@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// doopctl: manage users, sharing, canvas owners and agent keys on a doop
+// doopctl: manage users, sharing, canvas owners, agent keys and webhooks on a doop
 // instance through its operator API (/api/operator, our feat(operator) patch). Talks to the
 // running server only, never the database: sharing lives in the server's
 // memory, so a direct database write would be lost or ignored.
@@ -30,7 +30,7 @@ try {
   /* no .env.local: environment and defaults only */
 }
 
-const USAGE = `doopctl: users, sharing, canvas owners and agent keys on doop
+const USAGE = `doopctl: users, sharing, canvas owners, agent keys and webhooks on doop
 
 usage: doopctl [--url URL] [--connect ADDR] [--json] [--yes] <command> ...
 
@@ -53,6 +53,20 @@ agent keys (MCP bearer credentials)
   keys <user>                        list a user's keys
   keys create <user> <name>          mint one; the secret is printed once
   keys revoke <user> <key-id>                                           (confirms)
+
+webhooks (signed POSTs of canvas events to a URL, acting as that user)
+  webhooks <user>                    list a user's hooks: events, canvases, health
+  webhooks create <user> <url> [<canvas>...] [--events E,E]
+                                     on the canvases named (default: every canvas
+                                     they can open); events default to
+                                     comment.created,comment.replied,comment.resolved
+                                     ("all" for every event). The signing secret
+                                     is printed once
+  webhooks enable|disable <user> <hook-id>
+                                     a hook pauses itself after repeated failures;
+                                     enable switches it back on with a clean slate
+  webhooks test <user> <hook-id>     send a ping now and show the answer
+  webhooks delete <user> <hook-id>                                      (confirms)
 
 canvases and sharing
   canvases                           every canvas: owner, members, link access
@@ -87,7 +101,7 @@ const argv = process.argv.slice(2)
 const flags = { json: false, yes: false, url: process.env.DOOP_URL || 'http://localhost:4477', connect: process.env.DOOP_CONNECT }
 const opts = {}
 const args = []
-const VALUED = new Set(['--url', '--connect', '--name', '--reason'])
+const VALUED = new Set(['--url', '--connect', '--name', '--reason', '--events'])
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i]
   if (a === '-h' || a === '--help') {
@@ -390,6 +404,64 @@ async function keysFor(who) {
   )
 }
 
+const COMMENT_EVENTS = ['comment.created', 'comment.replied', 'comment.resolved']
+const ALL_EVENTS = [...COMMENT_EVENTS, 'frame.created', 'frame.approval', 'task.completed', 'task.failed']
+
+async function webhooks() {
+  if (!sub) fail('usage: doopctl webhooks <user> | webhooks create|enable|disable|test|delete <user> ...', 2)
+  const [who, x] = rest
+  switch (sub) {
+    case 'list':
+      need(3, 'webhooks list <user>')
+      return hooksFor(who)
+    case 'create': {
+      need(4, 'webhooks create <user> <url> [<canvas>...] [--events E,E]')
+      const spec = typeof opts.events === 'string' ? opts.events : COMMENT_EVENTS.join(',')
+      const events = spec === 'all' ? ALL_EVENTS : spec.split(',').map((e) => e.trim()).filter(Boolean)
+      const unknown = events.filter((e) => !ALL_EVENTS.includes(e))
+      if (unknown.length) fail(`unknown event ${unknown.join(', ')}; events are ${ALL_EVENTS.join(', ')}`, 2)
+      const canvasIds = []
+      for (const ref of rest.slice(2)) canvasIds.push(await canvasId(ref))
+      const h = await api(`/users/${enc(who)}/webhooks`, { body: { url: x, events, canvasIds } })
+      return out(h, () => {
+        console.log(`webhook ${h.id} for ${who}: ${h.events.join(', ')} on ${h.canvasIds.length ? h.canvasIds.join(', ') : 'every canvas they can open'}`)
+        console.log(`signing secret (X-Doop-Signature, HMAC-SHA256 over "<timestamp>.<body>"):\n${h.secret}\n(shown once; store it somewhere private, mode 600)`)
+      })
+    }
+    case 'enable':
+    case 'disable':
+      need(4, `webhooks ${sub} <user> <hook-id>`)
+      return out(
+        await api(`/users/${enc(who)}/webhooks/${enc(x)}`, { method: 'PATCH', body: { enabled: sub === 'enable' } }),
+        (h) => console.log(`${h.id} ${h.enabled ? 'enabled' : 'disabled'}`),
+      )
+    case 'test':
+      need(4, 'webhooks test <user> <hook-id>')
+      return out(await api(`/users/${enc(who)}/webhooks/${enc(x)}/test`, { body: {} }), (r) =>
+        console.log(r.ok ? `answered ${r.status}` : `failed: ${r.error ?? r.status}`),
+      )
+    case 'delete':
+      need(4, 'webhooks delete <user> <hook-id>')
+      await confirm(`Delete webhook ${x} of ${who}: its URL gets no more events.`)
+      return out(await api(`/users/${enc(who)}/webhooks/${enc(x)}`, { method: 'DELETE' }), () => console.log(`deleted ${x}`))
+    default:
+      return hooksFor(sub) // webhooks <user>
+  }
+}
+
+async function hooksFor(who) {
+  return out(await api(`/users/${enc(who)}/webhooks`), (hs) =>
+    table(hs, [
+      ['url', (h) => h.url],
+      ['events', (h) => h.events.join(',')],
+      ['canvases', (h) => (h.canvasIds.length ? h.canvasIds.join(',') : 'all')],
+      ['state', (h) => (h.enabled ? 'on' : 'off')],
+      ['last', (h) => (h.lastAt ? `${day(h.lastAt)} ${h.lastError ?? h.lastStatus}` : 'never')],
+      ['id', (h) => h.id],
+    ]),
+  )
+}
+
 async function canvases() {
   if (sub === 'show') {
     need(3, 'canvases show <canvas>')
@@ -462,7 +534,7 @@ async function share() {
   }
 }
 
-const commands = { users, user: users, keys, key: keys, canvases, canvas: canvases, share }
+const commands = { users, user: users, keys, key: keys, webhooks, webhook: webhooks, hooks: webhooks, canvases, canvas: canvases, share }
 if (group === 'help') process.stdout.write(USAGE)
 else if (!commands[group]) fail(`unknown command "${group}" (see doopctl --help)`, 2)
 else await commands[group]()

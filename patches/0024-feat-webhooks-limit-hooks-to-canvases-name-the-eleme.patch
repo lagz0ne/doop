@@ -1,0 +1,5139 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 08:13:22 +0000
+Subject: [PATCH 24/24] feat(webhooks): limit hooks to canvases, name the
+ element, manage them from the operator API
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A comment webhook fired for every canvas its owner could open, and its payload did not say
+which element a pinned comment is on, so a receiver watching one board had to filter every
+event and look the element up itself. Instances that hide the Settings pane also had no way
+to set a hook at all.
+
+- webhooks.canvas_ids (jsonb, default [], migration 0051): the canvases a hook fires for;
+  empty keeps the old behaviour, every canvas the owner can open. Each listed canvas must
+  exist and pass the same durable-access check delivery uses (at most 50), checked again on
+  every delivery, so losing access to a listed canvas silences it there.
+- publicComment carries elementId (the element's data-doop-id, null for frame and canvas
+  comments) and snippet (the element's markup at comment time, null when none).
+- Operator API: GET/POST /api/operator/users/:user/webhooks, PATCH and DELETE
+  /users/:user/webhooks/:hookId, POST …/:hookId/test. Same validation as the session routes
+  (shared zod schemas, WebhookInputError → 400), the signing secret returned once on create,
+  every write logged as [operator]. PATCH covers enable/disable, since a hook pauses itself
+  after repeated failures.
+
+The Settings pane does not edit canvasIds yet; a hook made there stays all-canvases.
+
+Tests: webhooks.test.ts (canvas limits and checks, payload fields), operator.test.ts (end to
+end: an agent's add_comment over MCP reaches a receiver for the listed canvas only, with
+elementId and snippet; disable, test, widen, delete).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../db/migrations/0051_webhook_canvases.sql   |    1 +
+ server/db/migrations/meta/0051_snapshot.json  | 4432 +++++++++++++++++
+ server/db/migrations/meta/_journal.json       |    9 +-
+ server/db/schema.ts                           |    2 +
+ server/operator.ts                            |   77 +-
+ server/webhookRoutes.ts                       |   18 +-
+ server/webhooks.ts                            |   68 +-
+ shared/webhooks.ts                            |    2 +
+ tests/confirmDialogs.test.tsx                 |    1 +
+ tests/operator.test.ts                        |  137 +-
+ tests/webhooks.test.ts                        |   67 +-
+ 11 files changed, 4790 insertions(+), 24 deletions(-)
+ create mode 100644 server/db/migrations/0051_webhook_canvases.sql
+ create mode 100644 server/db/migrations/meta/0051_snapshot.json
+
+diff --git a/server/db/migrations/0051_webhook_canvases.sql b/server/db/migrations/0051_webhook_canvases.sql
+new file mode 100644
+index 0000000..93d8b7f
+--- /dev/null
++++ b/server/db/migrations/0051_webhook_canvases.sql
+@@ -0,0 +1 @@
++ALTER TABLE "webhooks" ADD COLUMN IF NOT EXISTS "canvas_ids" jsonb DEFAULT '[]'::jsonb NOT NULL;
+\ No newline at end of file
+diff --git a/server/db/migrations/meta/0051_snapshot.json b/server/db/migrations/meta/0051_snapshot.json
+new file mode 100644
+index 0000000..b3cfafb
+--- /dev/null
++++ b/server/db/migrations/meta/0051_snapshot.json
+@@ -0,0 +1,4432 @@
++{
++  "id": "4fcfcdfa-d012-4623-9d97-224efd1cf4d4",
++  "prevId": "ae73854f-626b-4f20-ba6f-4e53f80cf65b",
++  "version": "7",
++  "dialect": "postgresql",
++  "tables": {
++    "public.activity": {
++      "name": "activity",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "actor_name": {
++          "name": "actor_name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "actor_kind": {
++          "name": "actor_kind",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "actor_color": {
++          "name": "actor_color",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "message": {
++          "name": "message",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "frame_id": {
++          "name": "frame_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "at": {
++          "name": "at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "activity_canvas_idx": {
++          "name": "activity_canvas_idx",
++          "columns": [
++            {
++              "expression": "canvas_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.agent_defaults": {
++      "name": "agent_defaults",
++      "schema": "",
++      "columns": {
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "provider": {
++          "name": "provider",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.agent_feedback": {
++      "name": "agent_feedback",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "at": {
++          "name": "at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "kind": {
++          "name": "kind",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "source": {
++          "name": "source",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "category": {
++          "name": "category",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "message": {
++          "name": "message",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "tool": {
++          "name": "tool",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "agent_name": {
++          "name": "agent_name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "client": {
++          "name": "client",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "agent_feedback_at_idx": {
++          "name": "agent_feedback_at_idx",
++          "columns": [
++            {
++              "expression": "at",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.agent_keys": {
++      "name": "agent_keys",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "secret_hash": {
++          "name": "secret_hash",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "start": {
++          "name": "start",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "last_used_at": {
++          "name": "last_used_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "agent_keys_user_idx": {
++          "name": "agent_keys_user_idx",
++          "columns": [
++            {
++              "expression": "user_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "agent_keys_hash_idx": {
++          "name": "agent_keys_hash_idx",
++          "columns": [
++            {
++              "expression": "secret_hash",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.asset_refs": {
++      "name": "asset_refs",
++      "schema": "",
++      "columns": {
++        "asset_id": {
++          "name": "asset_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "frame_id": {
++          "name": "frame_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "asset_refs_frame_idx": {
++          "name": "asset_refs_frame_idx",
++          "columns": [
++            {
++              "expression": "frame_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {
++        "asset_refs_asset_id_frame_id_pk": {
++          "name": "asset_refs_asset_id_frame_id_pk",
++          "columns": ["asset_id", "frame_id"]
++        }
++      },
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.assets": {
++      "name": "assets",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "owner_id": {
++          "name": "owner_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "mime": {
++          "name": "mime",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "ext": {
++          "name": "ext",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "size": {
++          "name": "size",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "uploaded_by": {
++          "name": "uploaded_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "assets_canvas_idx": {
++          "name": "assets_canvas_idx",
++          "columns": [
++            {
++              "expression": "canvas_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.automation_approvals": {
++      "name": "automation_approvals",
++      "schema": "",
++      "columns": {
++        "automation_id": {
++          "name": "automation_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "frame_id": {
++          "name": "frame_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "approved_at": {
++          "name": "approved_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "automation_approvals_event_idx": {
++          "name": "automation_approvals_event_idx",
++          "columns": [
++            {
++              "expression": "automation_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "frame_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "approved_at",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.automation_runs": {
++      "name": "automation_runs",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "automation_id": {
++          "name": "automation_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "started_at": {
++          "name": "started_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "ended_at": {
++          "name": "ended_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "status": {
++          "name": "status",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "summary": {
++          "name": "summary",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "error": {
++          "name": "error",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "failure": {
++          "name": "failure",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "state": {
++          "name": "state",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "lease_until": {
++          "name": "lease_until",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        }
++      },
++      "indexes": {
++        "automation_runs_automation_idx": {
++          "name": "automation_runs_automation_idx",
++          "columns": [
++            {
++              "expression": "automation_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.automations": {
++      "name": "automations",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "owner_id": {
++          "name": "owner_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "enabled": {
++          "name": "enabled",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": true
++        },
++        "schedule": {
++          "name": "schedule",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "trigger": {
++          "name": "trigger",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'{\"type\":\"schedule\"}'::jsonb"
++        },
++        "approval_since": {
++          "name": "approval_since",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        },
++        "steps": {
++          "name": "steps",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "next_run_at": {
++          "name": "next_run_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "automations_owner_idx": {
++          "name": "automations_owner_idx",
++          "columns": [
++            {
++              "expression": "owner_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "automations_next_run_idx": {
++          "name": "automations_next_run_idx",
++          "columns": [
++            {
++              "expression": "next_run_at",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.backgrounds": {
++      "name": "backgrounds",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "source": {
++          "name": "source",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "width": {
++          "name": "width",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "height": {
++          "name": "height",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "tone": {
++          "name": "tone",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "style": {
++          "name": "style",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "avg_color": {
++          "name": "avg_color",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "palette": {
++          "name": "palette",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "tags": {
++          "name": "tags",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "slots": {
++          "name": "slots",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "text_zone": {
++          "name": "text_zone",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "description": {
++          "name": "description",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "enabled": {
++          "name": "enabled",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.canvas_members": {
++      "name": "canvas_members",
++      "schema": "",
++      "columns": {
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "added_by": {
++          "name": "added_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "added_at": {
++          "name": "added_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {
++        "canvas_members_canvas_id_user_id_pk": {
++          "name": "canvas_members_canvas_id_user_id_pk",
++          "columns": ["canvas_id", "user_id"]
++        }
++      },
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.canvases": {
++      "name": "canvases",
++      "schema": "",
++      "columns": {
++        "pages": {
++          "name": "pages",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "guides": {
++          "name": "guides",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "token_themes": {
++          "name": "token_themes",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "owner_id": {
++          "name": "owner_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "link_access": {
++          "name": "link_access",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "link_password": {
++          "name": "link_password",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "published_at": {
++          "name": "published_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "description": {
++          "name": "description",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "category": {
++          "name": "category",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "copy_count": {
++          "name": "copy_count",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        },
++        "workspace_id": {
++          "name": "workspace_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.comments": {
++      "name": "comments",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "frame_id": {
++          "name": "frame_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "element_id": {
++          "name": "element_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "element_origin": {
++          "name": "element_origin",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "selector": {
++          "name": "selector",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "snippet": {
++          "name": "snippet",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "page_id": {
++          "name": "page_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "x": {
++          "name": "x",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "y": {
++          "name": "y",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "from_name": {
++          "name": "from_name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "from_user_id": {
++          "name": "from_user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "text": {
++          "name": "text",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "at": {
++          "name": "at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "for_agent": {
++          "name": "for_agent",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "target_agent": {
++          "name": "target_agent",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "claimed_by": {
++          "name": "claimed_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "claimed_at": {
++          "name": "claimed_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "failed_at": {
++          "name": "failed_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "failure_reason": {
++          "name": "failure_reason",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "resolved_by": {
++          "name": "resolved_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "resolved_at": {
++          "name": "resolved_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "parent_id": {
++          "name": "parent_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "comments_canvas_idx": {
++          "name": "comments_canvas_idx",
++          "columns": [
++            {
++              "expression": "canvas_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.decisions": {
++      "name": "decisions",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "text": {
++          "name": "text",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "summary": {
++          "name": "summary",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "source": {
++          "name": "source",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "frame_id": {
++          "name": "frame_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "from_name": {
++          "name": "from_name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "agent_name": {
++          "name": "agent_name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "at": {
++          "name": "at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "distilled_at": {
++          "name": "distilled_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "decisions_canvas_idx": {
++          "name": "decisions_canvas_idx",
++          "columns": [
++            {
++              "expression": "canvas_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.design_tokens": {
++      "name": "design_tokens",
++      "schema": "",
++      "columns": {
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "type": {
++          "name": "type",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "value": {
++          "name": "value",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "themes": {
++          "name": "themes",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "description": {
++          "name": "description",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "order": {
++          "name": "order",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_by": {
++          "name": "updated_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {
++        "design_tokens_canvas_id_name_pk": {
++          "name": "design_tokens_canvas_id_name_pk",
++          "columns": ["canvas_id", "name"]
++        }
++      },
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.feedback": {
++      "name": "feedback",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "task_id": {
++          "name": "task_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "agent_name": {
++          "name": "agent_name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "target_agent": {
++          "name": "target_agent",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "from_name": {
++          "name": "from_name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "from_user_id": {
++          "name": "from_user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "text": {
++          "name": "text",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "at": {
++          "name": "at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "delivered_at": {
++          "name": "delivered_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "claimed_by": {
++          "name": "claimed_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "completed_at": {
++          "name": "completed_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "failed_at": {
++          "name": "failed_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "failure_reason": {
++          "name": "failure_reason",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "runner": {
++          "name": "runner",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "feedback_canvas_idx": {
++          "name": "feedback_canvas_idx",
++          "columns": [
++            {
++              "expression": "canvas_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.fonts": {
++      "name": "fonts",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "workspace_id": {
++          "name": "workspace_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "owner_id": {
++          "name": "owner_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "family": {
++          "name": "family",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "weight": {
++          "name": "weight",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "style": {
++          "name": "style",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "format": {
++          "name": "format",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "asset_id": {
++          "name": "asset_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "ext": {
++          "name": "ext",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "file_name": {
++          "name": "file_name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "size": {
++          "name": "size",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "uploaded_by": {
++          "name": "uploaded_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "fonts_workspace_idx": {
++          "name": "fonts_workspace_idx",
++          "columns": [
++            {
++              "expression": "workspace_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "fonts_owner_idx": {
++          "name": "fonts_owner_idx",
++          "columns": [
++            {
++              "expression": "owner_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.frame_versions": {
++      "name": "frame_versions",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "frame_id": {
++          "name": "frame_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "html": {
++          "name": "html",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "width": {
++          "name": "width",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "height": {
++          "name": "height",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "saved_at": {
++          "name": "saved_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "saved_by": {
++          "name": "saved_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "saved_by_kind": {
++          "name": "saved_by_kind",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "frame_versions_frame_idx": {
++          "name": "frame_versions_frame_idx",
++          "columns": [
++            {
++              "expression": "frame_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "frame_versions_canvas_idx": {
++          "name": "frame_versions_canvas_idx",
++          "columns": [
++            {
++              "expression": "canvas_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.frames": {
++      "name": "frames",
++      "schema": "",
++      "columns": {
++        "page_id": {
++          "name": "page_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "x": {
++          "name": "x",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "y": {
++          "name": "y",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "width": {
++          "name": "width",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "height": {
++          "name": "height",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "html": {
++          "name": "html",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_by": {
++          "name": "updated_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "demo": {
++          "name": "demo",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "hidden": {
++          "name": "hidden",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "locked": {
++          "name": "locked",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "z": {
++          "name": "z",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "rotation": {
++          "name": "rotation",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "approval": {
++          "name": "approval",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "frames_canvas_idx": {
++          "name": "frames_canvas_idx",
++          "columns": [
++            {
++              "expression": "canvas_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.github_connections": {
++      "name": "github_connections",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "repo": {
++          "name": "repo",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "branch": {
++          "name": "branch",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "token": {
++          "name": "token",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "installation_id": {
++          "name": "installation_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "deploy_url": {
++          "name": "deploy_url",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_by": {
++          "name": "created_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "last_synced_at": {
++          "name": "last_synced_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "github_connections_canvas_idx": {
++          "name": "github_connections_canvas_idx",
++          "columns": [
++            {
++              "expression": "canvas_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.guideline_versions": {
++      "name": "guideline_versions",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "markdown": {
++          "name": "markdown",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "saved_at": {
++          "name": "saved_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "saved_by": {
++          "name": "saved_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "guideline_versions_doc_idx": {
++          "name": "guideline_versions_doc_idx",
++          "columns": [
++            {
++              "expression": "canvas_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "name",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.guidelines": {
++      "name": "guidelines",
++      "schema": "",
++      "columns": {
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "markdown": {
++          "name": "markdown",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "title": {
++          "name": "title",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_by": {
++          "name": "updated_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "x": {
++          "name": "x",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "y": {
++          "name": "y",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {
++        "guidelines_canvas_id_name_pk": {
++          "name": "guidelines_canvas_id_name_pk",
++          "columns": ["canvas_id", "name"]
++        }
++      },
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.image_prefs": {
++      "name": "image_prefs",
++      "schema": "",
++      "columns": {
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "model": {
++          "name": "model",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.integrations": {
++      "name": "integrations",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "provider": {
++          "name": "provider",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "access_token": {
++          "name": "access_token",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "account_name": {
++          "name": "account_name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "accounts": {
++          "name": "accounts",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "connected_at": {
++          "name": "connected_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "integrations_user_provider_idx": {
++          "name": "integrations_user_provider_idx",
++          "columns": [
++            {
++              "expression": "user_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "provider",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.linear_installations": {
++      "name": "linear_installations",
++      "schema": "",
++      "columns": {
++        "organization_id": {
++          "name": "organization_id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "app_user_id": {
++          "name": "app_user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "access_token": {
++          "name": "access_token",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "refresh_token": {
++          "name": "refresh_token",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "connected_at": {
++          "name": "connected_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "linear_installations_user_id_unique": {
++          "name": "linear_installations_user_id_unique",
++          "nullsNotDistinct": false,
++          "columns": ["user_id"]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.linear_oauth_states": {
++      "name": "linear_oauth_states",
++      "schema": "",
++      "columns": {
++        "hash": {
++          "name": "hash",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "verifier": {
++          "name": "verifier",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.linear_sessions": {
++      "name": "linear_sessions",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "organization_id": {
++          "name": "organization_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "issue_id": {
++          "name": "issue_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "title": {
++          "name": "title",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "prompt": {
++          "name": "prompt",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "status": {
++          "name": "status",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'pending'"
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "task_id": {
++          "name": "task_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "error": {
++          "name": "error",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "ack_id": {
++          "name": "ack_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "result_id": {
++          "name": "result_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "next_attempt_at": {
++          "name": "next_attempt_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        },
++        "linked": {
++          "name": "linked",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "acknowledged": {
++          "name": "acknowledged",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "reported": {
++          "name": "reported",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "linear_sessions_status_idx": {
++          "name": "linear_sessions_status_idx",
++          "columns": [
++            {
++              "expression": "status",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.live_activities": {
++      "name": "live_activities",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "token": {
++          "name": "token",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "environment": {
++          "name": "environment",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "last_payload": {
++          "name": "last_payload",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "last_timestamp": {
++          "name": "last_timestamp",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "live_activities_token_unique": {
++          "name": "live_activities_token_unique",
++          "nullsNotDistinct": false,
++          "columns": ["token"]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.live_activity_starters": {
++      "name": "live_activity_starters",
++      "schema": "",
++      "columns": {
++        "token": {
++          "name": "token",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "environment": {
++          "name": "environment",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "origin": {
++          "name": "origin",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.local_agent_preferences": {
++      "name": "local_agent_preferences",
++      "schema": "",
++      "columns": {
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "enabled": {
++          "name": "enabled",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "model": {
++          "name": "model",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'default'"
++        },
++        "effort": {
++          "name": "effort",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.memory_proposals": {
++      "name": "memory_proposals",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "guide_name": {
++          "name": "guide_name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "guide_title": {
++          "name": "guide_title",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "rule": {
++          "name": "rule",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "rationale": {
++          "name": "rationale",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "based_on": {
++          "name": "based_on",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "at": {
++          "name": "at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "status": {
++          "name": "status",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "resolved_by": {
++          "name": "resolved_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "resolved_at": {
++          "name": "resolved_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "memory_proposals_canvas_idx": {
++          "name": "memory_proposals_canvas_idx",
++          "columns": [
++            {
++              "expression": "canvas_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.memory_references": {
++      "name": "memory_references",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "frame_id": {
++          "name": "frame_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "title": {
++          "name": "title",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "html": {
++          "name": "html",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "width": {
++          "name": "width",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "height": {
++          "name": "height",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "pinned_by": {
++          "name": "pinned_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "pinned_at": {
++          "name": "pinned_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "memory_references_canvas_idx": {
++          "name": "memory_references_canvas_idx",
++          "columns": [
++            {
++              "expression": "canvas_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.model_accounts": {
++      "name": "model_accounts",
++      "schema": "",
++      "columns": {
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "kind": {
++          "name": "kind",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "enabled": {
++          "name": "enabled",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": true
++        },
++        "account_id": {
++          "name": "account_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "email": {
++          "name": "email",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "plan": {
++          "name": "plan",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "access_token": {
++          "name": "access_token",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "refresh_token": {
++          "name": "refresh_token",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "api_key": {
++          "name": "api_key",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "model": {
++          "name": "model",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "reasoning_effort": {
++          "name": "reasoning_effort",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "connected_at": {
++          "name": "connected_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {
++        "model_accounts_user_id_kind_pk": {
++          "name": "model_accounts_user_id_kind_pk",
++          "columns": ["user_id", "kind"]
++        }
++      },
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.notification_prefs": {
++      "name": "notification_prefs",
++      "schema": "",
++      "columns": {
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "comment_emails": {
++          "name": "comment_emails",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.resident_usage": {
++      "name": "resident_usage",
++      "schema": "",
++      "columns": {
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "used": {
++          "name": "used",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.slack_installations": {
++      "name": "slack_installations",
++      "schema": "",
++      "columns": {
++        "team_id": {
++          "name": "team_id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "bot_user_id": {
++          "name": "bot_user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "bot_token": {
++          "name": "bot_token",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "connected_at": {
++          "name": "connected_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "slack_installations_user_id_unique": {
++          "name": "slack_installations_user_id_unique",
++          "nullsNotDistinct": false,
++          "columns": ["user_id"]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.slack_oauth_states": {
++      "name": "slack_oauth_states",
++      "schema": "",
++      "columns": {
++        "hash": {
++          "name": "hash",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.slack_sessions": {
++      "name": "slack_sessions",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "team_id": {
++          "name": "team_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "channel_id": {
++          "name": "channel_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "thread_ts": {
++          "name": "thread_ts",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "requester_id": {
++          "name": "requester_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "response_url": {
++          "name": "response_url",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "title": {
++          "name": "title",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "prompt": {
++          "name": "prompt",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "status": {
++          "name": "status",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'pending'"
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "task_id": {
++          "name": "task_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "follow_up": {
++          "name": "follow_up",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "error": {
++          "name": "error",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "ack_ts": {
++          "name": "ack_ts",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "next_attempt_at": {
++          "name": "next_attempt_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        },
++        "acknowledged": {
++          "name": "acknowledged",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "linked": {
++          "name": "linked",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "reported": {
++          "name": "reported",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "slack_sessions_status_idx": {
++          "name": "slack_sessions_status_idx",
++          "columns": [
++            {
++              "expression": "status",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "slack_sessions_thread_idx": {
++          "name": "slack_sessions_thread_idx",
++          "columns": [
++            {
++              "expression": "team_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "channel_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "thread_ts",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.sync_edges": {
++      "name": "sync_edges",
++      "schema": "",
++      "columns": {
++        "key_id": {
++          "name": "key_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "from_page": {
++          "name": "from_page",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "to_page": {
++          "name": "to_page",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "count": {
++          "name": "count",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        },
++        "last_at": {
++          "name": "last_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {
++        "sync_edges_key_id_from_page_to_page_pk": {
++          "name": "sync_edges_key_id_from_page_to_page_pk",
++          "columns": ["key_id", "from_page", "to_page"]
++        }
++      },
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.sync_keys": {
++      "name": "sync_keys",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "secret": {
++          "name": "secret",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_by": {
++          "name": "created_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "last_used_at": {
++          "name": "last_used_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "sync_keys_canvas_idx": {
++          "name": "sync_keys_canvas_idx",
++          "columns": [
++            {
++              "expression": "canvas_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "sync_keys_secret_idx": {
++          "name": "sync_keys_secret_idx",
++          "columns": [
++            {
++              "expression": "secret",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.sync_links": {
++      "name": "sync_links",
++      "schema": "",
++      "columns": {
++        "key_id": {
++          "name": "key_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "page": {
++          "name": "page",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "to_page": {
++          "name": "to_page",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "x": {
++          "name": "x",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "y": {
++          "name": "y",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "width": {
++          "name": "width",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "height": {
++          "name": "height",
++          "type": "double precision",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "label": {
++          "name": "label",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "sync_links_page_idx": {
++          "name": "sync_links_page_idx",
++          "columns": [
++            {
++              "expression": "key_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "page",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.tasks": {
++      "name": "tasks",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "agent_name": {
++          "name": "agent_name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "owner": {
++          "name": "owner",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "color": {
++          "name": "color",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "status": {
++          "name": "status",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "started_at": {
++          "name": "started_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "ended_at": {
++          "name": "ended_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "auto": {
++          "name": "auto",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "queued_by": {
++          "name": "queued_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "claimed_at": {
++          "name": "claimed_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "failed_at": {
++          "name": "failed_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "failure_reason": {
++          "name": "failure_reason",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "pipeline": {
++          "name": "pipeline",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "stage": {
++          "name": "stage",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "attachments": {
++          "name": "attachments",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "queued_by_user_id": {
++          "name": "queued_by_user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "kind": {
++          "name": "kind",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "payload": {
++          "name": "payload",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "scope": {
++          "name": "scope",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "frame_ids": {
++          "name": "frame_ids",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "runner": {
++          "name": "runner",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "tasks_canvas_idx": {
++          "name": "tasks_canvas_idx",
++          "columns": [
++            {
++              "expression": "canvas_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.webhooks": {
++      "name": "webhooks",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "url": {
++          "name": "url",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "secret": {
++          "name": "secret",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "events": {
++          "name": "events",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "canvas_ids": {
++          "name": "canvas_ids",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'[]'::jsonb"
++        },
++        "enabled": {
++          "name": "enabled",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "last_status": {
++          "name": "last_status",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "last_at": {
++          "name": "last_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "last_error": {
++          "name": "last_error",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "failures": {
++          "name": "failures",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        }
++      },
++      "indexes": {
++        "webhooks_user_idx": {
++          "name": "webhooks_user_idx",
++          "columns": [
++            {
++              "expression": "user_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.workspace_invites": {
++      "name": "workspace_invites",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "workspace_id": {
++          "name": "workspace_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "email": {
++          "name": "email",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "role": {
++          "name": "role",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "invited_by": {
++          "name": "invited_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "workspace_invites_workspace_email_idx": {
++          "name": "workspace_invites_workspace_email_idx",
++          "columns": [
++            {
++              "expression": "workspace_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "email",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "workspace_invites_email_idx": {
++          "name": "workspace_invites_email_idx",
++          "columns": [
++            {
++              "expression": "email",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.workspace_members": {
++      "name": "workspace_members",
++      "schema": "",
++      "columns": {
++        "workspace_id": {
++          "name": "workspace_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "role": {
++          "name": "role",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "added_by": {
++          "name": "added_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "added_at": {
++          "name": "added_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "workspace_members_user_idx": {
++          "name": "workspace_members_user_idx",
++          "columns": [
++            {
++              "expression": "user_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {
++        "workspace_members_workspace_id_user_id_pk": {
++          "name": "workspace_members_workspace_id_user_id_pk",
++          "columns": ["workspace_id", "user_id"]
++        }
++      },
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.workspaces": {
++      "name": "workspaces",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "owner_id": {
++          "name": "owner_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "status": {
++          "name": "status",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'inactive'"
++        },
++        "plan": {
++          "name": "plan",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "interval": {
++          "name": "interval",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "seats": {
++          "name": "seats",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        },
++        "stripe_customer_id": {
++          "name": "stripe_customer_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "stripe_subscription_id": {
++          "name": "stripe_subscription_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "current_period_end": {
++          "name": "current_period_end",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "cancel_at_period_end": {
++          "name": "cancel_at_period_end",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "billing_event_at": {
++          "name": "billing_event_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.account": {
++      "name": "account",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "account_id": {
++          "name": "account_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "provider_id": {
++          "name": "provider_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "access_token": {
++          "name": "access_token",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "refresh_token": {
++          "name": "refresh_token",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "id_token": {
++          "name": "id_token",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "access_token_expires_at": {
++          "name": "access_token_expires_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "refresh_token_expires_at": {
++          "name": "refresh_token_expires_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "scope": {
++          "name": "scope",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "password": {
++          "name": "password",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {
++        "account_user_id_user_id_fk": {
++          "name": "account_user_id_user_id_fk",
++          "tableFrom": "account",
++          "tableTo": "user",
++          "columnsFrom": ["user_id"],
++          "columnsTo": ["id"],
++          "onDelete": "cascade",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.oauth_access_token": {
++      "name": "oauth_access_token",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "access_token": {
++          "name": "access_token",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "refresh_token": {
++          "name": "refresh_token",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "access_token_expires_at": {
++          "name": "access_token_expires_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "refresh_token_expires_at": {
++          "name": "refresh_token_expires_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "client_id": {
++          "name": "client_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "scopes": {
++          "name": "scopes",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "oauth_access_token_access_token_unique": {
++          "name": "oauth_access_token_access_token_unique",
++          "nullsNotDistinct": false,
++          "columns": ["access_token"]
++        },
++        "oauth_access_token_refresh_token_unique": {
++          "name": "oauth_access_token_refresh_token_unique",
++          "nullsNotDistinct": false,
++          "columns": ["refresh_token"]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.oauth_application": {
++      "name": "oauth_application",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "icon": {
++          "name": "icon",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "metadata": {
++          "name": "metadata",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "client_id": {
++          "name": "client_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "client_secret": {
++          "name": "client_secret",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "redirect_urls": {
++          "name": "redirect_urls",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "type": {
++          "name": "type",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "disabled": {
++          "name": "disabled",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": false,
++          "default": false
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "oauth_application_client_id_unique": {
++          "name": "oauth_application_client_id_unique",
++          "nullsNotDistinct": false,
++          "columns": ["client_id"]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.oauth_consent": {
++      "name": "oauth_consent",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "client_id": {
++          "name": "client_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "scopes": {
++          "name": "scopes",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        },
++        "consent_given": {
++          "name": "consent_given",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.session": {
++      "name": "session",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "token": {
++          "name": "token",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        },
++        "ip_address": {
++          "name": "ip_address",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "user_agent": {
++          "name": "user_agent",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "impersonated_by": {
++          "name": "impersonated_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "embed_canvas_id": {
++          "name": "embed_canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "embed_role": {
++          "name": "embed_role",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "link_canvas_id": {
++          "name": "link_canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "link_key": {
++          "name": "link_key",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {
++        "session_user_id_user_id_fk": {
++          "name": "session_user_id_user_id_fk",
++          "tableFrom": "session",
++          "tableTo": "user",
++          "columnsFrom": ["user_id"],
++          "columnsTo": ["id"],
++          "onDelete": "cascade",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "session_token_unique": {
++          "name": "session_token_unique",
++          "nullsNotDistinct": false,
++          "columns": ["token"]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.user": {
++      "name": "user",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "email": {
++          "name": "email",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "email_verified": {
++          "name": "email_verified",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "image": {
++          "name": "image",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        },
++        "role": {
++          "name": "role",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "banned": {
++          "name": "banned",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": false,
++          "default": false
++        },
++        "ban_reason": {
++          "name": "ban_reason",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "ban_expires": {
++          "name": "ban_expires",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "user_email_unique": {
++          "name": "user_email_unique",
++          "nullsNotDistinct": false,
++          "columns": ["email"]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.verification": {
++      "name": "verification",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "identifier": {
++          "name": "identifier",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "value": {
++          "name": "value",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": false,
++          "default": "now()"
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "timestamp",
++          "primaryKey": false,
++          "notNull": false,
++          "default": "now()"
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    }
++  },
++  "enums": {},
++  "schemas": {},
++  "sequences": {},
++  "roles": {},
++  "policies": {},
++  "views": {},
++  "_meta": {
++    "columns": {},
++    "schemas": {},
++    "tables": {}
++  }
++}
+diff --git a/server/db/migrations/meta/_journal.json b/server/db/migrations/meta/_journal.json
+index c00750a..421fdb3 100644
+--- a/server/db/migrations/meta/_journal.json
++++ b/server/db/migrations/meta/_journal.json
+@@ -351,6 +351,13 @@
+       "when": 1794546908531,
+       "tag": "0050_share_link_password",
+       "breakpoints": true
++    },
++    {
++      "idx": 51,
++      "version": "7",
++      "when": 1794643680290,
++      "tag": "0051_webhook_canvases",
++      "breakpoints": true
+     }
+   ]
+-}
+\ No newline at end of file
++}
+diff --git a/server/db/schema.ts b/server/db/schema.ts
+index f45380b..4630251 100644
+--- a/server/db/schema.ts
++++ b/server/db/schema.ts
+@@ -794,6 +794,8 @@ export const webhooks = pgTable(
+     secret: sealedText('secret').notNull(),
+     /** subscribed event names (shared/webhooks.ts WEBHOOK_EVENTS) */
+     events: jsonb('events').$type<string[]>().notNull(),
++    /** the canvases it fires for; empty = every canvas its owner can open */
++    canvasIds: jsonb('canvas_ids').$type<string[]>().notNull().default([]),
+     enabled: boolean('enabled').notNull().default(true),
+     createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+     lastStatus: integer('last_status'),
+diff --git a/server/operator.ts b/server/operator.ts
+index 3ed28d2..f2d3ac3 100644
+--- a/server/operator.ts
++++ b/server/operator.ts
+@@ -9,13 +9,22 @@ import { store } from './store.ts'
+ import { auth, createdByOperator } from './auth.ts'
+ import { purgeUserData } from './accountDeletion.ts'
+ import { createAgentKey, deleteAgentKey, listAgentKeys } from './agentKeys.ts'
++import {
++  WebhookInputError,
++  createWebhook,
++  deleteWebhook,
++  listWebhooks,
++  testWebhook,
++  updateWebhook,
++} from './webhooks.ts'
++import { createSchema, patchSchema } from './webhookRoutes.ts'
+ import { isLinkAccess } from '../shared/canvasRole.ts'
+ import { setLinkPassword, validLinkPassword } from './shareLink.ts'
+ import { isShadowEmail } from './embed.ts'
+ import type { Canvas } from '../shared/types.ts'
+ 
+ /**
+- * The operator API: users, sharing, canvases and agent keys for whoever runs
++ * The operator API: users, sharing, canvases, agent keys and webhooks for whoever runs
+  * this instance, driven by a CLI (doopctl) rather than a browser.
+  *
+  * It answers only a bearer DOOP_ADMIN_TOKEN, and is not there at all (404)
+@@ -115,6 +124,7 @@ export function operatorRouter(refreshRoomRoles: Refresh): express.Router {
+   const get = (path: string, fn: Handler) => router.get(path, wrap(fn))
+   const post = (path: string, fn: Handler) => router.post(path, wrap(fn))
+   const put = (path: string, fn: Handler) => router.put(path, wrap(fn))
++  const patch = (path: string, fn: Handler) => router.patch(path, wrap(fn))
+   const del = (path: string, fn: Handler) => router.delete(path, wrap(fn))
+ 
+   /* the token gate: absent token = no surface at all */
+@@ -276,6 +286,71 @@ export function operatorRouter(refreshRoomRoles: Refresh): express.Router {
+     res.json({ ok: true })
+   })
+ 
++  /* ------------------------------------------------------------- webhooks */
++
++  /* A user's outbound webhooks, for an instance whose Settings hide the pane
++     (FULL_UI off): the same registry and checks as /api/webhooks, acting as
++     that user. Input problems (a private URL, a canvas they cannot open)
++     come back as a 400 with the reason. */
++  const hookInput = async (res: express.Response, work: () => Promise<unknown>) => {
++    try {
++      return await work()
++    } catch (err) {
++      if (err instanceof WebhookInputError) return res.status(400).json({ error: err.message })
++      throw err
++    }
++  }
++
++  get('/users/:user/webhooks', async (req, res) => {
++    const u = await findUser(param(req, 'user'))
++    if (!u) return res.status(404).json({ error: 'no such user' })
++    res.json(listWebhooks(u.id))
++  })
++
++  /** The signing secret is in this response and nowhere else. */
++  post('/users/:user/webhooks', async (req, res) => {
++    const u = await findUser(param(req, 'user'))
++    if (!u) return res.status(404).json({ error: 'no such user' })
++    const parsed = createSchema.safeParse(req.body)
++    if (!parsed.success) return res.status(400).json({ error: 'a URL and at least one known event are required' })
++    return hookInput(res, async () => {
++      const { info, secret } = await createWebhook(u.id, parsed.data)
++      audit(
++        `created webhook ${info.id} for ${u.email}: ${info.events.join(',')} on ${info.canvasIds.length ? info.canvasIds.join(',') : 'every canvas'}`,
++      )
++      res.status(201).json({ ...info, secret })
++    })
++  })
++
++  patch('/users/:user/webhooks/:hookId', async (req, res) => {
++    const u = await findUser(param(req, 'user'))
++    if (!u) return res.status(404).json({ error: 'no such user' })
++    const parsed = patchSchema.safeParse(req.body)
++    if (!parsed.success) return res.status(400).json({ error: 'invalid webhook change' })
++    return hookInput(res, async () => {
++      const updated = await updateWebhook(u.id, param(req, 'hookId'), parsed.data)
++      if (!updated) return res.status(404).json({ error: 'no such webhook' })
++      audit(`changed webhook ${updated.id} of ${u.email}: ${Object.keys(parsed.data).join(', ')}`)
++      res.json(updated)
++    })
++  })
++
++  post('/users/:user/webhooks/:hookId/test', async (req, res) => {
++    const u = await findUser(param(req, 'user'))
++    if (!u) return res.status(404).json({ error: 'no such user' })
++    const result = await testWebhook(u.id, param(req, 'hookId'))
++    if (!result) return res.status(404).json({ error: 'no such webhook' })
++    res.json(result)
++  })
++
++  del('/users/:user/webhooks/:hookId', async (req, res) => {
++    const u = await findUser(param(req, 'user'))
++    if (!u) return res.status(404).json({ error: 'no such user' })
++    if (!(await deleteWebhook(u.id, param(req, 'hookId')))) return res.status(404).json({ error: 'no such webhook' })
++    audit(`deleted webhook ${param(req, 'hookId')} of ${u.email}`)
++    res.json({ ok: true })
++  })
++
+   /* ------------------------------------------------------------- canvases */
+ 
+   async function emails(ids: string[]): Promise<Map<string, { name: string; email: string }>> {
+diff --git a/server/webhookRoutes.ts b/server/webhookRoutes.ts
+index 6f2950e..b7b90af 100644
+--- a/server/webhookRoutes.ts
++++ b/server/webhookRoutes.ts
+@@ -17,10 +17,20 @@ import {
+ export const webhooksRouter = Router()
+ 
+ const events = z.array(z.enum(WEBHOOK_EVENTS)).min(1)
+-const createSchema = z.object({ url: z.string().trim().min(1), events })
+-const patchSchema = z
+-  .object({ url: z.string().trim().min(1).optional(), events: events.optional(), enabled: z.boolean().optional() })
+-  .refine((p) => p.url !== undefined || p.events !== undefined || p.enabled !== undefined, 'nothing to change')
++/* empty = every canvas; webhooks.ts checks each id against the owner's access */
++const canvasIds = z.array(z.string().trim().min(1).max(64))
++export const createSchema = z.object({ url: z.string().trim().min(1), events, canvasIds: canvasIds.optional() })
++export const patchSchema = z
++  .object({
++    url: z.string().trim().min(1).optional(),
++    events: events.optional(),
++    canvasIds: canvasIds.optional(),
++    enabled: z.boolean().optional(),
++  })
++  .refine(
++    (p) => p.url !== undefined || p.events !== undefined || p.canvasIds !== undefined || p.enabled !== undefined,
++    'nothing to change',
++  )
+ 
+ /** User-input problems become a 400 with the message; everything else is a 500. */
+ type Req = Request<{ id: string }>
+diff --git a/server/webhooks.ts b/server/webhooks.ts
+index 19877c5..213164e 100644
+--- a/server/webhooks.ts
++++ b/server/webhooks.ts
+@@ -23,7 +23,8 @@ import type { AgentTask, Canvas, ElementComment, Frame } from '../shared/types.t
+  * A person registers a URL and the events they care about; doop POSTs each
+  * matching event on every canvas that person durably has access to (owner,
+  * invited member, workspace member — the same rule as design-sync keys, so
+- * a share-link visit never subscribes anyone to a canvas for good).
++ * a share-link visit never subscribes anyone to a canvas for good), or only
++ * on the canvases the hook lists.
+  *
+  * Deliveries are signed (X-Doop-Signature, HMAC-SHA256 over
+  * `<timestamp>.<body>` with the hook's secret) and retried a few times from
+@@ -39,6 +40,7 @@ import type { AgentTask, Canvas, ElementComment, Frame } from '../shared/types.t
+  */
+ 
+ export const MAX_WEBHOOKS = 10
++export const MAX_WEBHOOK_CANVASES = 50
+ export const RETRY_DELAYS_MS = [10_000, 60_000, 5 * 60_000]
+ export const DISABLE_AFTER_FAILURES = 100
+ export const TIMEOUT_MS = 10_000
+@@ -70,9 +72,17 @@ function normalizeEvents(list: unknown): WebhookEventType[] {
+   return [...new Set(list.filter((e): e is WebhookEventType => typeof e === 'string' && known.has(e)))]
+ }
+ 
++function normalizeIds(list: unknown): string[] {
++  if (!Array.isArray(list)) return []
++  return [
++    ...new Set(list.filter((id): id is string => typeof id === 'string' && id.trim() !== '').map((id) => id.trim())),
++  ]
++}
++
+ export async function hydrateWebhooks(): Promise<void> {
+   hooks.clear()
+-  for (const row of await db.select().from(table)) hooks.set(row.id, { ...row, events: normalizeEvents(row.events) })
++  for (const row of await db.select().from(table))
++    hooks.set(row.id, { ...row, events: normalizeEvents(row.events), canvasIds: normalizeIds(row.canvasIds) })
+ }
+ 
+ /* ------------------------------------------------------------------ */
+@@ -172,7 +182,23 @@ export function listWebhooks(userId: string): WebhookInfo[] {
+     .map(info)
+ }
+ 
+-async function checkedInput(input: { url?: string; events?: unknown }) {
++/** A canvas list is checked against what the owner can open now: a hook
++ *  may only narrow what it receives, never name a canvas it could not get. */
++function checkedCanvases(userId: string, list: unknown): string[] {
++  const ids = normalizeIds(list)
++  if (ids.length > MAX_WEBHOOK_CANVASES)
++    throw new WebhookInputError(
++      `a webhook can name up to ${MAX_WEBHOOK_CANVASES} canvases — leave the list empty for all`,
++    )
++  for (const id of ids) {
++    const canvas = store.getCanvas(id)
++    if (!canvas || !hasDurableCanvasAccess(userId, canvas))
++      throw new WebhookInputError(`no canvas ${id} that this account belongs to`)
++  }
++  return ids
++}
++
++async function checkedInput(userId: string, input: { url?: string; events?: unknown; canvasIds?: unknown }) {
+   const url = input.url?.trim()
+   if (url !== undefined) {
+     const problem = await targetProblem(url)
+@@ -180,7 +206,8 @@ async function checkedInput(input: { url?: string; events?: unknown }) {
+   }
+   const events = input.events === undefined ? undefined : normalizeEvents(input.events)
+   if (events && !events.length) throw new WebhookInputError('pick at least one event')
+-  return { url, events }
++  const canvasIds = input.canvasIds === undefined ? undefined : checkedCanvases(userId, input.canvasIds)
++  return { url, events, canvasIds }
+ }
+ 
+ /* Creates for one account run one at a time: the per-account cap is checked
+@@ -203,18 +230,18 @@ function serialized<T>(key: string, work: () => Promise<T>): Promise<T> {
+  *  leaves the running server and the database agreeing. */
+ export function createWebhook(
+   userId: string,
+-  input: { url: string; events: unknown },
++  input: { url: string; events: unknown; canvasIds?: unknown },
+ ): Promise<{ info: WebhookInfo; secret: string }> {
+   return serialized(userId, () => insertWebhook(userId, input))
+ }
+ 
+ async function insertWebhook(
+   userId: string,
+-  input: { url: string; events: unknown },
++  input: { url: string; events: unknown; canvasIds?: unknown },
+ ): Promise<{ info: WebhookInfo; secret: string }> {
+   if (listWebhooks(userId).length >= MAX_WEBHOOKS)
+     throw new WebhookInputError(`you can have ${MAX_WEBHOOKS} webhooks — remove one you no longer use`)
+-  const { url, events } = await checkedInput(input)
++  const { url, events, canvasIds } = await checkedInput(userId, input)
+   if (!url || !events) throw new WebhookInputError('a URL and at least one event are required')
+   const hook: WebhookRecord = {
+     id: nanoid(10),
+@@ -222,6 +249,7 @@ async function insertWebhook(
+     url,
+     secret: `whsec_${nanoid(32)}`,
+     events,
++    canvasIds: canvasIds ?? [],
+     enabled: true,
+     createdAt: Date.now(),
+     lastStatus: null,
+@@ -237,16 +265,17 @@ async function insertWebhook(
+ export async function updateWebhook(
+   userId: string,
+   id: string,
+-  patch: { url?: string; events?: unknown; enabled?: boolean },
++  patch: { url?: string; events?: unknown; canvasIds?: unknown; enabled?: boolean },
+ ): Promise<WebhookInfo | undefined> {
+   const hook = owned(userId, id)
+   if (!hook) return undefined
+-  const { url, events } = await checkedInput(patch)
++  const { url, events, canvasIds } = await checkedInput(userId, patch)
+   /* only the fields asked for: a delivery that pauses the hook while this
+      write is in flight must not be undone by a stale copy of its health */
+-  const next: Partial<Pick<WebhookRecord, 'url' | 'events' | 'enabled' | 'failures' | 'lastError'>> = {}
++  const next: Partial<Pick<WebhookRecord, 'url' | 'events' | 'canvasIds' | 'enabled' | 'failures' | 'lastError'>> = {}
+   if (url !== undefined) next.url = url
+   if (events) next.events = events
++  if (canvasIds) next.canvasIds = canvasIds
+   if (patch.enabled !== undefined) {
+     next.enabled = patch.enabled
+     /* switching a paused hook back on is a fresh start for its health */
+@@ -284,8 +313,12 @@ export async function rotateWebhookSecret(userId: string, id: string): Promise<s
+ function publicComment(c: ElementComment) {
+   return {
+     id: c.id,
+-    /* an element comment names its frame; a canvas comment its page and point */
++    /* an element comment names its frame and element (the data-doop-id in
++       the frame HTML, and the element's markup as it was); a frame comment
++       its frame; a canvas comment its page and point */
+     frameId: c.frameId ?? null,
++    elementId: c.elementId ?? null,
++    snippet: c.snippet || null,
+     pageId: c.pageId ?? null,
+     x: c.x ?? null,
+     y: c.y ?? null,
+@@ -447,6 +480,12 @@ function record(hook: WebhookRecord, ticket: number, result: WebhookDeliveryResu
+   )
+ }
+ 
++/** Whether this hook takes events from this canvas at all: its owner can
++ *  open it, and the hook lists it or lists none. */
++function coversCanvas(hook: WebhookRecord, canvas: Canvas): boolean {
++  return (!hook.canvasIds.length || hook.canvasIds.includes(canvas.id)) && hasDurableCanvasAccess(hook.userId, canvas)
++}
++
+ /** Whether an event on this canvas is still this hook's to receive: not
+  *  deleted or paused meanwhile, and its owner can still open the canvas.
+  *  Asked right before every POST, first attempt included, and before every
+@@ -454,7 +493,7 @@ function record(hook: WebhookRecord, ticket: number, result: WebhookDeliveryResu
+ function stillDeliverable(hook: WebhookRecord, canvasId: string): boolean {
+   if (hooks.get(hook.id) !== hook || !hook.enabled) return false
+   const canvas = store.getCanvas(canvasId)
+-  return !!canvas && hasDurableCanvasAccess(hook.userId, canvas)
++  return !!canvas && coversCanvas(hook, canvas)
+ }
+ 
+ async function send(
+@@ -476,13 +515,14 @@ async function send(
+ }
+ 
+ /** The canvas event bus listener: fan an event out to every hook that
+- *  subscribed to it and whose owner durably has access to the canvas. */
++ *  subscribed to it, covers the canvas, and whose owner durably has access
++ *  to it. */
+ export function onCanvasEvent(canvasId: string, event: CanvasEvent): void {
+   if (!hooks.size) return
+   const canvas = store.getCanvas(canvasId)
+   if (!canvas) return
+   const targets = [...hooks.values()].filter(
+-    (h) => h.enabled && h.events.includes(event.type) && hasDurableCanvasAccess(h.userId, canvas),
++    (h) => h.enabled && h.events.includes(event.type) && coversCanvas(h, canvas),
+   )
+   if (!targets.length) return
+   const body = deliveryBody(canvas, event)
+diff --git a/shared/webhooks.ts b/shared/webhooks.ts
+index 12b6a4d..b84885b 100644
+--- a/shared/webhooks.ts
++++ b/shared/webhooks.ts
+@@ -27,6 +27,8 @@ export interface WebhookInfo {
+   id: string
+   url: string
+   events: WebhookEventType[]
++  /** the canvases it fires for; empty = every canvas its owner can open */
++  canvasIds: string[]
+   enabled: boolean
+   createdAt: number
+   /** HTTP status of the last delivery attempt; null = no response (network, timeout, refused) */
+diff --git a/tests/confirmDialogs.test.tsx b/tests/confirmDialogs.test.tsx
+index a2b980c..2901ad8 100644
+--- a/tests/confirmDialogs.test.tsx
++++ b/tests/confirmDialogs.test.tsx
+@@ -82,6 +82,7 @@ const hook = (id: string, url: string): WebhookInfo => ({
+   id,
+   url,
+   events: [],
++  canvasIds: [],
+   enabled: true,
+   createdAt: 0,
+   lastStatus: null,
+diff --git a/tests/operator.test.ts b/tests/operator.test.ts
+index 84f9b03..59db1aa 100644
+--- a/tests/operator.test.ts
++++ b/tests/operator.test.ts
+@@ -1,3 +1,5 @@
++import { createServer } from 'node:http'
++import type { AddressInfo } from 'node:net'
+ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+ import { Client, startServer, type Server } from './harness.ts'
+ import { stubEnv, unstubAllEnvs } from './envStub.ts'
+@@ -10,7 +12,12 @@ const TOKEN = 'operator-test-token-0123456789abcdef'
+ let server: Server
+ 
+ beforeAll(async () => {
+-  server = await startServer({ DOOP_ADMIN_TOKEN: TOKEN, SIGNUP_EMAIL_DOMAINS: 'signup-closed.invalid' })
++  server = await startServer({
++    DOOP_ADMIN_TOKEN: TOKEN,
++    SIGNUP_EMAIL_DOMAINS: 'signup-closed.invalid',
++    /* the webhook tests deliver to a receiver on this machine */
++    WEBHOOK_ALLOW_PRIVATE_URLS: 'true',
++  })
+ }, 70_000)
+ 
+ afterAll(() => server?.stop())
+@@ -185,3 +192,131 @@ describe('operator API: sharing', () => {
+     expect((await op(`/canvases/${id}/members`, { body: { user: 'ghost@example.com' } })).status).toBe(404)
+   })
+ })
++
++/** A webhook receiver on a free local port: every delivery's parsed body. */
++async function receiver() {
++  const bodies: Record<string, unknown>[] = []
++  const http = createServer((req, res) => {
++    let data = ''
++    req.on('data', (chunk) => (data += chunk))
++    req.on('end', () => {
++      bodies.push(JSON.parse(data) as Record<string, unknown>)
++      res.end('ok')
++    })
++  })
++  await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve))
++  const { port } = http.address() as AddressInfo
++  return { url: `http://127.0.0.1:${port}/hook`, bodies, close: () => http.close() }
++}
++
++async function until<T>(read: () => T | undefined, ms = 5000): Promise<T> {
++  const deadline = Date.now() + ms
++  for (;;) {
++    const value = read()
++    if (value !== undefined) return value
++    if (Date.now() > deadline) throw new Error('timed out')
++    await new Promise((r) => setTimeout(r, 25))
++  }
++}
++
++describe('operator API: webhooks', () => {
++  it('creates a hook limited to one canvas, whose comment payloads name the element', async () => {
++    await createUser('hooks@example.com')
++    const { client } = await signIn('hooks@example.com', 'password12345')
++    const watched = await json<{ id: string }>(await client.post('/api/canvases', { name: 'Watched' }), 200)
++    const other = await json<{ id: string }>(await client.post('/api/canvases', { name: 'Other' }), 200)
++    const frameIn = async (canvasId: string) => {
++      const f = await json<{ id: string }>(await client.post(`/api/canvases/${canvasId}/frames`, { name: 'F' }), 200)
++      await json(await client.patch(`/api/frames/${f.id}`, { html: '<main><h1 id="t">Hello</h1></main>' }), 200)
++      return f.id
++    }
++    const watchedFrame = await frameIn(watched.id)
++    const otherFrame = await frameIn(other.id)
++    const rx = await receiver()
++    try {
++      /* a canvas the account cannot open is refused with the reason */
++      const stranger = await createUser('hooks-stranger@example.com')
++      expect(stranger.user.id).toBeTruthy()
++      const refused = await op('/users/hooks-stranger@example.com/webhooks', {
++        body: { url: rx.url, events: ['comment.created'], canvasIds: [watched.id] },
++      })
++      expect(refused.status).toBe(400)
++      expect(((await refused.json()) as { error: string }).error).toMatch(/no canvas/)
++
++      const hook = await json<{ id: string; secret: string; canvasIds: string[] }>(
++        await op('/users/hooks@example.com/webhooks', {
++          body: { url: rx.url, events: ['comment.created'], canvasIds: [watched.id] },
++        }),
++        201,
++      )
++      expect(hook.secret).toMatch(/^whsec_/)
++      expect(hook.canvasIds).toEqual([watched.id])
++      const listed = await json<{ id: string }[]>(await op('/users/hooks@example.com/webhooks'), 200)
++      expect(listed.map((h) => h.id)).toEqual([hook.id])
++      expect(listed[0]).not.toHaveProperty('secret')
++
++      /* an agent comment on the other canvas is not delivered; one on the watched canvas is */
++      const key = await json<{ secret: string }>(
++        await op('/users/hooks@example.com/keys', { body: { name: 'a' } }),
++        201,
++      )
++      const addComment = async (canvasId: string, frameId: string) => {
++        const res = await fetch(`${server.base}/mcp`, {
++          method: 'POST',
++          headers: {
++            'Content-Type': 'application/json',
++            Accept: 'application/json, text/event-stream',
++            Authorization: `Bearer ${key.secret}`,
++          },
++          body: JSON.stringify({
++            jsonrpc: '2.0',
++            id: 1,
++            method: 'tools/call',
++            params: {
++              name: 'add_comment',
++              arguments: { canvas_id: canvasId, frame_id: frameId, selector: '#t', text: 'Bigger', agent_name: 'Bot' },
++            },
++          }),
++        })
++        const body = (await res.json()) as { result: { isError?: boolean; content: { text: string }[] } }
++        expect(body.result.isError, body.result.content[0]?.text).toBeFalsy()
++        return JSON.parse(body.result.content[0]!.text) as { id: string; elementId: string }
++      }
++      await addComment(other.id, otherFrame)
++      const made = await addComment(watched.id, watchedFrame)
++      const delivered = await until(() => rx.bodies.find((b) => b.type === 'comment.created'))
++      expect(rx.bodies).toHaveLength(1)
++      expect(delivered).toMatchObject({
++        canvas: { id: watched.id },
++        actor: { kind: 'agent' },
++        comment: { id: made.id, frameId: watchedFrame, elementId: made.elementId },
++      })
++      expect((delivered.comment as { snippet: string }).snippet).toMatch(/^<h1 id="t" data-doop-id=.*Hello<\/h1>$/)
++
++      /* disable, test, widen to every canvas, delete */
++      const off = await json<{ enabled: boolean }>(
++        await op(`/users/hooks@example.com/webhooks/${hook.id}`, { method: 'PATCH', body: { enabled: false } }),
++        200,
++      )
++      expect(off.enabled).toBe(false)
++      const ping = await json<{ ok: boolean }>(
++        await op(`/users/hooks@example.com/webhooks/${hook.id}/test`, { body: {} }),
++        200,
++      )
++      expect(ping.ok).toBe(true)
++      const all = await json<{ canvasIds: string[]; enabled: boolean }>(
++        await op(`/users/hooks@example.com/webhooks/${hook.id}`, {
++          method: 'PATCH',
++          body: { canvasIds: [], enabled: true },
++        }),
++        200,
++      )
++      expect(all).toMatchObject({ canvasIds: [], enabled: true })
++      expect((await op(`/users/hooks-stranger@example.com/webhooks/${hook.id}`, { method: 'DELETE' })).status).toBe(404)
++      await json(await op(`/users/hooks@example.com/webhooks/${hook.id}`, { method: 'DELETE' }), 200)
++      expect(await json(await op('/users/hooks@example.com/webhooks'), 200)).toEqual([])
++    } finally {
++      rx.close()
++    }
++  })
++})
+diff --git a/tests/webhooks.test.ts b/tests/webhooks.test.ts
+index 1c0ab25..117d2e1 100644
+--- a/tests/webhooks.test.ts
++++ b/tests/webhooks.test.ts
+@@ -26,10 +26,11 @@ vi.mock('../server/db/index.ts', () => {
+ })
+ vi.mock('../server/access.ts', () => ({ hasDurableCanvasAccess: mocks.access }))
+ vi.mock('../server/store.ts', () => ({
+-  store: { getCanvas: (id: string) => (id === 'c1' ? CANVAS : undefined) },
++  store: { getCanvas: (id: string) => (id === 'c1' ? CANVAS : id === 'c2' ? CANVAS2 : undefined) },
+ }))
+ 
+ const CANVAS: Canvas = { id: 'c1', name: 'Landing', ownerId: 'alice', createdAt: 0, updatedAt: 0, frames: [] }
++const CANVAS2: Canvas = { ...CANVAS, id: 'c2', name: 'Pricing' }
+ const FRAME: Frame = {
+   id: 'f1',
+   canvasId: 'c1',
+@@ -153,6 +154,28 @@ describe('registry', () => {
+     await expect(register('alice', ['comment.created'], 'http://localhost/')).rejects.toThrow(/private/)
+   })
+ 
++  it('limits a hook to canvases its owner can open, and lets the list change', async () => {
++    const { info } = await webhooks.createWebhook('alice', {
++      url: 'https://hooks.example.com/doop',
++      events: ['comment.created'],
++      canvasIds: ['c1', ' c1 ', ''],
++    })
++    expect(info.canvasIds).toEqual(['c1'])
++    expect((await register()).info.canvasIds).toEqual([])
++    const hook = (canvasIds: unknown) =>
++      webhooks.createWebhook('alice', { url: 'https://hooks.example.com/doop', events: ['comment.created'], canvasIds })
++    await expect(hook(['nope'])).rejects.toThrow(/no canvas nope/)
++    mocks.access.mockImplementation((_userId, canvas) => (canvas as Canvas).id === 'c1')
++    await expect(hook(['c1', 'c2'])).rejects.toBeInstanceOf(webhooks.WebhookInputError)
++    await expect(hook(Array.from({ length: webhooks.MAX_WEBHOOK_CANVASES + 1 }, (_, i) => `c${i}`))).rejects.toThrow(
++      /up to/,
++    )
++    mocks.access.mockReturnValue(true)
++    expect((await webhooks.updateWebhook('alice', info.id, { canvasIds: ['c2'] }))?.canvasIds).toEqual(['c2'])
++    expect((await webhooks.updateWebhook('alice', info.id, { enabled: false }))?.canvasIds).toEqual(['c2'])
++    expect((await webhooks.updateWebhook('alice', info.id, { canvasIds: [] }))?.canvasIds).toEqual([])
++  })
++
+   it('caps the number of hooks per account, also under concurrent requests', async () => {
+     const results = await Promise.allSettled(Array.from({ length: webhooks.MAX_WEBHOOKS + 3 }, () => register()))
+     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(webhooks.MAX_WEBHOOKS)
+@@ -237,6 +260,8 @@ describe('delivery', () => {
+     expect(payload.canvas).toEqual({ id: 'c1', name: 'Landing', url: 'http://localhost:4300/c/c1' })
+     expect(payload.actor).toEqual({ name: 'Alice', kind: 'user' })
+     expect(payload.comment.url).toBe('http://localhost:4300/c/c1?frame=f1&comment=cm1')
++    /* the element the comment is pinned to, by its data-doop-id and its markup */
++    expect(payload.comment).toMatchObject({ frameId: 'f1', elementId: 'h1h1h1', snippet: '<h1>Hi</h1>' })
+     expect(payload.frame).not.toHaveProperty('html')
+   })
+ 
+@@ -252,6 +277,34 @@ describe('delivery', () => {
+     expect(mocks.fetch.mock.calls.map(([u]) => u)).toEqual(['https://hooks.example.com/doop'])
+   })
+ 
++  it('a hook that lists canvases hears only those', async () => {
++    await webhooks.createWebhook('alice', {
++      url: 'https://landing.example.com/',
++      events: ['comment.created'],
++      canvasIds: ['c1'],
++    })
++    await webhooks.createWebhook('alice', {
++      url: 'https://pricing.example.com/',
++      events: ['comment.created'],
++      canvasIds: ['c2'],
++    })
++    await register('alice', ['comment.created'], 'https://all.example.com/')
++    const event = { type: 'comment.created', comment: COMMENT, frame: FRAME, actorKind: 'agent' } as const
++    webhooks.onCanvasEvent('c1', event)
++    await vi.advanceTimersByTimeAsync(0)
++    expect(mocks.fetch.mock.calls.map(([u]) => u).sort()).toEqual([
++      'https://all.example.com/',
++      'https://landing.example.com/',
++    ])
++    mocks.fetch.mockClear()
++    webhooks.onCanvasEvent('c2', { ...event, comment: { ...COMMENT, canvasId: 'c2' } })
++    await vi.advanceTimersByTimeAsync(0)
++    expect(mocks.fetch.mock.calls.map(([u]) => u).sort()).toEqual([
++      'https://all.example.com/',
++      'https://pricing.example.com/',
++    ])
++  })
++
+   it('retries a failed delivery on the schedule, then records the success', async () => {
+     const { info } = await register()
+     mocks.fetch.mockResolvedValueOnce(ok(502)).mockResolvedValueOnce(ok(204))
+@@ -378,12 +431,20 @@ describe('payloads', () => {
+       webhooks.payloadFor({ type: 'comment.replied', comment: reply, frame: FRAME, actorKind: 'agent' }),
+     ).toMatchObject({ comment: { parentId: 'cm1', url: 'http://localhost:4300/c/c1?frame=f1&comment=cm1' } })
+     /* a comment pinned to the canvas: page and point instead of a frame */
+-    const { frameId: _frameId, ...rest } = COMMENT
++    const { frameId: _frameId, elementId: _elementId, ...rest } = COMMENT
+     const onCanvas = { ...rest, id: 'cm2', pageId: 'p1', x: 820, y: 240, selector: '', snippet: '' }
+     expect(
+       webhooks.payloadFor({ type: 'comment.created', comment: onCanvas, frame: undefined, actorKind: 'user' }),
+     ).toMatchObject({
+-      comment: { frameId: null, pageId: 'p1', x: 820, y: 240, url: 'http://localhost:4300/c/c1?page=p1&comment=cm2' },
++      comment: {
++        frameId: null,
++        elementId: null,
++        snippet: null,
++        pageId: 'p1',
++        x: 820,
++        y: 240,
++        url: 'http://localhost:4300/c/c1?page=p1&comment=cm2',
++      },
+       frame: null,
+     })
+   })

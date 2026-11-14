@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 05:09:38 +0000
-Subject: [PATCH 19/21] perf(canvas): only the frames in view go live
+Subject: [PATCH 19/24] perf(canvas): only the frames in view go live
 
 A frame got its live document when it came within half a viewport of the
 view, and kept it out to a whole viewport. The margin dates from when a

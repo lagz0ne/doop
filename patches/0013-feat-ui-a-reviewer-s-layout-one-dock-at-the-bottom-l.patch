@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 03:50:10 +0000
-Subject: [PATCH 13/21] feat(ui): a reviewer's layout: one dock at the bottom,
+Subject: [PATCH 13/24] feat(ui): a reviewer's layout: one dock at the bottom,
  layers folded, the Hand first
 
 On this instance people look, comment and review; the agents design. With

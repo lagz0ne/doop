@@ -1,0 +1,444 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 08:04:40 +0000
+Subject: [PATCH 22/24] feat(mcp): agents start comment threads with
+ add_comment
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+reply_to_comment answers a thread, but an agent could not open one: a
+review agent that finds a problem in a frame had no way to pin it where
+people look. add_comment is the MCP side of POST /api/frames/:id/comments
+and POST /api/canvases/:id/comments.
+
+- frame_id + element_id (the data-doop-id from get_frame) or selector (an
+  "#id > …" or "body > …" path, stamped first) pins it to an element;
+  frame_id + x, y to a point in the frame; frame_id alone to the frame;
+  page_id + x, y to the canvas.
+- An element that is not in the saved HTML is an error. The browser falls
+  back to a frame comment when its pin drifted; an agent named the element
+  on purpose and should hear that it is wrong.
+- The snippet is the element's saved markup, cut like the runtime's probe
+  (400 chars), so the thread, get_comments and webhooks show what it was.
+- Same rules as reply_to_comment: comment access; an @mention of a resident
+  role needs edit and spends one resident task, refunded if the post fails;
+  written as the agent (actor kind agent), billed to the connecting user.
+
+addElementComment and addCanvasComment take the actor kind, so the activity
+log and the comment.created event say agent rather than user.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ README.md                        |   8 ++
+ server/actions.ts                |   6 +-
+ server/elementIds.ts             |  10 +++
+ server/guide.ts                  |   7 ++
+ server/mcp.ts                    | 109 +++++++++++++++++++++++
+ tests/agentToolParity.test.ts    |   1 +
+ tests/mcp-comments-write.test.ts | 147 +++++++++++++++++++++++++++++++
+ 7 files changed, 286 insertions(+), 2 deletions(-)
+
+diff --git a/README.md b/README.md
+index fa3ab2a..288c7dd 100644
+--- a/README.md
++++ b/README.md
+@@ -881,6 +881,7 @@ read-only / destructive / idempotent annotations; the server registers no MCP pr
+ | **Collaboration**        |                                                                                                                     |
+ | `get_feedback`           | Fetch & claim open human feedback requests — for agents whose job is to poll the canvas periodically                |
+ | `get_comments`           | Read element and canvas comments with their replies, optionally filtered by frame or resolution state, no claiming  |
++| `add_comment`            | Start a thread on an element, a frame point or the canvas, as the agent; `@mention` metered as in replies           |
+ | `reply_to_comment`       | Reply inside an element-comment thread; `@mention` of a resident role is metered like a browser comment             |
+ | `resolve_comment`        | Resolve an element-comment thread; resolving an `@mention` thread records the exchange in canvas Memory             |
+ | `report_issue`           | Report a tool failure or missing capability to the instance admins                                                  |
+@@ -967,6 +968,13 @@ so conversation context remains available. An empty result is `[]`. The tool enf
+ canvas access permissions as other MCP reads; optional `agent_name` announces presence.
+ It does not claim task feedback or comments, or mark anything resolved.
+ 
++`add_comment({ canvas_id, frame_id, element_id | selector, text, agent_name })` starts a thread that
++people see in the editor, with the agent as its author. `element_id` is the element's `data-doop-id`
++(from `get_frame`); `selector` (an `#id > …` or `body > …` path) stamps one first. `frame_id` with
++`x`, `y` pins it to a point in the frame, `frame_id` alone to the frame, and `page_id` with `x`, `y`
++to the canvas. An element missing from the saved HTML is an error rather than a frame comment. It
++needs `comment` access; an `@mention` of a resident role needs `edit` and is metered like a reply.
++
+ `reply_to_comment({ canvas_id, comment_id, text, agent_name })` adds a reply to a thread,
+ inheriting the root's element anchor. `resolve_comment({ canvas_id, comment_id, agent_name })`
+ closes it, and resolving an `@mention` thread also records the exchange in canvas Memory. Both
+diff --git a/server/actions.ts b/server/actions.ts
+index f730456..c1964c0 100644
+--- a/server/actions.ts
++++ b/server/actions.ts
+@@ -675,13 +675,14 @@ export async function addElementComment(
+   input: FrameAnchorInput & { text: string },
+   from: string,
+   fromUserId?: string,
++  kind: ActorKind = 'user',
+ ): Promise<ElementComment | undefined> {
+   const frame = store.getFrame(frameId)
+   if (!frame || !input.text.trim()) return undefined
+   const anchor = await frameAnchor(frame, input, from)
+   /* a frame deleted while its element was being stamped takes no comment */
+   if (!store.getFrame(frameId)) return undefined
+-  return postComment(frame.canvasId, anchor, input.text, from, fromUserId)
++  return postComment(frame.canvasId, anchor, input.text, from, fromUserId, kind)
+ }
+ 
+ /** The anchor as it is written onto a comment; what the anchor does not
+@@ -843,11 +844,12 @@ export function addCanvasComment(
+   input: { pageId: string; x: number; y: number; text: string },
+   from: string,
+   fromUserId?: string,
++  kind: ActorKind = 'user',
+ ): ElementComment | undefined {
+   const canvas = store.getCanvas(canvasId)
+   if (!canvas || !canvasPages(canvas).some((page) => page.id === input.pageId)) return undefined
+   if (!Number.isFinite(input.x) || !Number.isFinite(input.y)) return undefined
+-  return postComment(canvasId, { pageId: input.pageId, x: input.x, y: input.y }, input.text, from, fromUserId)
++  return postComment(canvasId, { pageId: input.pageId, x: input.x, y: input.y }, input.text, from, fromUserId, kind)
+ }
+ 
+ /** Reply inside a thread: the reply inherits the root comment's anchor (its
+diff --git a/server/elementIds.ts b/server/elementIds.ts
+index 9fa46bc..2475237 100644
+--- a/server/elementIds.ts
++++ b/server/elementIds.ts
+@@ -220,6 +220,16 @@ export function stampElementId(html: string, selector: string, opts: StampOption
+   return hasElementId(next, id) ? { html: next, id } : undefined
+ }
+ 
++/** The stamped element's markup as the runtime's probe excerpts it (its
++ *  outerHTML, cut to 400 characters ending in `...`), from the saved source:
++ *  what a comment an agent pins to the element shows as its snippet. */
++export function elementSnippet(html: string, id: string): string | undefined {
++  const loc = findByElementId(parseDocument(html), id)?.sourceCodeLocation
++  if (!loc) return undefined
++  const markup = html.slice(loc.startOffset, loc.endOffset)
++  return markup.length > 400 ? markup.slice(0, 397) + '...' : markup
++}
++
+ /** Whether a stamped element is still in the HTML. */
+ export function hasElementId(html: string, id: string): boolean {
+   /* by the parsed attribute, whatever its quoting or case in the source */
+diff --git a/server/guide.ts b/server/guide.ts
+index cf5db04..bccb82a 100644
+--- a/server/guide.ts
++++ b/server/guide.ts
+@@ -126,6 +126,13 @@ Add frame_id to focus on one frame. Resolved comments are included by default to
+ conversation context; include_resolved: false returns only unresolved entries. The result
+ is newest first and covers the retained history (up to 100 entries per canvas).
+ 
++Start a thread yourself with add_comment({ canvas_id, frame_id, element_id, text, agent_name }):
++people see it pinned to the element in the editor, with you as its author. element_id is the
++element's data-doop-id from get_frame; pass selector instead ("#id > …" or "body > …") to pin an
++element that has none yet, x, y (frame-local) for a point in the frame, or page_id with x, y for
++the canvas. A missing element is an error, not a silent frame comment. It needs comment access;
++an @mention of a resident role needs edit and is metered like a reply.
++
+ Answer a thread with reply_to_comment({ canvas_id, comment_id, text, agent_name }) — the
+ reply inherits the root's element anchor, so an @mention reaches the resident agent with
+ the same context the conversation is about. Close the thread with resolve_comment once the
+diff --git a/server/mcp.ts b/server/mcp.ts
+index 6134504..f2fe045 100644
+--- a/server/mcp.ts
++++ b/server/mcp.ts
+@@ -26,6 +26,7 @@ import {
+ } from '../shared/designTokens.ts'
+ import { webFontFamilies, webFontsBrief } from '../shared/webFonts.ts'
+ import * as actions from './actions.ts'
++import { elementSnippet, hasElementId } from './elementIds.ts'
+ import { canvasRole } from './access.ts'
+ import { roleAllows, type CanvasRole } from '../shared/canvasRole.ts'
+ import { isAgentKeySecret, verifyAgentKey } from './agentKeys.ts'
+@@ -1074,6 +1075,114 @@ export function buildMcpServer(
+     },
+   )
+ 
++  server.registerTool(
++    'add_comment',
++    {
++      title: 'Comment on an element, a frame or the canvas',
++      description:
++        'Start a new comment thread that people see in the editor, with you as its author — the MCP counterpart of dropping a comment pin. Pin it to an element of a frame with frame_id plus element_id (its data-doop-id attribute, from get_frame) or selector (an "#id > …" or "body > …" path; the element gets a data-doop-id, returned as the comment’s elementId). frame_id with x, y (frame-local design px) pins it to a point in the frame; frame_id alone comments on the frame as a whole. page_id with x, y (canvas coordinates) leaves it on the canvas outside any frame. An element that is not in the frame’s saved HTML is an error, not a silent fallback. Needs comment access; an @mention of a resident role (e.g. "@Doop") needs edit access and counts as a new resident task against the account’s meter, exactly like a comment left in the browser. Answer threads with reply_to_comment, close them with resolve_comment.',
++      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
++      inputSchema: {
++        canvas_id: z.string(),
++        frame_id: z
++          .string()
++          .optional()
++          .describe('The frame the comment is in (from get_canvas). Omit for a canvas comment.'),
++        element_id: z
++          .string()
++          .optional()
++          .describe('The element’s data-doop-id in the frame HTML (get_frame). Needs frame_id.'),
++        selector: z
++          .string()
++          .max(actions.MAX_ELEMENT_SELECTOR_CHARS)
++          .optional()
++          .describe(
++            'Instead of element_id: a path to the element in the frame’s saved HTML, from an HTML id ("#pricing > h2:nth-of-type(1)") or from the body ("body > main:nth-of-type(1) > button:nth-of-type(2)"). Needs frame_id.',
++          ),
++        page_id: z
++          .string()
++          .optional()
++          .describe('For a canvas comment: the page it is on (from get_canvas), with x and y. Omit with frame_id.'),
++        x: z.number().optional().describe('With frame_id: frame-local design px. With page_id: canvas coordinates.'),
++        y: z.number().optional().describe('Pairs with x.'),
++        text: z.string().describe('The comment text. Trimmed; empty comments are rejected.'),
++        agent_name: agentName,
++      },
++    },
++    async ({ canvas_id, frame_id, element_id, selector, page_id, x, y, text: body, agent_name }) => {
++      const canvas = canvasFor(canvas_id, 'comment')
++      if (!canvas) return noCanvas(canvas_id)
++      if (!body.trim()) return err('empty text')
++      if ((x === undefined) !== (y === undefined)) return err('give x and y together')
++      const point = x !== undefined && y !== undefined ? { x, y } : undefined
++      if (!!frame_id === !!page_id)
++        return err('pass frame_id (a comment in a frame) or page_id with x, y (a comment on the canvas)')
++      if (element_id && selector) return err('pass element_id or selector, not both')
++      if (page_id && (element_id || selector)) return err('an element needs its frame_id, not a page_id')
++      if (page_id && !point) return err('a canvas comment needs x and y')
++      if (mentionedRole(body) && !canvasFor(canvas_id, 'edit'))
++        return err('asking an agent to change the canvas needs edit access')
++      const frame = frame_id ? frameFor(frame_id, 'comment') : undefined
++      if (frame_id && (!frame || frame.canvasId !== canvas_id)) return noFrame(frame_id)
++      if (page_id && !canvasPages(canvas).some((p) => p.id === page_id))
++        return err(`no page with id ${page_id} on canvas ${canvas_id} (page ids come from get_canvas)`)
++      const actor = actorFrom(agent_name)
++      arrive(canvas_id, agent_name)
++      /* the element is found before anything is spent or posted: the browser
++         falls back to a frame comment when a pin's element has drifted, but an
++         agent named the element on purpose and should hear that it is wrong */
++      let elementId = element_id
++      if (frame && selector) {
++        const stamped = await actions.ensureElementId(frame.id, selector, actor.name)
++        if (!stamped)
++          return err(
++            `no element at "${selector}" in the saved HTML of frame ${frame.id} (or the frame is still streaming) — use a data-doop-id from get_frame, an "#id > …" path or a "body > …" path`,
++          )
++        elementId = stamped.id
++      }
++      const html = frame ? (store.getFrame(frame.id)?.html ?? '') : ''
++      if (frame && elementId && !hasElementId(html, elementId))
++        return err(`no element with data-doop-id="${elementId}" in frame ${frame.id} — read it with get_frame`)
++      let gate: Awaited<ReturnType<typeof allowance.consumeResidentTask>> | undefined
++      if (mentionedRole(body) && ownerId) {
++        gate = await allowance.consumeResidentTask(ownerId)
++        if (!gate.ok)
++          return err(
++            `resident task limit reached (${gate.used}/${gate.limit}) — connect a model account or retry later`,
++          )
++      }
++      /* attributed to the agent, billed to the connecting user, as in reply_to_comment */
++      const comment = frame
++        ? await actions.addElementComment(
++            frame.id,
++            {
++              ...(elementId ? { elementId, snippet: elementSnippet(html, elementId) ?? '' } : {}),
++              ...point,
++              text: body,
++            },
++            actor.name,
++            ownerId,
++            'agent',
++          )
++        : actions.addCanvasComment(
++            canvas_id,
++            { pageId: page_id ?? '', x: x ?? NaN, y: y ?? NaN, text: body },
++            actor.name,
++            ownerId,
++            'agent',
++          )
++      if (!comment) {
++        if (gate && ownerId) {
++          await allowance
++            .refundResidentTask(gate, ownerId)
++            .catch((e) => console.error(`[mcp] could not refund a resident task for ${ownerId}:`, e))
++        }
++        return err(frame ? 'the frame was deleted meanwhile' : 'the page was deleted meanwhile')
++      }
++      return withFeedback(text(comment), canvas_id, actor)
++    },
++  )
++
+   server.registerTool(
+     'resolve_comment',
+     {
+diff --git a/tests/agentToolParity.test.ts b/tests/agentToolParity.test.ts
+index d455962..7d97b44 100644
+--- a/tests/agentToolParity.test.ts
++++ b/tests/agentToolParity.test.ts
+@@ -39,6 +39,7 @@ const MISSING = [
+   'set_page_background',
+   'export_frame',
+   'upload_asset',
++  'add_comment', // a resident run answers the threads it is handed (reply_to_comment); starting its own is undecided
+   'list_linear_issues', // integration tools, registered by their connections
+   'get_linear_issue',
+ ]
+diff --git a/tests/mcp-comments-write.test.ts b/tests/mcp-comments-write.test.ts
+index fe9708a..de4ec10 100644
+--- a/tests/mcp-comments-write.test.ts
++++ b/tests/mcp-comments-write.test.ts
+@@ -3,6 +3,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+ import { beforeEach, describe, expect, it, vi } from 'vitest'
+ import * as actions from '../server/actions.ts'
+ import * as allowance from '../server/allowance.ts'
++import * as events_ from '../server/events.ts'
+ import { buildMcpServer } from '../server/mcp.ts'
+ import { store } from '../server/store.ts'
+ import type { Canvas, ElementComment, Frame } from '../shared/types.ts'
+@@ -487,6 +488,152 @@ describe('MCP comment write tools over real action state', () => {
+     }
+   })
+ 
++  it('add_comment pins a new thread to an element by selector, as the agent', async () => {
++    FRAME.html = '<main><h1>Hi</h1><p id="lead">Lead <b>copy</b></p></main>'
++    const events = vi.spyOn(events_, 'emitCanvasEvent')
++    const { client, close } = await connect()
++    try {
++      const { parsed, isError } = await call(client, 'add_comment', {
++        canvas_id: CANVAS.id,
++        frame_id: FRAME.id,
++        selector: '#lead',
++        text: 'Shorter lead, please',
++        agent_name: 'Claude',
++      })
++      expect(isError).toBeFalsy()
++      const made = parsed as ElementComment
++      expect(made).toMatchObject({ from: 'Claude', frameId: FRAME.id, text: 'Shorter lead, please' })
++      expect(made.elementId).toMatch(/\w+/)
++      expect(made.parentId).toBeUndefined()
++      /* the element now carries the id, and the snippet is its saved markup */
++      expect(FRAME.html).toContain(`data-doop-id="${made.elementId}"`)
++      expect(made.snippet).toMatch(/^<p id="lead".*copy<\/b><\/p>$/)
++      expect(actions.getComments(CANVAS.id)[0]).toMatchObject({ id: made.id, fromUserId: OWNER_ID })
++      expect(actions.getActivity(CANVAS.id)[0]).toMatchObject({ actorName: 'Claude', actorKind: 'agent' })
++      expect(events).toHaveBeenCalledWith(
++        CANVAS.id,
++        expect.objectContaining({ type: 'comment.created', actorKind: 'agent' }),
++      )
++
++      /* the same element by its data-doop-id lands on it too */
++      const again = await call(client, 'add_comment', {
++        canvas_id: CANVAS.id,
++        frame_id: FRAME.id,
++        element_id: made.elementId,
++        text: 'And bolder',
++        agent_name: 'Claude',
++      })
++      expect(again.isError).toBeFalsy()
++      expect(again.parsed).toMatchObject({ elementId: made.elementId, snippet: made.snippet })
++    } finally {
++      await close()
++    }
++  })
++
++  it('add_comment refuses an element that is not in the frame instead of falling back', async () => {
++    FRAME.html = '<h1>Hi</h1>'
++    const { client, close } = await connect()
++    try {
++      for (const where of [{ selector: '#nope' }, { element_id: 'zzzzzzzz' }]) {
++        const { raw, isError } = await call(client, 'add_comment', {
++          canvas_id: CANVAS.id,
++          frame_id: FRAME.id,
++          ...where,
++          text: 'x',
++          agent_name: 'Claude',
++        })
++        expect(isError).toBe(true)
++        expect(raw).toMatch(/no element/)
++      }
++      expect(actions.getComments(CANVAS.id)).toHaveLength(0)
++    } finally {
++      await close()
++    }
++  })
++
++  it('add_comment leaves a frame point or a canvas comment, and checks its arguments', async () => {
++    const { client, close } = await connect()
++    try {
++      const point = await call(client, 'add_comment', {
++        canvas_id: CANVAS.id,
++        frame_id: FRAME.id,
++        x: 12,
++        y: 34,
++        text: 'here',
++        agent_name: 'Claude',
++      })
++      expect(point.parsed).toMatchObject({ frameId: FRAME.id, x: 12, y: 34 })
++      expect((point.parsed as ElementComment).elementId).toBeUndefined()
++
++      const onCanvas = await call(client, 'add_comment', {
++        canvas_id: CANVAS.id,
++        page_id: `${CANVAS.id}:page1`,
++        x: 900,
++        y: 40,
++        text: 'a note beside the frames',
++        agent_name: 'Claude',
++      })
++      expect(onCanvas.parsed).toMatchObject({ pageId: `${CANVAS.id}:page1`, x: 900, y: 40, from: 'Claude' })
++
++      const bad = [
++        { page_id: 'nope', x: 1, y: 1 },
++        { page_id: `${CANVAS.id}:page1` },
++        { frame_id: FRAME.id, page_id: `${CANVAS.id}:page1`, x: 1, y: 1 },
++        {},
++        { frame_id: FRAME.id, x: 1 },
++        { frame_id: 'other' },
++      ]
++      for (const args of bad) {
++        const r = await call(client, 'add_comment', { canvas_id: CANVAS.id, text: 'x', agent_name: 'Claude', ...args })
++        expect(r.isError, JSON.stringify(args)).toBe(true)
++      }
++      expect(actions.getComments(CANVAS.id)).toHaveLength(2)
++    } finally {
++      await close()
++    }
++  })
++
++  it('add_comment holds comment access, edit for an @mention, and meters the mention', async () => {
++    stubCanvas({ ...CANVAS, ownerId: 'someone-else', linkAccess: 'comment' } as Canvas)
++    const consume = vi.spyOn(allowance, 'consumeResidentTask').mockResolvedValue(gate())
++    const { client, close } = await connect('visitor-1')
++    try {
++      const plain = await call(client, 'add_comment', {
++        canvas_id: CANVAS.id,
++        frame_id: FRAME.id,
++        text: 'looks good',
++        agent_name: 'Claude',
++      })
++      expect(plain.isError, plain.raw).toBeFalsy()
++      const mention = await call(client, 'add_comment', {
++        canvas_id: CANVAS.id,
++        frame_id: FRAME.id,
++        text: '@Doop make it blue',
++        agent_name: 'Claude',
++      })
++      expect(mention.isError).toBe(true)
++      expect(mention.raw).toMatch(/edit access/)
++      expect(consume).not.toHaveBeenCalled()
++    } finally {
++      await close()
++    }
++    stubCanvas(CANVAS)
++    const owner = await connect()
++    try {
++      const mention = await call(owner.client, 'add_comment', {
++        canvas_id: CANVAS.id,
++        frame_id: FRAME.id,
++        text: '@Doop make it blue',
++        agent_name: 'Claude',
++      })
++      expect(mention.isError).toBeFalsy()
++      expect(mention.parsed).toMatchObject({ forAgent: true })
++      expect(consume).toHaveBeenCalledWith(OWNER_ID)
++    } finally {
++      await owner.close()
++    }
++  })
++
+   it('captures exactly one decision when a thread is resolved twice', async () => {
+     const root = await seedRoot('@Doop make it 48px')
+     expect(root.forAgent).toBe(true)

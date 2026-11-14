@@ -26,6 +26,9 @@ outside this repo.)
 | 2026-11-13 | Reviewers without an account: the hidden Share button was not the whole gap, since upstream's link gives signed-out visitors a look only and comment/edit need an account (sign-up is closed). Chose the review-link model (Frame.io review links, InVision share links: a name and an optional password) over making accounts per reviewer or one instance-wide password. Built on 0011's session-held grant. The owner decides everything: level (view, comment, review, edit) and whether there is a password; one password per canvas, so a leak exposes one canvas and changing it signs earlier guests out. Share is back for the owner with FULL_UI off. 0020 adds migration 0050 (a database dump before deploying) |
 | 2026-11-14 | v0.14.0 + 0001-0020 released and deployed (database dump first, migration 0050); every canvas's link stays off until its owner picks a level |
 | 2026-11-14 | Phones still showed the editor's phone layout (top bar, tool strip, Layers and Prototype mode first) while desktop and the panel used the reviewer layout. Decided: the same layout on phones, review first, as phone design viewers do it (a bottom bar within thumb reach, the rest behind •••): 0021 feat(ui). The dock holds back, Hand, Comment, the tool list, Comments, Pages and layers and •••, at the 40px touch size, and fits a 320 px screen (283 px; a tool picked from the list takes the list's button, Prototype mode stays in the list, AI activity is a tab of the Comments sheet) |
+| 2026-11-14 | v0.14.0 + 0001-0021 released and deployed |
+| 2026-11-14 | Issue #2: agents could reply to and resolve comments but not start one, read a frame's HTML only through MCP, and hear comment webhooks for every canvas without the element named; with FULL_UI off nobody could set a hook. Decided: 0022 `add_comment` (the browser's anchors, an element by id or selector, refused when it is not there rather than falling back to the frame; an @mention needs edit and is metered like the browser's), 0023 `GET /api/frames/:id/html` for agent keys and sessions (no public URL: that would be new exposure; served under a sandbox CSP, since frame HTML carries scripts), 0024 hooks limited to listed canvases, `elementId` and `snippet` in the payload, and hooks managed through the operator API (`bin/doopctl webhooks`) rather than unhiding the Settings pane. 0024 adds migration 0051 |
+| 2026-11-14 | Upstream checked: no release after v0.14.0; 44 commits on `main`, none covering #2. Its migrations 0049-0052 are dated before ours (see Upgrading) |
 
 ## Patches
 
@@ -52,6 +55,9 @@ outside this repo.)
 | 0019 | perf(canvas): only the frames in view go live | the half-viewport live margin booted 12 documents per rest where 4-6 were on screen. Entry margin 0.1, keep margin 0.5; previews keep the half-viewport margin for their sharp level |
 | 0020 | feat(share): share-link guests: a name, an optional password, the link's level | reviewers without an account: the owner picks the link's level and an optional password; visitors give a name (and the password) and get that level on that canvas only, read live, ended by a new password. `doopctl share link <canvas> [level] --password-stdin \| --no-password` |
 | 0021 | feat(ui): phones get the reviewer layout, review first | one layout everywhere with FULL_UI off: the bottom dock on phones too, sized for a thumb; ••• opens the canvas actions (import, share, export, Connect AI, your name, settings) |
+| 0022 | feat(mcp): agents start comment threads with `add_comment` | the MCP side of POST `/api/frames/:id/comments` and canvas comments: an element (`element_id` or `selector`, stamped like the browser does), a point on a frame, or a point on a page; the agent is the author; comment role, an @mention needs edit and uses a resident task |
+| 0023 | feat(api): read a frame's HTML over HTTP with an agent key | `GET /api/frames/:id/html` for a script holding an agent key (`dpk_…` bearer, view role) or a session; `no-store`, `sandbox` CSP, `x-doop-frame-updated-at`. The key opens this route only |
+| 0024 | feat(webhooks): limit hooks to canvases, name the element, manage them from the operator API | `canvasIds` per hook (empty = all, checked on create and on every delivery; migration 0051), `elementId` + `snippet` in comment payloads, `/api/operator/users/:user/webhooks` behind `bin/doopctl webhooks list\|create\|enable\|disable\|test\|delete` (secret printed once). The Settings pane does not edit `canvasIds` yet |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -126,6 +132,19 @@ migrated perf data: culling, preview levels and the boot cover behave as before
 a lazy 10 MB MuPDF wasm for PDF import. Known follow-up: any frame write bumps `updatedAt` (a
 move, a restack, a rotation), and previews are keyed on it, so moving a frame re-renders its
 pictures though they are unchanged.
+
+Tests for 0022-0024 (2026-11-14): `bin/doop check --browser` 2631 pass, 11 fail: the 10
+`elementPanelBrowser` failures pristine v0.14.0 has here, and `agentToolParity`, which asked
+whether resident agents get `add_comment` (not yet: they answer the threads they are handed; now
+listed as a gap). `bin/doopctl webhooks` smoke-tested against a local server.
+
+Upgrading past v0.14.0 (found 2026-11-14): drizzle's migrator applies a migration only when it is
+newer than the last one applied (`created_at` < the journal's `when`), not by name. Upstream's
+0049-0052 on `main` are dated 2026-11-07 to 2026-11-10, before our 0049-0051 (2026-11-12 to
+2026-11-14), so on a database that has ours they would be skipped silently. At that upgrade: renumber
+our migrations after upstream's, make them idempotent (`IF NOT EXISTS`), and date them after
+upstream's last one; then check on a copy of the production database that every upstream table
+and column exists before deploying.
 
 Upstreaming: not attempted yet. Patches 0001-0004 and 0007-0009 are generic enough to offer to
 kgoedecke/doop (0007 is a plain bug fix).

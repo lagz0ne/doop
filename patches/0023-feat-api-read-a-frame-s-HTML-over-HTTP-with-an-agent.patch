@@ -1,0 +1,315 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 08:07:09 +0000
+Subject: [PATCH 23/24] feat(api): read a frame's HTML over HTTP with an agent
+ key
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A script that wants a frame's markup (a build step, a diff against the
+app's repo, a review bot) had to speak MCP to call get_frame. GET
+/api/frames/:id/html returns the same saved HTML as text/html.
+
+- An agent key (Authorization: Bearer dpk_…) is checked ahead of the
+  session gate, the way /mcp checks it: resolved to its account on every
+  request, so a revoked key or a banned account stops at once. Any other
+  request goes on to the session gate and a session route, so the editor's
+  own session can use it too.
+- Read-only and view-level: the account's canvas role decides, as in
+  get_frame. A frame it cannot open is a 404, so ids do not leak. The key
+  reaches no other /api route.
+- The body is somebody's design and may carry scripts; served from doop's
+  origin it would run with doop's cookies if a browser opened it. So the
+  response is CSP sandboxed (opaque origin, default-src 'none'), nosniff,
+  no-referrer and private, no-store. X-Doop-Frame-Updated-At tells a
+  poller whether the frame changed.
+
+No public URL (as /i/ images have): HTML is the design's source, not a
+render, and a link that needs no key would be new exposure.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ README.md                    |   7 ++-
+ server/frameHtml.ts          |  57 +++++++++++++++++++
+ server/guide.ts              |   7 +++
+ server/index.ts              |  10 ++++
+ server/mcp.ts                |   5 +-
+ tests/frameHtmlRoute.test.ts | 103 +++++++++++++++++++++++++++++++++++
+ 6 files changed, 186 insertions(+), 3 deletions(-)
+ create mode 100644 server/frameHtml.ts
+ create mode 100644 tests/frameHtmlRoute.test.ts
+
+diff --git a/README.md b/README.md
+index 288c7dd..9218b3b 100644
+--- a/README.md
++++ b/README.md
+@@ -785,6 +785,11 @@ Then tell the agent something like:
+ 
+ Screenshots render in your system Chrome/Chromium via `puppeteer-core` (set `CHROME_PATH` if it isn't
+ auto-detected). Humans can hit the same renderer at `GET /api/frames/:id/screenshot.png?scale=2`.
++
++A script that only needs a frame's markup can skip MCP: `GET /api/frames/:id/html` with the same
++`Authorization: Bearer dpk_…` header returns the saved HTML that `get_frame` returns, as
++`text/html`. It is read-only, needs `view` access to the canvas (a frame you cannot open is a 404),
++and is sandboxed and never cached; a signed-in session can use it too.
+ For website viewing/imports, setting `CONTEXT_DEV_API_KEY` makes Context.dev acquire the rendered
+ HTML while Doop still sanitizes it and renders the preview locally; without the key, Doop navigates
+ to the public page directly in Chromium.
+@@ -1045,7 +1050,7 @@ applies the same canvas access rules. Route handlers live in
+ | Prefix                                                      | What it covers                                                                                                                           |
+ | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+ | `/api/canvases`                                             | Canvases and their members, pages, flow start, guides, guidelines, references, cards, comments, imports, sync keys, assets, `export.pdf` |
+-| `/api/frames`                                               | Frames: edit, stream (`/append`), versions and restore, approval, comments, `screenshot.png`                                             |
++| `/api/frames`                                               | Frames: edit, stream (`/append`), versions and restore, approval, comments, `screenshot.png`, `html`                                     |
+ | `/api/comments`, `/api/tasks`, `/api/feedback`              | Replies, resolve and retry; task feedback                                                                                                |
+ | `/api/workspaces`, `/api/billing`                           | Workspaces, people, roles, Stripe checkout                                                                                               |
+ | `/api/automations`, `/api/integrations`, `/api/webhooks`    | Automations, connected tools, outbound webhooks                                                                                          |
+diff --git a/server/frameHtml.ts b/server/frameHtml.ts
+new file mode 100644
+index 0000000..8d7d9bd
+--- /dev/null
++++ b/server/frameHtml.ts
+@@ -0,0 +1,57 @@
++import type { NextFunction, Request, Response } from 'express'
++import { roleAllows } from '../shared/canvasRole.ts'
++import type { Frame } from '../shared/types.ts'
++import { canvasRole } from './access.ts'
++import { isAgentKeySecret, verifyAgentKey } from './agentKeys.ts'
++import { isBanned } from './auth.ts'
++import { store } from './store.ts'
++
++/**
++ * GET /api/frames/:id/html: a frame's saved HTML as a plain document, for a
++ * script that wants the markup without speaking MCP (a build step, a diff
++ * against the repo, a review bot). It reads exactly what get_frame returns.
++ *
++ * Two ways in, as /mcp has: an agent key (`Authorization: Bearer dpk_…`)
++ * resolves to its account on every request, so revoking the key or banning
++ * the account stops it at once; anything else goes on to the session gate
++ * and the session route. Either way the account needs `view` on the canvas.
++ * A frame the account cannot see is a 404, as in MCP, so ids do not leak.
++ *
++ * The markup is somebody's design and may carry scripts. Served from doop's
++ * own origin it would run with doop's cookies if a browser opened it, so the
++ * response is sandboxed (an opaque origin, nothing loads or runs) and never
++ * stored by a cache.
++ */
++
++const HEADERS = {
++  'content-type': 'text/html; charset=utf-8',
++  'cache-control': 'private, no-store',
++  'x-content-type-options': 'nosniff',
++  'content-security-policy': "sandbox; default-src 'none'",
++  'referrer-policy': 'no-referrer',
++}
++
++export function sendFrameHtml(res: Response, frame: Frame): void {
++  res.set({ ...HEADERS, 'x-doop-frame-updated-at': String(frame.updatedAt) })
++  res.send(frame.html)
++}
++
++/** Ahead of the /api session gate: answers an agent-key request in full,
++ *  passes every other request on. */
++export async function frameHtmlByAgentKey(req: Request<{ id: string }>, res: Response, next: NextFunction) {
++  const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? '')?.[1]
++  if (!bearer || !isAgentKeySecret(bearer)) return next()
++  try {
++    const key = await verifyAgentKey(bearer)
++    if (!key) return void res.status(401).json({ error: 'unknown or revoked agent key' })
++    if (await isBanned(key.userId))
++      return void res.status(403).json({ error: 'this account has been disabled on this server' })
++    const frame = store.getFrame(req.params.id)
++    const canvas = frame ? store.getCanvas(frame.canvasId) : undefined
++    if (!frame || !canvas || !roleAllows(canvasRole(key.userId, canvas), 'view'))
++      return void res.status(404).json({ error: 'frame not found' })
++    sendFrameHtml(res, frame)
++  } catch (err) {
++    next(err)
++  }
++}
+diff --git a/server/guide.ts b/server/guide.ts
+index bccb82a..daa6ba8 100644
+--- a/server/guide.ts
++++ b/server/guide.ts
+@@ -448,6 +448,13 @@ For print, a client handoff or a deck, export_frame with format "pdf" returns th
+ at the frame's own size. Pass frame_ids to bind several frames of one canvas into one multi-page
+ PDF; pages follow the order given (frame_id first, then frame_ids as listed).
+ 
++## Frame HTML over plain HTTP
++
++get_frame returns a frame's HTML. A script that holds an agent key and does not speak MCP
++(a build step, a diff against a repo) can read the same markup with
++GET /api/frames/<frameId>/html and the header Authorization: Bearer dpk_… — read-only, the
++account needs view access to the canvas, and the body is the saved HTML as text/html.
++
+ ## Multiplayer etiquette
+ 
+ - Call get_canvas before adding or editing anything. Note each frame's updatedBy and
+diff --git a/server/index.ts b/server/index.ts
+index dd48ab7..c0e9c3c 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -45,6 +45,7 @@ import { isLinkAccess, roleAllows, type CanvasRole } from '../shared/canvasRole.
+ import { auth, initAuth, syncAdmins, getUserName, loginProvidersConfig } from './auth.ts'
+ import { adminRouter } from './admin.ts'
+ import { operatorRouter } from './operator.ts'
++import { frameHtmlByAgentKey, sendFrameHtml } from './frameHtml.ts'
+ import {
+   canvasForReviewer,
+   embedGrantOf,
+@@ -738,6 +739,10 @@ app.post('/ingest/:key', express.json({ limit: '10mb', type: () => true }), (req
+    is unset — see server/operator.ts. Ahead of the session gate on purpose. */
+ app.use('/api/operator', operatorRouter(refreshRoomRoles))
+ 
++/* a frame's HTML for scripts holding an agent key (server/frameHtml.ts);
++   other requests go on to the session gate and the route below it */
++app.get('/api/frames/:id/html', frameHtmlByAgentKey)
++
+ /* everything else under /api requires a logged-in user; the session's user
+    is authoritative for names — clients don't get to pick who they are */
+ interface SessionUser {
+@@ -2166,6 +2171,11 @@ app.delete('/api/frames/:id', (req, res) => {
+ /* design history: the states a frame had before later edits replaced them,
+    newest first and without HTML; one version in full; restore (same
+    permission model as editing — anyone with access to the canvas) */
++app.get('/api/frames/:id/html', (req, res) => {
++  const frame = requireFrame(req, res, req.params.id, 'view')
++  if (frame) sendFrameHtml(res, frame)
++})
++
+ app.get('/api/frames/:id/versions', async (req, res) => {
+   if (!requireFrame(req, res, req.params.id, 'view')) return
+   res.json(await persist.listFrameVersions(req.params.id))
+diff --git a/server/mcp.ts b/server/mcp.ts
+index f2fe045..e0f49ca 100644
+--- a/server/mcp.ts
++++ b/server/mcp.ts
+@@ -1498,7 +1498,8 @@ export function buildMcpServer(
+     'get_frame',
+     {
+       title: 'Get a frame and its HTML',
+-      description: 'Get a frame including its full HTML content.',
++      description:
++        'Get a frame including its full HTML content. A script holding an agent key can read the same HTML without MCP: GET /api/frames/<frame_id>/html with Authorization: Bearer dpk_… (read-only, needs view access).',
+       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+       inputSchema: { frame_id: z.string(), agent_name: agentName.optional() },
+     },
+@@ -1553,7 +1554,7 @@ export function buildMcpServer(
+     {
+       title: 'Export frame as image or PDF',
+       description:
+-        "Export the frame's CURRENT design. PNG/JPG return public URLs for publishing it elsewhere (CMS media library, social post, og:image; the URL re-renders when the frame changes) at `scale` (default 2x; 1, 3 or 4 for other sizes). PDF returns the file itself (an embedded application/pdf resource): vector, text selectable, one page per frame sized to the frame; pass frame_ids to put several frames of the same canvas into one multi-page PDF (pages in the order given: frame_id first, then frame_ids as listed).",
++        "Export the frame's CURRENT design. PNG/JPG return public URLs for publishing it elsewhere (CMS media library, social post, og:image; the URL re-renders when the frame changes) at `scale` (default 2x; 1, 3 or 4 for other sizes). PDF returns the file itself (an embedded application/pdf resource): vector, text selectable, one page per frame sized to the frame; pass frame_ids to put several frames of the same canvas into one multi-page PDF (pages in the order given: frame_id first, then frame_ids as listed). For the HTML itself use get_frame, or GET /api/frames/<frame_id>/html with an agent key as the bearer.",
+       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+       inputSchema: {
+         frame_id: z.string(),
+diff --git a/tests/frameHtmlRoute.test.ts b/tests/frameHtmlRoute.test.ts
+new file mode 100644
+index 0000000..9b074a5
+--- /dev/null
++++ b/tests/frameHtmlRoute.test.ts
+@@ -0,0 +1,103 @@
++import { afterAll, beforeAll, describe, expect, it } from 'vitest'
++import { Client, startServer, type Server } from './harness.ts'
++
++/* GET /api/frames/:id/html (server/frameHtml.ts) on a real server: an agent
++   key reads what get_frame reads, a session reads it too, and nothing gets
++   through that the account could not open. */
++
++const TOKEN = 'frame-html-test-token-0123456789abcdef'
++const HTML = '<main><h1 id="t">Hello</h1><script>parent.x=1</script></main>'
++let server: Server
++
++beforeAll(async () => {
++  server = await startServer({ DOOP_ADMIN_TOKEN: TOKEN })
++}, 70_000)
++
++afterAll(() => server?.stop())
++
++function get(path: string, bearer?: string) {
++  return fetch(`${server.base}${path}`, bearer ? { headers: { Authorization: `Bearer ${bearer}` } } : {})
++}
++
++describe('frame HTML over HTTP', () => {
++  let owner: Client
++  let stranger: Client
++  let canvasId: string
++  let frameId: string
++  let ownerKey: string
++  let strangerKey: string
++
++  beforeAll(async () => {
++    owner = new Client(server)
++    stranger = new Client(server)
++    await owner.signUp('html-owner@test.dev', 'Owner')
++    await stranger.signUp('html-stranger@test.dev', 'Stranger')
++    canvasId = (await (await owner.post('/api/canvases', { name: 'Html' })).json()).id
++    frameId = (await (await owner.post(`/api/canvases/${canvasId}/frames`, { name: 'Hero' })).json()).id
++    expect((await owner.patch(`/api/frames/${frameId}`, { html: HTML })).status).toBe(200)
++    ownerKey = (await (await owner.post('/api/agent-keys', { name: 'script' })).json()).secret
++    strangerKey = (await (await stranger.post('/api/agent-keys', { name: 'script' })).json()).secret
++  })
++
++  it('serves the saved HTML to an agent key, sandboxed and uncached', async () => {
++    const res = await get(`/api/frames/${frameId}/html`, ownerKey)
++    expect(res.status).toBe(200)
++    expect(await res.text()).toBe(HTML)
++    expect(res.headers.get('content-type')).toMatch(/^text\/html/)
++    expect(res.headers.get('content-security-policy')).toMatch(/\bsandbox\b/)
++    expect(res.headers.get('cache-control')).toMatch(/no-store/)
++    expect(res.headers.get('x-content-type-options')).toBe('nosniff')
++    expect(Number(res.headers.get('x-doop-frame-updated-at'))).toBeGreaterThan(0)
++  })
++
++  it('serves it to a signed-in session too', async () => {
++    const res = await owner.get(`/api/frames/${frameId}/html`)
++    expect(res.status).toBe(200)
++    expect(await res.text()).toBe(HTML)
++  })
++
++  it('follows the canvas role: nothing without access, a view link is enough', async () => {
++    expect((await get(`/api/frames/${frameId}/html`, strangerKey)).status).toBe(404)
++    expect((await stranger.get(`/api/frames/${frameId}/html`)).status).toBe(403)
++    expect((await owner.patch(`/api/canvases/${canvasId}`, { linkAccess: 'view' })).status).toBe(200)
++    try {
++      const res = await get(`/api/frames/${frameId}/html`, strangerKey)
++      expect(res.status).toBe(200)
++      expect(await res.text()).toBe(HTML)
++    } finally {
++      await owner.patch(`/api/canvases/${canvasId}`, { linkAccess: 'none' })
++    }
++    expect((await get(`/api/frames/${frameId}/html`, strangerKey)).status).toBe(404)
++  })
++
++  it('refuses unknown, revoked and banned keys, and anonymous requests', async () => {
++    expect((await get(`/api/frames/${frameId}/html`)).status).toBe(401)
++    expect((await get(`/api/frames/${frameId}/html`, 'dpk_' + 'x'.repeat(32))).status).toBe(401)
++    expect((await get(`/api/frames/nope/html`, ownerKey)).status).toBe(404)
++
++    const revoked = await (await owner.post('/api/agent-keys', { name: 'gone' })).json()
++    expect((await owner.delete(`/api/agent-keys/${revoked.id}`)).status).toBe(200)
++    expect((await get(`/api/frames/${frameId}/html`, revoked.secret)).status).toBe(401)
++
++    const banned = new Client(server)
++    await banned.signUp('html-banned@test.dev', 'Banned')
++    const key = (await (await banned.post('/api/agent-keys', { name: 'k' })).json()).secret
++    const ban = await fetch(`${server.base}/api/operator/users/html-banned@test.dev/ban`, {
++      method: 'POST',
++      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
++      body: JSON.stringify({ reason: 'test' }),
++    })
++    expect(ban.status).toBe(200)
++    expect((await get(`/api/frames/${frameId}/html`, key)).status).toBe(403)
++  })
++
++  it('is read-only: an agent key reaches no other /api route', async () => {
++    const res = await fetch(`${server.base}/api/frames/${frameId}`, {
++      method: 'PATCH',
++      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ownerKey}` },
++      body: JSON.stringify({ html: '<p>x</p>' }),
++    })
++    expect(res.status).toBe(401)
++    expect((await get(`/api/canvases/${canvasId}`, ownerKey)).status).toBe(401)
++  })
++})

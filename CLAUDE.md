@@ -67,7 +67,7 @@ post-release hook come from `.env.local` (`.env.example` lists them and their de
 ## bin/doopctl
 
 Manages a running doop through its operator API (`/api/operator`, our `feat(operator)` patch):
-accounts, canvas sharing, canvas owners and agent keys. `bin/doopctl --help` lists everything.
+accounts, canvas sharing, canvas owners, agent keys and webhooks. `bin/doopctl --help` lists everything.
 
     bin/doopctl users                              # accounts
     bin/doopctl users create <email> [--name N]    # works while sign-up is closed; prints a password once
@@ -75,6 +75,13 @@ accounts, canvas sharing, canvas owners and agent keys. `bin/doopctl --help` lis
     bin/doopctl share add <canvas> <email>...      # members (accounts must exist)
     bin/doopctl share link <canvas> none|view|comment|review|edit [--password-stdin | --no-password]
     bin/doopctl keys create <email> <name>         # MCP agent key; secret printed once
+    bin/doopctl webhooks <email>                   # an account's webhooks
+    bin/doopctl webhooks create <email> <url> [<canvas>...] [--events E,…|all]  # secret printed once
+    bin/doopctl webhooks enable|disable|test|delete <email> <id>
+
+An agent key is also how a script reads a frame's HTML: `GET /api/frames/:id/html` with
+`Authorization: Bearer dpk_…` (view role; our `feat(api)` patch). Agents start comment threads
+over MCP with `add_comment` (`feat(mcp)`).
 
 - **Talks to the server, never the database.** Canvas members, owners and link access live in
   the server's memory with write-through, so a direct database write is lost or ignored.
