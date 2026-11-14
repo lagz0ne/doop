@@ -49,13 +49,12 @@ import {
  * and you. The page decides what each may do and passes null for what this
  * person is not offered.
  *
- * On a phone (`phone`) the same dock holds what reviewing needs within a
- * thumb's reach, at the 40px touch size and no wider than a 320px screen:
- * back, Hand, Comment and the tool list (a tool picked from it takes the
- * list's button), the Comments sheet (whose tabs hold AI activity), Pages
- * and layers, and ••• for the rest (the canvas actions sheet: its name,
- * import, export, share, Connect AI, settings). Pinching zooms; the zoom
- * pill floats above it.
+ * On a phone (`phone`) the canvas is review-only (State.reviewOnly) and the
+ * same dock holds what reviewing needs within a thumb's reach, at the 40px
+ * touch size: back, Hand, Comment, the Comments sheet (whose tabs hold AI
+ * activity), Pages and layers, and ••• for the rest (the canvas actions
+ * sheet: its name, export, share, settings). No tool list: every other tool
+ * edits. Pinching zooms; the zoom pill floats above it.
  */
 export function CanvasDock(props: DockProps & { phone?: false }): ReactNode
 export function CanvasDock(props: PhoneDockProps & { phone: true }): ReactNode
@@ -268,8 +267,8 @@ function DesktopDock({
 }
 
 /** Hand, Comment and Prototype mode, as the rail's foot had them, and every
- *  other tool in a list that opens upwards. A phone has no room for the
- *  Prototype button; the list holds it there, and its opener is narrower. */
+ *  other tool in a list that opens upwards. A phone reviews, so it gets the
+ *  Hand and Comment alone. */
 function DockTools({ phone = false }: { phone?: boolean }) {
   const t = useT()
   const tool = useStore((s) => s.tool)
@@ -305,52 +304,53 @@ function DockTools({ phone = false }: { phone?: boolean }) {
           {TOOL_ICONS.comment}
         </ToolbarControl>
       )}
+      {/* a phone stops here: the rest is for editing */}
       {!phone && (
-        <ToolbarControl
-          side="top"
-          label={t('stage.modePrototype')}
-          aria-pressed={prototypeMode}
-          className={pressed}
-          onClick={() => useStore.getState().setPrototypeMode(!prototypeMode)}
-        >
-          <PrototypeModeIcon />
-        </ToolbarControl>
+        <>
+          <ToolbarControl
+            side="top"
+            label={t('stage.modePrototype')}
+            aria-pressed={prototypeMode}
+            className={pressed}
+            onClick={() => useStore.getState().setPrototypeMode(!prototypeMode)}
+          >
+            <PrototypeModeIcon />
+          </ToolbarControl>
+          {/* a tool picked from the list shows here, so the current one is always in view */}
+          {picked && (
+            <ToolbarControl side="top" label={label(tool)} aria-pressed className={pressed}>
+              {TOOL_ICONS[tool]}
+            </ToolbarControl>
+          )}
+          <DropdownMenu>
+            <Tooltip label={t('stage.moreTools')} side="top">
+              <DropdownMenuTrigger asChild>
+                <ToolbarButton
+                  aria-label={t('stage.moreTools')}
+                  className={cn('data-[state=open]:bg-paper-deep', pressed)}
+                >
+                  <ChevronDownIcon className={cn('rotate-180')} />
+                </ToolbarButton>
+              </DropdownMenuTrigger>
+            </Tooltip>
+            <DropdownMenuContent side="top" align="start" width="sm">
+              {listed.map((entry) => (
+                <DropdownMenuItem key={entry.id} onSelect={() => setTool(entry.id)}>
+                  {TOOL_ICONS[entry.id]}
+                  {t(entry.label)}
+                  {tool === entry.id ? <CheckIcon size="rail" className="ml-auto" /> : <MenuHint>{entry.key}</MenuHint>}
+                </DropdownMenuItem>
+              ))}
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => useStore.getState().setPrototypeMode(!prototypeMode)}>
+                <PrototypeModeIcon size="rail" />
+                {t('stage.modePrototypeShort')}
+                {prototypeMode && <CheckIcon size="rail" className="ml-auto" />}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </>
       )}
-      {/* a tool picked from the list shows here, so the current one is always in view; on a phone it
-          takes the list's own button instead, so the dock keeps its width */}
-      {!phone && picked && (
-        <ToolbarControl side="top" label={label(tool)} aria-pressed className={pressed}>
-          {TOOL_ICONS[tool]}
-        </ToolbarControl>
-      )}
-      <DropdownMenu>
-        <Tooltip label={t('stage.moreTools')} side="top">
-          <DropdownMenuTrigger asChild>
-            <ToolbarButton
-              aria-label={phone && picked ? label(tool) : t('stage.moreTools')}
-              aria-pressed={phone && picked ? true : undefined}
-              className={cn('data-[state=open]:bg-paper-deep', pressed, phone && !picked && 'min-w-7 px-0')}
-            >
-              {phone && picked ? TOOL_ICONS[tool] : <ChevronDownIcon className={cn('rotate-180')} />}
-            </ToolbarButton>
-          </DropdownMenuTrigger>
-        </Tooltip>
-        <DropdownMenuContent side="top" align="start" width="sm">
-          {listed.map((entry) => (
-            <DropdownMenuItem key={entry.id} onSelect={() => setTool(entry.id)}>
-              {TOOL_ICONS[entry.id]}
-              {t(entry.label)}
-              {tool === entry.id ? <CheckIcon size="rail" className="ml-auto" /> : <MenuHint>{entry.key}</MenuHint>}
-            </DropdownMenuItem>
-          ))}
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => useStore.getState().setPrototypeMode(!prototypeMode)}>
-            <PrototypeModeIcon size="rail" />
-            {t('stage.modePrototypeShort')}
-            {prototypeMode && <CheckIcon size="rail" className="ml-auto" />}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
     </>
   )
 }

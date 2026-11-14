@@ -71,6 +71,11 @@ interface State {
   selectedId: string | null
   /** the active canvas tool in the bottom toolbar */
   tool: Tool
+  /** a phone in the reviewer layout: the canvas is for reviewing there, so
+   *  the caller's role counts as review at most (roleOf) and only the Hand
+   *  and the Comment tool are offered. Nothing here is a permission: the
+   *  server's role is untouched and still enforced. */
+  reviewOnly: boolean
   /** space bar held: the stage pans on drag instead of drawing a marquee */
   panMode: boolean
   /** a file is being dragged over the page: every frame keeps its shield up,
@@ -274,6 +279,7 @@ interface State {
   setLayersTab(tab: 'layers' | 'components' | 'tokens'): void
   toggleUiHidden(): void
   setPrototypeMode(on: boolean): void
+  setReviewOnly(on: boolean): void
   setViewport(v: Viewport): void
   setSnapGuides(guides: SnapGuide[]): void
   toggleRulers(): void
@@ -332,6 +338,7 @@ export const useStore = create<State>((set, get) => ({
   selectedIds: [],
   selectedId: null,
   tool: 'select',
+  reviewOnly: false,
   panMode: false,
   fileDragging: false,
   inspectorOpen: false,
@@ -669,7 +676,8 @@ export const useStore = create<State>((set, get) => ({
         : { selectedIds: ids, selectedId, inspectorOpen: false, selectedElement: null, elementPanelOpen: false }
     })
   },
-  setTool: (tool) => set((s) => (toolAllowed(tool, roleOf(s)) ? { tool } : {})),
+  setTool: (tool) =>
+    set((s) => (toolAllowed(tool, roleOf(s)) && (!s.reviewOnly || REVIEW_TOOLS.has(tool)) ? { tool } : {})),
   setRole: (role) =>
     set((s) => {
       if (!s.canvas) return {}
@@ -748,6 +756,14 @@ export const useStore = create<State>((set, get) => ({
   /* hidden guides cannot stay selected: Delete would remove one unseen */
   toggleUiHidden: () => set((s) => ({ uiHidden: !s.uiHidden, ...(s.uiHidden ? {} : { selectedGuideId: null }) })),
   setPrototypeMode: (prototypeMode) => set({ prototypeMode }),
+  /* entering it puts away whatever editing was under way: a tool other than
+     the Hand or Comment, and Prototype mode's connectors */
+  setReviewOnly: (reviewOnly) =>
+    set((s) =>
+      reviewOnly
+        ? { reviewOnly, prototypeMode: false, ...(REVIEW_TOOLS.has(s.tool) ? {} : { tool: 'hand' as const }) }
+        : { reviewOnly },
+    ),
   /* every ordinary camera move (pan, zoom, fit, fly-to) is ours, so it ends a follow */
   setViewport: (viewport) => set({ viewport, following: null }),
   /* fires on every pointermove during a drag — skip the no-op transitions
@@ -821,24 +837,35 @@ export function pickedSelectors(s: Pick<State, 'selectedElement' | 'selectedElem
   return s.selectedElements.at(-1) === primary ? s.selectedElements : [primary]
 }
 
-/** The caller's role on the open canvas. A canvas without one (an older
- *  server) is treated as editable; the server enforces it either way. */
-export function roleOf(s: Pick<State, 'canvas'>): CanvasRole {
+/** The role the server gave the caller on the open canvas. A canvas without
+ *  one (an older server) is treated as editable; the server enforces it
+ *  either way. */
+export function grantedRole(s: Pick<State, 'canvas'>): CanvasRole {
   return s.canvas?.role ?? 'edit'
 }
 
+/** The tools a review-only canvas offers (State.reviewOnly). */
+const REVIEW_TOOLS: ReadonlySet<Tool> = new Set<Tool>(['hand', 'comment'])
+
+/** The role the UI works with: the granted one, capped at review while the
+ *  canvas is review-only (a phone), so every edit stays out of reach. */
+export function roleOf(s: Pick<State, 'canvas'> & { reviewOnly?: boolean }): CanvasRole {
+  const role = grantedRole(s)
+  return s.reviewOnly && roleAllows(role, 'edit') ? 'review' : role
+}
+
 /** May the caller change the open canvas? View and comment links may not. */
-export function canEditOpenCanvas(s: Pick<State, 'canvas'>): boolean {
+export function canEditOpenCanvas(s: Pick<State, 'canvas'> & { reviewOnly?: boolean }): boolean {
   return roleAllows(roleOf(s), 'edit')
 }
 
 /** May the caller comment on the open canvas? */
 /** May the caller give a frame its verdict (approve, request changes)? */
-export function canReviewOpenCanvas(s: Pick<State, 'canvas'>): boolean {
+export function canReviewOpenCanvas(s: Pick<State, 'canvas'> & { reviewOnly?: boolean }): boolean {
   return roleAllows(roleOf(s), 'review')
 }
 
-export function canCommentOpenCanvas(s: Pick<State, 'canvas'>): boolean {
+export function canCommentOpenCanvas(s: Pick<State, 'canvas'> & { reviewOnly?: boolean }): boolean {
   return roleAllows(roleOf(s), 'comment')
 }
 

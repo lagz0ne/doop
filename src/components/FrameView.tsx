@@ -24,6 +24,7 @@ import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type H
 import { snapFrame } from '../lib/snap'
 import { visibleGuides } from '../lib/guides'
 import { gesture } from '../lib/gesture'
+import { useTouchHold } from '../lib/touchHold'
 import { resolvePointerAction } from '../lib/tools'
 import { FrameContextMenu } from './FrameContextMenu'
 import { FrameApprovalBadge } from './FrameApproval'
@@ -292,6 +293,8 @@ export const FrameView = memo(function FrameView({
      moved, resized or edited — the server refuses those writes anyway */
   const readOnly = useStore((s) => !canEditOpenCanvas(s))
   const select = useStore((s) => s.select)
+  /* a long touch press opens the frame's menu, later than Radix would */
+  const hold = useTouchHold()
   const flash = useStore((s) => s.flashes[frame.id])
   const stream = useStore((s) => s.streams[frame.id])
   /* select the stable presences map, derive in render — a selector that
@@ -365,17 +368,33 @@ export const FrameView = memo(function FrameView({
     if (action === 'comment') {
       /* the Comment tool: no drag — the frame is selected and a click on its
          surface opens the composer on the element under the pointer */
+      const comment = () => {
+        if (!useStore.getState().selectedIds.includes(frame.id)) select(frame.id)
+        /* on the frame's name, a comment on the frame as a whole: the one a
+           frame filled edge to edge by its layers leaves no background for */
+        if (probeOnClick) probeAt(at.x, at.y, 'comment')
+        else if (panelOnClick) commentOnFrame()
+      }
+      const at = designOffset(e, frame.rotation)
+      /* by finger it is a tap that comments: the press goes on to the Stage,
+         which pans a finger that moves, and the comment opens on a release
+         in place (as on the empty canvas), never after a pan or a pinch */
+      if (e.pointerType === 'touch') {
+        const { pointerId, clientX, clientY } = e
+        const onUp = (ev: PointerEvent) => {
+          if (ev.pointerId !== pointerId) return
+          window.removeEventListener('pointerup', onUp)
+          window.removeEventListener('pointercancel', onUp)
+          const still = Math.abs(ev.clientX - clientX) + Math.abs(ev.clientY - clientY) <= 6
+          if (ev.type === 'pointerup' && still && !gesture.pinching && gesture.held !== pointerId) comment()
+        }
+        window.addEventListener('pointerup', onUp)
+        window.addEventListener('pointercancel', onUp)
+        return
+      }
       e.stopPropagation()
       e.preventDefault()
-      if (!s.selectedIds.includes(frame.id)) select(frame.id)
-      if (probeOnClick) {
-        const at = designOffset(e, frame.rotation)
-        probeAt(at.x, at.y, 'comment')
-      } else if (panelOnClick) {
-        /* the frame's name: a comment on the frame as a whole, the one a
-           frame filled edge to edge by its layers leaves no background for */
-        commentOnFrame()
-      }
+      comment()
       return
     }
     /* a locked frame is not the stage's to select, move or resize: the press
@@ -1693,10 +1712,13 @@ export const FrameView = memo(function FrameView({
           }
           /* stop the event here so the Stage's background menu — whose trigger
          wraps this one — does not open a second menu behind ours */
+          onPointerDown={hold.onPointerDown}
           onContextMenu={(e) => {
             /* stop here so the Stage's background trigger, which wraps this
                one, does not open a second menu behind ours */
             e.stopPropagation()
+            /* a finger opens it by holding (useTouchHold), not the browser's long press */
+            if (hold.blocks(e)) return
             menuAt.current = { x: e.clientX, y: e.clientY }
             const target = e.target as HTMLElement
             const request = ++menuRequest.current
