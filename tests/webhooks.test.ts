@@ -26,10 +26,11 @@ vi.mock('../server/db/index.ts', () => {
 })
 vi.mock('../server/access.ts', () => ({ hasDurableCanvasAccess: mocks.access }))
 vi.mock('../server/store.ts', () => ({
-  store: { getCanvas: (id: string) => (id === 'c1' ? CANVAS : undefined) },
+  store: { getCanvas: (id: string) => (id === 'c1' ? CANVAS : id === 'c2' ? CANVAS2 : undefined) },
 }))
 
 const CANVAS: Canvas = { id: 'c1', name: 'Landing', ownerId: 'alice', createdAt: 0, updatedAt: 0, frames: [] }
+const CANVAS2: Canvas = { ...CANVAS, id: 'c2', name: 'Pricing' }
 const FRAME: Frame = {
   id: 'f1',
   canvasId: 'c1',
@@ -153,6 +154,28 @@ describe('registry', () => {
     await expect(register('alice', ['comment.created'], 'http://localhost/')).rejects.toThrow(/private/)
   })
 
+  it('limits a hook to canvases its owner can open, and lets the list change', async () => {
+    const { info } = await webhooks.createWebhook('alice', {
+      url: 'https://hooks.example.com/doop',
+      events: ['comment.created'],
+      canvasIds: ['c1', ' c1 ', ''],
+    })
+    expect(info.canvasIds).toEqual(['c1'])
+    expect((await register()).info.canvasIds).toEqual([])
+    const hook = (canvasIds: unknown) =>
+      webhooks.createWebhook('alice', { url: 'https://hooks.example.com/doop', events: ['comment.created'], canvasIds })
+    await expect(hook(['nope'])).rejects.toThrow(/no canvas nope/)
+    mocks.access.mockImplementation((_userId, canvas) => (canvas as Canvas).id === 'c1')
+    await expect(hook(['c1', 'c2'])).rejects.toBeInstanceOf(webhooks.WebhookInputError)
+    await expect(hook(Array.from({ length: webhooks.MAX_WEBHOOK_CANVASES + 1 }, (_, i) => `c${i}`))).rejects.toThrow(
+      /up to/,
+    )
+    mocks.access.mockReturnValue(true)
+    expect((await webhooks.updateWebhook('alice', info.id, { canvasIds: ['c2'] }))?.canvasIds).toEqual(['c2'])
+    expect((await webhooks.updateWebhook('alice', info.id, { enabled: false }))?.canvasIds).toEqual(['c2'])
+    expect((await webhooks.updateWebhook('alice', info.id, { canvasIds: [] }))?.canvasIds).toEqual([])
+  })
+
   it('caps the number of hooks per account, also under concurrent requests', async () => {
     const results = await Promise.allSettled(Array.from({ length: webhooks.MAX_WEBHOOKS + 3 }, () => register()))
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(webhooks.MAX_WEBHOOKS)
@@ -237,6 +260,8 @@ describe('delivery', () => {
     expect(payload.canvas).toEqual({ id: 'c1', name: 'Landing', url: 'http://localhost:4300/c/c1' })
     expect(payload.actor).toEqual({ name: 'Alice', kind: 'user' })
     expect(payload.comment.url).toBe('http://localhost:4300/c/c1?frame=f1&comment=cm1')
+    /* the element the comment is pinned to, by its data-doop-id and its markup */
+    expect(payload.comment).toMatchObject({ frameId: 'f1', elementId: 'h1h1h1', snippet: '<h1>Hi</h1>' })
     expect(payload.frame).not.toHaveProperty('html')
   })
 
@@ -250,6 +275,34 @@ describe('delivery', () => {
     webhooks.onCanvasEvent('c1', { type: 'comment.created', comment: COMMENT, frame: FRAME, actorKind: 'user' })
     await vi.advanceTimersByTimeAsync(0)
     expect(mocks.fetch.mock.calls.map(([u]) => u)).toEqual(['https://hooks.example.com/doop'])
+  })
+
+  it('a hook that lists canvases hears only those', async () => {
+    await webhooks.createWebhook('alice', {
+      url: 'https://landing.example.com/',
+      events: ['comment.created'],
+      canvasIds: ['c1'],
+    })
+    await webhooks.createWebhook('alice', {
+      url: 'https://pricing.example.com/',
+      events: ['comment.created'],
+      canvasIds: ['c2'],
+    })
+    await register('alice', ['comment.created'], 'https://all.example.com/')
+    const event = { type: 'comment.created', comment: COMMENT, frame: FRAME, actorKind: 'agent' } as const
+    webhooks.onCanvasEvent('c1', event)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mocks.fetch.mock.calls.map(([u]) => u).sort()).toEqual([
+      'https://all.example.com/',
+      'https://landing.example.com/',
+    ])
+    mocks.fetch.mockClear()
+    webhooks.onCanvasEvent('c2', { ...event, comment: { ...COMMENT, canvasId: 'c2' } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mocks.fetch.mock.calls.map(([u]) => u).sort()).toEqual([
+      'https://all.example.com/',
+      'https://pricing.example.com/',
+    ])
   })
 
   it('retries a failed delivery on the schedule, then records the success', async () => {
@@ -378,12 +431,20 @@ describe('payloads', () => {
       webhooks.payloadFor({ type: 'comment.replied', comment: reply, frame: FRAME, actorKind: 'agent' }),
     ).toMatchObject({ comment: { parentId: 'cm1', url: 'http://localhost:4300/c/c1?frame=f1&comment=cm1' } })
     /* a comment pinned to the canvas: page and point instead of a frame */
-    const { frameId: _frameId, ...rest } = COMMENT
+    const { frameId: _frameId, elementId: _elementId, ...rest } = COMMENT
     const onCanvas = { ...rest, id: 'cm2', pageId: 'p1', x: 820, y: 240, selector: '', snippet: '' }
     expect(
       webhooks.payloadFor({ type: 'comment.created', comment: onCanvas, frame: undefined, actorKind: 'user' }),
     ).toMatchObject({
-      comment: { frameId: null, pageId: 'p1', x: 820, y: 240, url: 'http://localhost:4300/c/c1?page=p1&comment=cm2' },
+      comment: {
+        frameId: null,
+        elementId: null,
+        snippet: null,
+        pageId: 'p1',
+        x: 820,
+        y: 240,
+        url: 'http://localhost:4300/c/c1?page=p1&comment=cm2',
+      },
       frame: null,
     })
   })

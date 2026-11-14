@@ -23,7 +23,8 @@ import type { AgentTask, Canvas, ElementComment, Frame } from '../shared/types.t
  * A person registers a URL and the events they care about; doop POSTs each
  * matching event on every canvas that person durably has access to (owner,
  * invited member, workspace member — the same rule as design-sync keys, so
- * a share-link visit never subscribes anyone to a canvas for good).
+ * a share-link visit never subscribes anyone to a canvas for good), or only
+ * on the canvases the hook lists.
  *
  * Deliveries are signed (X-Doop-Signature, HMAC-SHA256 over
  * `<timestamp>.<body>` with the hook's secret) and retried a few times from
@@ -39,6 +40,7 @@ import type { AgentTask, Canvas, ElementComment, Frame } from '../shared/types.t
  */
 
 export const MAX_WEBHOOKS = 10
+export const MAX_WEBHOOK_CANVASES = 50
 export const RETRY_DELAYS_MS = [10_000, 60_000, 5 * 60_000]
 export const DISABLE_AFTER_FAILURES = 100
 export const TIMEOUT_MS = 10_000
@@ -70,9 +72,17 @@ function normalizeEvents(list: unknown): WebhookEventType[] {
   return [...new Set(list.filter((e): e is WebhookEventType => typeof e === 'string' && known.has(e)))]
 }
 
+function normalizeIds(list: unknown): string[] {
+  if (!Array.isArray(list)) return []
+  return [
+    ...new Set(list.filter((id): id is string => typeof id === 'string' && id.trim() !== '').map((id) => id.trim())),
+  ]
+}
+
 export async function hydrateWebhooks(): Promise<void> {
   hooks.clear()
-  for (const row of await db.select().from(table)) hooks.set(row.id, { ...row, events: normalizeEvents(row.events) })
+  for (const row of await db.select().from(table))
+    hooks.set(row.id, { ...row, events: normalizeEvents(row.events), canvasIds: normalizeIds(row.canvasIds) })
 }
 
 /* ------------------------------------------------------------------ */
@@ -172,7 +182,23 @@ export function listWebhooks(userId: string): WebhookInfo[] {
     .map(info)
 }
 
-async function checkedInput(input: { url?: string; events?: unknown }) {
+/** A canvas list is checked against what the owner can open now: a hook
+ *  may only narrow what it receives, never name a canvas it could not get. */
+function checkedCanvases(userId: string, list: unknown): string[] {
+  const ids = normalizeIds(list)
+  if (ids.length > MAX_WEBHOOK_CANVASES)
+    throw new WebhookInputError(
+      `a webhook can name up to ${MAX_WEBHOOK_CANVASES} canvases — leave the list empty for all`,
+    )
+  for (const id of ids) {
+    const canvas = store.getCanvas(id)
+    if (!canvas || !hasDurableCanvasAccess(userId, canvas))
+      throw new WebhookInputError(`no canvas ${id} that this account belongs to`)
+  }
+  return ids
+}
+
+async function checkedInput(userId: string, input: { url?: string; events?: unknown; canvasIds?: unknown }) {
   const url = input.url?.trim()
   if (url !== undefined) {
     const problem = await targetProblem(url)
@@ -180,7 +206,8 @@ async function checkedInput(input: { url?: string; events?: unknown }) {
   }
   const events = input.events === undefined ? undefined : normalizeEvents(input.events)
   if (events && !events.length) throw new WebhookInputError('pick at least one event')
-  return { url, events }
+  const canvasIds = input.canvasIds === undefined ? undefined : checkedCanvases(userId, input.canvasIds)
+  return { url, events, canvasIds }
 }
 
 /* Creates for one account run one at a time: the per-account cap is checked
@@ -203,18 +230,18 @@ function serialized<T>(key: string, work: () => Promise<T>): Promise<T> {
  *  leaves the running server and the database agreeing. */
 export function createWebhook(
   userId: string,
-  input: { url: string; events: unknown },
+  input: { url: string; events: unknown; canvasIds?: unknown },
 ): Promise<{ info: WebhookInfo; secret: string }> {
   return serialized(userId, () => insertWebhook(userId, input))
 }
 
 async function insertWebhook(
   userId: string,
-  input: { url: string; events: unknown },
+  input: { url: string; events: unknown; canvasIds?: unknown },
 ): Promise<{ info: WebhookInfo; secret: string }> {
   if (listWebhooks(userId).length >= MAX_WEBHOOKS)
     throw new WebhookInputError(`you can have ${MAX_WEBHOOKS} webhooks — remove one you no longer use`)
-  const { url, events } = await checkedInput(input)
+  const { url, events, canvasIds } = await checkedInput(userId, input)
   if (!url || !events) throw new WebhookInputError('a URL and at least one event are required')
   const hook: WebhookRecord = {
     id: nanoid(10),
@@ -222,6 +249,7 @@ async function insertWebhook(
     url,
     secret: `whsec_${nanoid(32)}`,
     events,
+    canvasIds: canvasIds ?? [],
     enabled: true,
     createdAt: Date.now(),
     lastStatus: null,
@@ -237,16 +265,17 @@ async function insertWebhook(
 export async function updateWebhook(
   userId: string,
   id: string,
-  patch: { url?: string; events?: unknown; enabled?: boolean },
+  patch: { url?: string; events?: unknown; canvasIds?: unknown; enabled?: boolean },
 ): Promise<WebhookInfo | undefined> {
   const hook = owned(userId, id)
   if (!hook) return undefined
-  const { url, events } = await checkedInput(patch)
+  const { url, events, canvasIds } = await checkedInput(userId, patch)
   /* only the fields asked for: a delivery that pauses the hook while this
      write is in flight must not be undone by a stale copy of its health */
-  const next: Partial<Pick<WebhookRecord, 'url' | 'events' | 'enabled' | 'failures' | 'lastError'>> = {}
+  const next: Partial<Pick<WebhookRecord, 'url' | 'events' | 'canvasIds' | 'enabled' | 'failures' | 'lastError'>> = {}
   if (url !== undefined) next.url = url
   if (events) next.events = events
+  if (canvasIds) next.canvasIds = canvasIds
   if (patch.enabled !== undefined) {
     next.enabled = patch.enabled
     /* switching a paused hook back on is a fresh start for its health */
@@ -284,8 +313,12 @@ export async function rotateWebhookSecret(userId: string, id: string): Promise<s
 function publicComment(c: ElementComment) {
   return {
     id: c.id,
-    /* an element comment names its frame; a canvas comment its page and point */
+    /* an element comment names its frame and element (the data-doop-id in
+       the frame HTML, and the element's markup as it was); a frame comment
+       its frame; a canvas comment its page and point */
     frameId: c.frameId ?? null,
+    elementId: c.elementId ?? null,
+    snippet: c.snippet || null,
     pageId: c.pageId ?? null,
     x: c.x ?? null,
     y: c.y ?? null,
@@ -447,6 +480,12 @@ function record(hook: WebhookRecord, ticket: number, result: WebhookDeliveryResu
   )
 }
 
+/** Whether this hook takes events from this canvas at all: its owner can
+ *  open it, and the hook lists it or lists none. */
+function coversCanvas(hook: WebhookRecord, canvas: Canvas): boolean {
+  return (!hook.canvasIds.length || hook.canvasIds.includes(canvas.id)) && hasDurableCanvasAccess(hook.userId, canvas)
+}
+
 /** Whether an event on this canvas is still this hook's to receive: not
  *  deleted or paused meanwhile, and its owner can still open the canvas.
  *  Asked right before every POST, first attempt included, and before every
@@ -454,7 +493,7 @@ function record(hook: WebhookRecord, ticket: number, result: WebhookDeliveryResu
 function stillDeliverable(hook: WebhookRecord, canvasId: string): boolean {
   if (hooks.get(hook.id) !== hook || !hook.enabled) return false
   const canvas = store.getCanvas(canvasId)
-  return !!canvas && hasDurableCanvasAccess(hook.userId, canvas)
+  return !!canvas && coversCanvas(hook, canvas)
 }
 
 async function send(
@@ -476,13 +515,14 @@ async function send(
 }
 
 /** The canvas event bus listener: fan an event out to every hook that
- *  subscribed to it and whose owner durably has access to the canvas. */
+ *  subscribed to it, covers the canvas, and whose owner durably has access
+ *  to it. */
 export function onCanvasEvent(canvasId: string, event: CanvasEvent): void {
   if (!hooks.size) return
   const canvas = store.getCanvas(canvasId)
   if (!canvas) return
   const targets = [...hooks.values()].filter(
-    (h) => h.enabled && h.events.includes(event.type) && hasDurableCanvasAccess(h.userId, canvas),
+    (h) => h.enabled && h.events.includes(event.type) && coversCanvas(h, canvas),
   )
   if (!targets.length) return
   const body = deliveryBody(canvas, event)

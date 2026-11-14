@@ -17,10 +17,20 @@ import {
 export const webhooksRouter = Router()
 
 const events = z.array(z.enum(WEBHOOK_EVENTS)).min(1)
-const createSchema = z.object({ url: z.string().trim().min(1), events })
-const patchSchema = z
-  .object({ url: z.string().trim().min(1).optional(), events: events.optional(), enabled: z.boolean().optional() })
-  .refine((p) => p.url !== undefined || p.events !== undefined || p.enabled !== undefined, 'nothing to change')
+/* empty = every canvas; webhooks.ts checks each id against the owner's access */
+const canvasIds = z.array(z.string().trim().min(1).max(64))
+export const createSchema = z.object({ url: z.string().trim().min(1), events, canvasIds: canvasIds.optional() })
+export const patchSchema = z
+  .object({
+    url: z.string().trim().min(1).optional(),
+    events: events.optional(),
+    canvasIds: canvasIds.optional(),
+    enabled: z.boolean().optional(),
+  })
+  .refine(
+    (p) => p.url !== undefined || p.events !== undefined || p.canvasIds !== undefined || p.enabled !== undefined,
+    'nothing to change',
+  )
 
 /** User-input problems become a 400 with the message; everything else is a 500. */
 type Req = Request<{ id: string }>

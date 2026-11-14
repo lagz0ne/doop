@@ -27,6 +27,8 @@ export interface WebhookInfo {
   id: string
   url: string
   events: WebhookEventType[]
+  /** the canvases it fires for; empty = every canvas its owner can open */
+  canvasIds: string[]
   enabled: boolean
   createdAt: number
   /** HTTP status of the last delivery attempt; null = no response (network, timeout, refused) */

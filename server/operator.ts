@@ -9,13 +9,22 @@ import { store } from './store.ts'
 import { auth, createdByOperator } from './auth.ts'
 import { purgeUserData } from './accountDeletion.ts'
 import { createAgentKey, deleteAgentKey, listAgentKeys } from './agentKeys.ts'
+import {
+  WebhookInputError,
+  createWebhook,
+  deleteWebhook,
+  listWebhooks,
+  testWebhook,
+  updateWebhook,
+} from './webhooks.ts'
+import { createSchema, patchSchema } from './webhookRoutes.ts'
 import { isLinkAccess } from '../shared/canvasRole.ts'
 import { setLinkPassword, validLinkPassword } from './shareLink.ts'
 import { isShadowEmail } from './embed.ts'
 import type { Canvas } from '../shared/types.ts'
 
 /**
- * The operator API: users, sharing, canvases and agent keys for whoever runs
+ * The operator API: users, sharing, canvases, agent keys and webhooks for whoever runs
  * this instance, driven by a CLI (doopctl) rather than a browser.
  *
  * It answers only a bearer DOOP_ADMIN_TOKEN, and is not there at all (404)
@@ -115,6 +124,7 @@ export function operatorRouter(refreshRoomRoles: Refresh): express.Router {
   const get = (path: string, fn: Handler) => router.get(path, wrap(fn))
   const post = (path: string, fn: Handler) => router.post(path, wrap(fn))
   const put = (path: string, fn: Handler) => router.put(path, wrap(fn))
+  const patch = (path: string, fn: Handler) => router.patch(path, wrap(fn))
   const del = (path: string, fn: Handler) => router.delete(path, wrap(fn))
 
   /* the token gate: absent token = no surface at all */
@@ -273,6 +283,71 @@ export function operatorRouter(refreshRoomRoles: Refresh): express.Router {
     if (!u) return res.status(404).json({ error: 'no such user' })
     if (!(await deleteAgentKey(u.id, param(req, 'keyId')))) return res.status(404).json({ error: 'no such key' })
     audit(`revoked agent key ${param(req, 'keyId')} of ${u.email}`)
+    res.json({ ok: true })
+  })
+
+  /* ------------------------------------------------------------- webhooks */
+
+  /* A user's outbound webhooks, for an instance whose Settings hide the pane
+     (FULL_UI off): the same registry and checks as /api/webhooks, acting as
+     that user. Input problems (a private URL, a canvas they cannot open)
+     come back as a 400 with the reason. */
+  const hookInput = async (res: express.Response, work: () => Promise<unknown>) => {
+    try {
+      return await work()
+    } catch (err) {
+      if (err instanceof WebhookInputError) return res.status(400).json({ error: err.message })
+      throw err
+    }
+  }
+
+  get('/users/:user/webhooks', async (req, res) => {
+    const u = await findUser(param(req, 'user'))
+    if (!u) return res.status(404).json({ error: 'no such user' })
+    res.json(listWebhooks(u.id))
+  })
+
+  /** The signing secret is in this response and nowhere else. */
+  post('/users/:user/webhooks', async (req, res) => {
+    const u = await findUser(param(req, 'user'))
+    if (!u) return res.status(404).json({ error: 'no such user' })
+    const parsed = createSchema.safeParse(req.body)
+    if (!parsed.success) return res.status(400).json({ error: 'a URL and at least one known event are required' })
+    return hookInput(res, async () => {
+      const { info, secret } = await createWebhook(u.id, parsed.data)
+      audit(
+        `created webhook ${info.id} for ${u.email}: ${info.events.join(',')} on ${info.canvasIds.length ? info.canvasIds.join(',') : 'every canvas'}`,
+      )
+      res.status(201).json({ ...info, secret })
+    })
+  })
+
+  patch('/users/:user/webhooks/:hookId', async (req, res) => {
+    const u = await findUser(param(req, 'user'))
+    if (!u) return res.status(404).json({ error: 'no such user' })
+    const parsed = patchSchema.safeParse(req.body)
+    if (!parsed.success) return res.status(400).json({ error: 'invalid webhook change' })
+    return hookInput(res, async () => {
+      const updated = await updateWebhook(u.id, param(req, 'hookId'), parsed.data)
+      if (!updated) return res.status(404).json({ error: 'no such webhook' })
+      audit(`changed webhook ${updated.id} of ${u.email}: ${Object.keys(parsed.data).join(', ')}`)
+      res.json(updated)
+    })
+  })
+
+  post('/users/:user/webhooks/:hookId/test', async (req, res) => {
+    const u = await findUser(param(req, 'user'))
+    if (!u) return res.status(404).json({ error: 'no such user' })
+    const result = await testWebhook(u.id, param(req, 'hookId'))
+    if (!result) return res.status(404).json({ error: 'no such webhook' })
+    res.json(result)
+  })
+
+  del('/users/:user/webhooks/:hookId', async (req, res) => {
+    const u = await findUser(param(req, 'user'))
+    if (!u) return res.status(404).json({ error: 'no such user' })
+    if (!(await deleteWebhook(u.id, param(req, 'hookId')))) return res.status(404).json({ error: 'no such webhook' })
+    audit(`deleted webhook ${param(req, 'hookId')} of ${u.email}`)
     res.json({ ok: true })
   })
 

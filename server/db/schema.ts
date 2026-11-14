@@ -794,6 +794,8 @@ export const webhooks = pgTable(
     secret: sealedText('secret').notNull(),
     /** subscribed event names (shared/webhooks.ts WEBHOOK_EVENTS) */
     events: jsonb('events').$type<string[]>().notNull(),
+    /** the canvases it fires for; empty = every canvas its owner can open */
+    canvasIds: jsonb('canvas_ids').$type<string[]>().notNull().default([]),
     enabled: boolean('enabled').notNull().default(true),
     createdAt: bigint('created_at', { mode: 'number' }).notNull(),
     lastStatus: integer('last_status'),
