@@ -16,3 +16,5 @@
 /perf/base/seed.py
 /perf/probes/
 /paseo.json
+# per-machine Claude Code settings (e.g. which gh account this project uses)
+/.claude/settings.local.json
