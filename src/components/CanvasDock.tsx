@@ -24,6 +24,8 @@ import {
   ExportIcon,
   GearIcon,
   ImportIcon,
+  LayersIcon,
+  MoreHorizontalIcon,
   PlusIcon,
   PrototypeModeIcon,
   ShareUpIcon,
@@ -32,7 +34,7 @@ import {
 } from './ui/icons'
 
 /**
- * The reviewer layout's one bar (FULL_UI off, desktop, floating panels): what
+ * The reviewer layout's one bar (FULL_UI off, floating panels): what
  * the top bar, the tool rail, the zoom pill and the side rail held, along the
  * bottom of the canvas, icons only with their names on hover. Someone who
  * reviews needs the canvas, the Hand to move around it, Comment, and the
@@ -46,8 +48,126 @@ import {
  * right-hand panel on that tab) and Connect AI; the design panel, settings
  * and you. The page decides what each may do and passes null for what this
  * person is not offered.
+ *
+ * On a phone (`phone`) the same dock holds what reviewing needs within a
+ * thumb's reach, at the 40px touch size and no wider than a 320px screen:
+ * back, Hand, Comment and the tool list (a tool picked from it takes the
+ * list's button), the Comments sheet (whose tabs hold AI activity), Pages
+ * and layers, and ••• for the rest (the canvas actions sheet: its name,
+ * import, export, share, Connect AI, settings). Pinching zooms; the zoom
+ * pill floats above it.
  */
-export function CanvasDock({
+export function CanvasDock(props: DockProps & { phone?: false }): ReactNode
+export function CanvasDock(props: PhoneDockProps & { phone: true }): ReactNode
+export function CanvasDock(props: (DockProps & { phone?: false }) | (PhoneDockProps & { phone: true })) {
+  return props.phone ? <PhoneDock {...props} /> : <DesktopDock {...props} />
+}
+
+type PanelProps = {
+  panelTab: PanelTab
+  panelOpen: boolean
+  /** open the right-hand panel on a tab, or close it if it shows that tab */
+  onPanel: ((tab: PanelTab) => void) | null
+}
+
+type PhoneDockProps = PanelProps & {
+  onBack: (() => void) | null
+  /** the Pages and layers sheet */
+  onLayers: () => void
+  /** the canvas actions sheet */
+  onMore: () => void
+}
+
+type DockProps = PanelProps & {
+  title: ReactNode
+  idMenu: ReactNode
+  onBack: (() => void) | null
+  /** receives the element the zoom control is drawn into */
+  zoomSlot: (el: HTMLElement | null) => void
+  me: { name: string; image?: string; color: string }
+  others: Parameters<typeof PeerAvatars>[0]['others']
+  onRenameSelf: (() => void) | null
+  onImport: (() => void) | null
+  onExport: (() => void) | null
+  onConnect: (() => void) | null
+  inspector: { open: boolean; label: string; onToggle: () => void } | null
+  onSettings: (() => void) | null
+  /** the owner's Share dialog (link level and password) */
+  onShare: (() => void) | null
+}
+
+function PhoneDock({ onBack, panelTab, panelOpen, onPanel, onLayers, onMore }: PhoneDockProps) {
+  const t = useT()
+  return (
+    <Toolbar
+      aria-label={t('canvas.dock')}
+      className="pointer-events-auto absolute bottom-[calc(8px+env(safe-area-inset-bottom))] left-1/2 z-[38] max-w-[calc(100%-16px)] -translate-x-1/2 gap-0 overflow-x-auto"
+    >
+      {onBack && (
+        <ToolbarControl side="top" label={t('canvas.allCanvases')} onClick={onBack}>
+          <ChevronLeftIcon />
+        </ToolbarControl>
+      )}
+      <DockTools phone />
+      <ToolbarDivider />
+      {onPanel && <PanelButtons panelTab={panelTab} panelOpen={panelOpen} onPanel={onPanel} aiActivity={false} />}
+      <ToolbarControl side="top" label={t('canvas.layers')} onClick={onLayers}>
+        <LayersIcon />
+      </ToolbarControl>
+      <ToolbarControl side="top" label={t('canvas.canvasActions')} onClick={onMore}>
+        <MoreHorizontalIcon />
+      </ToolbarControl>
+    </Toolbar>
+  )
+}
+
+/** Comments, and AI activity for an editor: each opens the right-hand panel
+ *  (a sheet on a phone) on its tab, with a dot for what is waiting. */
+function PanelButtons({
+  panelTab,
+  panelOpen,
+  onPanel,
+  aiActivity = true,
+}: Omit<PanelProps, 'onPanel'> & {
+  onPanel: (tab: PanelTab) => void
+  /** off on a phone, where the panel's sheet has its own AI activity tab */
+  aiActivity?: boolean
+}) {
+  const t = useT()
+  const openThreads = useOpenThreadCount()
+  const working = useStore((s) => s.tasks.filter((x) => x.agentName && !x.endedAt && !x.failedAt).length)
+  /* a viewer or commenter's panel is Comments alone (ActivityPanel) */
+  const canEdit = useStore(canEditOpenCanvas)
+  const showing = (tab: PanelTab) => panelOpen && panelTab === tab
+  return (
+    <>
+      <ToolbarControl
+        side="top"
+        label={openThreads ? t('canvas.commentsOpen', { open: openThreads }) : t('canvas.comments')}
+        aria-pressed={showing('comments')}
+        className="aria-pressed:bg-paper-deep aria-pressed:text-ink"
+        onClick={() => onPanel('comments')}
+      >
+        <CommentIcon />
+        {openThreads > 0 && <ToolbarDot className="bg-brand" />}
+      </ToolbarControl>
+      {aiActivity && canEdit && (
+        <ToolbarControl
+          side="top"
+          label={working ? t('canvas.agentsWorking', { working }) : t('canvas.aiActivity')}
+          aria-pressed={showing('tasks')}
+          className="aria-pressed:bg-paper-deep aria-pressed:text-ink"
+          onClick={() => onPanel('tasks')}
+        >
+          <SparkIcon />
+          {working > 0 && <ToolbarDot className="bg-success" />}
+        </ToolbarControl>
+      )}
+    </>
+  )
+}
+
+function DesktopDock({
   title,
   idMenu,
   onBack,
@@ -64,33 +184,8 @@ export function CanvasDock({
   inspector,
   onSettings,
   onShare,
-}: {
-  title: ReactNode
-  idMenu: ReactNode
-  onBack: (() => void) | null
-  /** receives the element the zoom control is drawn into */
-  zoomSlot: (el: HTMLElement | null) => void
-  me: { name: string; image?: string; color: string }
-  others: Parameters<typeof PeerAvatars>[0]['others']
-  onRenameSelf: (() => void) | null
-  onImport: (() => void) | null
-  onExport: (() => void) | null
-  panelTab: PanelTab
-  panelOpen: boolean
-  /** open the right-hand panel on a tab, or close it if it shows that tab */
-  onPanel: ((tab: PanelTab) => void) | null
-  onConnect: (() => void) | null
-  inspector: { open: boolean; label: string; onToggle: () => void } | null
-  onSettings: (() => void) | null
-  /** the owner's Share dialog (link level and password) */
-  onShare: (() => void) | null
-}) {
+}: DockProps) {
   const t = useT()
-  const openThreads = useOpenThreadCount()
-  const working = useStore((s) => s.tasks.filter((x) => x.agentName && !x.endedAt && !x.failedAt).length)
-  /* a viewer or commenter's panel is Comments alone (ActivityPanel) */
-  const canEdit = useStore(canEditOpenCanvas)
-  const showing = (tab: PanelTab) => panelOpen && panelTab === tab
   const side = 'top' as const
 
   return (
@@ -135,32 +230,7 @@ export function CanvasDock({
         </ToolbarControl>
       )}
       {(onPanel || onConnect) && <ToolbarDivider />}
-      {onPanel && (
-        <>
-          <ToolbarControl
-            side={side}
-            label={openThreads ? t('canvas.commentsOpen', { open: openThreads }) : t('canvas.comments')}
-            aria-pressed={showing('comments')}
-            className="aria-pressed:bg-paper-deep aria-pressed:text-ink"
-            onClick={() => onPanel('comments')}
-          >
-            <CommentIcon />
-            {openThreads > 0 && <ToolbarDot className="bg-brand" />}
-          </ToolbarControl>
-          {canEdit && (
-            <ToolbarControl
-              side={side}
-              label={working ? t('canvas.agentsWorking', { working }) : t('canvas.aiActivity')}
-              aria-pressed={showing('tasks')}
-              className="aria-pressed:bg-paper-deep aria-pressed:text-ink"
-              onClick={() => onPanel('tasks')}
-            >
-              <SparkIcon />
-              {working > 0 && <ToolbarDot className="bg-success" />}
-            </ToolbarControl>
-          )}
-        </>
-      )}
+      {onPanel && <PanelButtons panelTab={panelTab} panelOpen={panelOpen} onPanel={onPanel} />}
       {onConnect && (
         <ToolbarControl
           side={side}
@@ -198,8 +268,9 @@ export function CanvasDock({
 }
 
 /** Hand, Comment and Prototype mode, as the rail's foot had them, and every
- *  other tool in a list that opens upwards. */
-function DockTools() {
+ *  other tool in a list that opens upwards. A phone has no room for the
+ *  Prototype button; the list holds it there, and its opener is narrower. */
+function DockTools({ phone = false }: { phone?: boolean }) {
   const t = useT()
   const tool = useStore((s) => s.tool)
   const role = useStore(roleOf)
@@ -211,6 +282,7 @@ function DockTools() {
   }
   const pressed = 'aria-pressed:bg-paper-deep aria-pressed:text-ink'
   const listed = TOOLS.filter((e) => e.id !== 'zoom' && toolAllowed(e.id, role))
+  const picked = tool !== 'hand' && tool !== 'comment' && tool !== 'zoom'
   return (
     <>
       <ToolbarControl
@@ -233,17 +305,20 @@ function DockTools() {
           {TOOL_ICONS.comment}
         </ToolbarControl>
       )}
-      <ToolbarControl
-        side="top"
-        label={t('stage.modePrototype')}
-        aria-pressed={prototypeMode}
-        className={pressed}
-        onClick={() => useStore.getState().setPrototypeMode(!prototypeMode)}
-      >
-        <PrototypeModeIcon />
-      </ToolbarControl>
-      {/* a tool picked from the list shows here, so the current one is always in view */}
-      {tool !== 'hand' && tool !== 'comment' && tool !== 'zoom' && (
+      {!phone && (
+        <ToolbarControl
+          side="top"
+          label={t('stage.modePrototype')}
+          aria-pressed={prototypeMode}
+          className={pressed}
+          onClick={() => useStore.getState().setPrototypeMode(!prototypeMode)}
+        >
+          <PrototypeModeIcon />
+        </ToolbarControl>
+      )}
+      {/* a tool picked from the list shows here, so the current one is always in view; on a phone it
+          takes the list's own button instead, so the dock keeps its width */}
+      {!phone && picked && (
         <ToolbarControl side="top" label={label(tool)} aria-pressed className={pressed}>
           {TOOL_ICONS[tool]}
         </ToolbarControl>
@@ -251,8 +326,12 @@ function DockTools() {
       <DropdownMenu>
         <Tooltip label={t('stage.moreTools')} side="top">
           <DropdownMenuTrigger asChild>
-            <ToolbarButton aria-label={t('stage.moreTools')} className="data-[state=open]:bg-paper-deep">
-              <ChevronDownIcon className={cn('rotate-180')} />
+            <ToolbarButton
+              aria-label={phone && picked ? label(tool) : t('stage.moreTools')}
+              aria-pressed={phone && picked ? true : undefined}
+              className={cn('data-[state=open]:bg-paper-deep', pressed, phone && !picked && 'min-w-7 px-0')}
+            >
+              {phone && picked ? TOOL_ICONS[tool] : <ChevronDownIcon className={cn('rotate-180')} />}
             </ToolbarButton>
           </DropdownMenuTrigger>
         </Tooltip>
