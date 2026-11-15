@@ -50,6 +50,8 @@ import { TOOLS, isDrawingTool, resolvePointerAction, toolForKey, type Tool } fro
 import { useCanvasDrawing } from './CanvasDrawing'
 import { FrameLabelLayer } from './FrameLabelLayer'
 import { pixelGridLines } from './PixelGrid'
+import { gpuFrameAt } from '../lib/gpuPictures'
+import { StagePictures } from './StagePictures'
 import { chromeZoomStale, layoutZoomFor } from '../lib/layoutZoom'
 import { DOT_PERIOD, GRID_ZOOM_DRIFT, gridPaintZoom, gridStale, gridTransform } from '../lib/stageGrid'
 import { zoomPicturesActive, zoomPicturesEnabled, zoomPicturesEnd, zoomPicturesStart } from '../lib/zoomPictures'
@@ -95,6 +97,8 @@ const PEN_CURSOR = {
   'pen-close': 'cursor-pen-close! [&_:not([data-comment-ui]_*)]:cursor-pen-close!',
   'pen-anchor': 'cursor-pen-anchor! [&_:not([data-comment-ui]_*)]:cursor-pen-anchor!',
 } as const
+
+const NO_FRAMES: Frame[] = []
 
 /* The world is laid out at CSS zoom k, the settled camera zoom, and its
    transform carries only what the camera has moved since. WebKit rasterizes a
@@ -623,11 +627,12 @@ export function Stage({
   useEffect(() => {
     function onDown(e: PointerEvent) {
       const shell = e.target instanceof Element ? e.target.closest('[data-frame-shell]') : null
-      const id = shell?.getAttribute('data-frame-shell')
+      /* or on a frame drawn on the GPU canvas, which has no element at all */
+      const id = shell?.getAttribute('data-frame-shell') ?? gpuFrameAt(e)
       if (!id) return
       flushSync(() => useLiveFrames.getState().wake(id))
       const target = document.elementFromPoint(e.clientX, e.clientY)
-      if (!target || target.closest('[data-frame-shell]')) return
+      if (!target || target === e.target || target.closest('[data-frame-shell]')) return
       e.stopImmediatePropagation()
       target.dispatchEvent(
         new PointerEvent('pointerdown', {
@@ -1490,6 +1495,8 @@ export function Stage({
               style={pixelGridLines(1)}
               ref={pixelGridRef}
             />
+            {/* culled frames drawn on the GPU, under the frame stack (doop:gpu) */}
+            <StagePictures frames={canvas?.frames ?? NO_FRAMES} stage={ref} />
             {/* `world` is likewise a behaviour hook: pan hit-testing checks
             classList.contains('world') to tell background from frame */}
             <div

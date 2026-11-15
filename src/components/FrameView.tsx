@@ -18,6 +18,7 @@ import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
 import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
+import { useGpuPicture } from '../lib/gpuPictures'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
 import { trackShell } from '../lib/shellCull'
 import { keepsDocument, registerZoomPicture, zoomPicturesEnabled } from '../lib/zoomPictures'
@@ -2596,9 +2597,8 @@ export const FrameSlot = memo(function FrameSlot({
 }) {
   const awake = useFrameAwake(frame.id)
   const engaged = useStore((s) => s.selectedIds.includes(frame.id) || !!s.streams[frame.id])
-  return awake || engaged ? (
-    <FrameView frame={frame} stack={stack} layoutZoom={layoutZoom} />
-  ) : (
-    <FrameShell frame={frame} stack={stack} />
-  )
+  /* drawn on the Stage's GPU canvas (gpuPictures.ts): nothing of it in the DOM */
+  const gpu = useGpuPicture(frame.id)
+  if (awake || engaged) return <FrameView frame={frame} stack={stack} layoutZoom={layoutZoom} />
+  return gpu ? null : <FrameShell frame={frame} stack={stack} />
 })
