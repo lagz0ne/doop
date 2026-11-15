@@ -137,8 +137,10 @@ transform still applies, then `bin/doop check --test` and commit (`vendor/doop` 
 - The UI hides the team/product chrome (Share, Owned/Shared scopes, Community, Automations,
   Integrations, Webhooks, plan line, Help, and on Home the Agents rail section and the "Ask me what
   to design" hero) behind `FULL_UI` (`src/lib/fullUi.ts`, our `feat(ui)` patch). Workspaces stay.
-  Only the entry points are hidden, not the routes. Share comes back for a canvas's owner (0020:
-  the link's level and an optional password; visitors give a name, and the password, at a door).
+  Only the entry points are hidden, not the routes. Share comes back for a canvas's own people,
+  owner and members (0020, 0032: the link's level and an optional password; visitors give a name,
+  and the password, at a door). An MCP agent's account owns what it creates; hand a canvas to its
+  person with `doopctl share owner`, or let them share it as a member.
   With FULL_UI off the editor also uses a reviewer layout (patch 0013, `CanvasDock.tsx`): one
   dock along the bottom instead of the top bar, tool rail and side rail, the Hand first, Layers
   folded; the review panel at `/embed` uses the same layout (0014), and so do phones (0021: back,
