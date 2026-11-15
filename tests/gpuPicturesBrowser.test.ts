@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { Page } from 'puppeteer-core'
 import { findBrowserPath } from '../server/screenshot'
 import { fixtureUrl, openBrowser, type TestBrowser } from './browser'
+import { TOUCH_HOLD_MS } from '../src/lib/touchHold'
 import type { Canvas, Frame } from '../shared/types'
 
 /* The GPU picture layer (src/lib/gpuPictures.ts, localStorage['doop:gpu']):
@@ -61,9 +62,10 @@ const shellIds = (page: Page) =>
   )
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** the colours on screen in a box, from a screenshot (the canvas keeps no drawing buffer) */
+/** the colours on screen in a box, from a screenshot (the canvas keeps no drawing buffer). Within the
+    viewport: a capture beyond it renders the page again and showed white where the screen has paper. */
 async function pixels(page: Page, x: number, y: number, width = 1, height = 1): Promise<number[][]> {
-  const png = await page.screenshot({ clip: { x, y, width, height }, encoding: 'base64' })
+  const png = await page.screenshot({ clip: { x, y, width, height }, encoding: 'base64', captureBeyondViewport: false })
   return page.evaluate(
     async (src, w, h) => {
       const img = new Image()
@@ -86,6 +88,25 @@ async function pixels(page: Page, x: number, y: number, width = 1, height = 1): 
 }
 const pixel = async (page: Page, x: number, y: number) => (await pixels(page, x, y))[0]!
 
+/** answers every preview request with one flat PICTURE image */
+async function servePreviews(page: Page) {
+  const png = await page.evaluate((rgb) => {
+    const c = document.createElement('canvas')
+    c.width = 144
+    c.height = 90
+    const g = c.getContext('2d')!
+    g.fillStyle = `rgb(${rgb.join(',')})`
+    g.fillRect(0, 0, 144, 90)
+    return c.toDataURL('image/png').split(',')[1]!
+  }, PICTURE)
+  const body = Buffer.from(png, 'base64')
+  await page.setRequestInterception(true)
+  page.on('request', (req) => {
+    if (/\/i\/[^/]+\.webp\?preview/.test(req.url())) void req.respond({ status: 200, contentType: 'image/png', body })
+    else void req.continue()
+  })
+}
+
 /** the screen box of a frame at the test's camera (20, 60) at 8% */
 function box(stage: { left: number; top: number }, i: number) {
   const left = stage.left + 20 + (i % 8) * 1600 * 0.08
@@ -104,21 +125,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
     await page.setViewport({ width: 1600, height: 1000 })
     await page.goto(fixtureUrl('pages.html'))
     webgl = await page.evaluate(() => !!document.createElement('canvas').getContext('webgl2'))
-    const png = await page.evaluate((rgb) => {
-      const c = document.createElement('canvas')
-      c.width = 144
-      c.height = 90
-      const g = c.getContext('2d')!
-      g.fillStyle = `rgb(${rgb.join(',')})`
-      g.fillRect(0, 0, 144, 90)
-      return c.toDataURL('image/png').split(',')[1]!
-    }, PICTURE)
-    const body = Buffer.from(png, 'base64')
-    await page.setRequestInterception(true)
-    page.on('request', (req) => {
-      if (/\/i\/[^/]+\.webp\?preview/.test(req.url())) void req.respond({ status: 200, contentType: 'image/png', body })
-      else void req.continue()
-    })
+    await servePreviews(page)
     await page.evaluate(() => localStorage.setItem('doop:gpu', 'force'))
     await page.reload()
     await page.waitForFunction(() => typeof window.seedPages === 'function')
@@ -271,4 +278,291 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
     expect(await drawn(page)).toEqual(before.drawn)
     expect(await shells(page)).toBe(before.shells)
   }, 30_000)
+
+  it('selects drawn frames with a marquee and a shift press, as it selects shells', async (ctx) => {
+    if (!webgl) ctx.skip()
+    await store(page, 'select(null)')
+    await sleep(200)
+    /* from the empty stage right of the last column, row 1, to the middle of f22 */
+    const row1 = box(stage, 15)
+    const end = box(stage, 22)
+    await page.mouse.move(stage.left + 1100, (row1.top + row1.bottom) / 2)
+    await page.mouse.down()
+    await page.mouse.move((end.left + end.right) / 2, (end.top + end.bottom) / 2, { steps: 8 })
+    await page.mouse.up()
+    await sleep(200)
+    expect([...(await selected(page))].sort()).toEqual(['f14', 'f15', 'f22', 'f23'])
+    expect(await drawn(page)).toContain('f28')
+    const f = box(stage, 28)
+    await page.keyboard.down('Shift')
+    await page.mouse.click((f.left + f.right) / 2, (f.top + f.bottom) / 2)
+    await page.keyboard.up('Shift')
+    await sleep(200)
+    expect([...(await selected(page))].sort()).toEqual(['f14', 'f15', 'f22', 'f23', 'f28'])
+    await store(page, 'select(null)')
+  }, 30_000)
+
+  it("follows a peer's moves, hides, deletes, creations and an agent's stream", async (ctx) => {
+    if (!webgl) ctx.skip()
+    const frame = (id: string) => canvas.frames.find((f) => f.id === id)!
+    const paper = await pixel(page, Math.round(stage.left + 1100), Math.round(box(stage, 0).top + 30))
+    const centre = (i: number) => {
+      const f = box(stage, i)
+      return pixel(page, Math.round((f.left + f.right) / 2), Math.round((f.top + f.bottom) / 2))
+    }
+    expect(await drawn(page)).toEqual(expect.arrayContaining(['f2', 'f5', 'f6', 'f7']))
+    /* frame:drag, as the room applies it: drawn at once at the new place */
+    const f5 = box(stage, 5)
+    await store(page, `patchFrameLocal('f5', { x: ${frame('f5').x + 400} })`)
+    await sleep(50)
+    expect(await pixel(page, Math.round(f5.right + 400 * 0.08 - 4), Math.round((f5.top + f5.bottom) / 2))).toEqual(
+      PICTURE,
+    )
+    expect(await pixel(page, Math.round(f5.left + 4), Math.round((f5.top + f5.bottom) / 2))).toEqual(paper)
+    await store(page, `patchFrameLocal('f5', { x: ${frame('f5').x} })`)
+    /* hidden, deleted: neither drawn nor a shell, the paper where they were */
+    await store(page, `upsertFrame({ ...useStore.getState().canvas.frames.find((f) => f.id === 'f6'), hidden: true })`)
+    await store(page, "removeFrame('f7')")
+    await sleep(200)
+    expect(await drawn(page)).not.toContain('f6')
+    expect(await drawn(page)).not.toContain('f7')
+    expect(await shellIds(page)).not.toContain('f6')
+    expect(await centre(6)).toEqual(paper)
+    expect(await centre(7)).toEqual(paper)
+    /* created by a peer, in a row of its own (column 0, under frames never woken) */
+    await store(
+      page,
+      `upsertFrame({ ...useStore.getState().canvas.frames.find((f) => f.id === 'f3'), id: 'f40', x: 0, y: 5500 })`,
+    )
+    await page.waitForFunction(
+      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.has('f40'))`,
+      { timeout: 10_000 },
+    )
+    expect(await centre(40)).toEqual(PICTURE)
+    /* streamed into by an agent: a live FrameView while it lasts */
+    await store(page, "setStream('f2', { name: 'Agent', color: '#f0f' })")
+    await sleep(200)
+    expect(await drawn(page)).not.toContain('f2')
+    expect(await page.evaluate(() => !!document.querySelector('iframe[title="Frame 2"]'))).toBe(true)
+    await store(page, "setStream('f2', null)")
+    await sleep(300)
+    expect(await drawn(page)).toContain('f2')
+    await store(page, "removeFrame('f40')")
+    await store(page, `upsertFrame(${JSON.stringify(frame('f6'))})`)
+    await store(page, `upsertFrame(${JSON.stringify(frame('f7'))})`)
+    await page.waitForFunction(
+      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => ['f6', 'f7'].every((id) => useGpuPictures.getState().drawn.has(id)))`,
+      { timeout: 10_000 },
+    )
+  }, 30_000)
+
+  /* A density change is emulated (setViewport's deviceScaleFactor), which
+     moves devicePixelRatio at once but fires the resolution query late, so
+     the camera is nudged as a person's next move would. What emulation
+     cannot show: a real screen change, and a GPU's own drawing-buffer limits
+     (SwiftShader takes 8192 px a side; real GPUs often 16384 or more, where
+     the check is skipped). */
+  it('draws at a new screen density, and gives every frame to the DOM past what the GPU allows', async (ctx) => {
+    if (!webgl) ctx.skip()
+    const nudge = async () => {
+      await store(page, 'setViewport({ x: 21, y: 60, zoom: 0.08 })')
+      await store(page, 'setViewport({ x: 20, y: 60, zoom: 0.08 })')
+    }
+    const backing = () =>
+      page.evaluate(() => {
+        const c = document.querySelector<HTMLCanvasElement>('canvas[data-stage-pictures]')!
+        const gl = c.getContext('webgl2')!
+        return {
+          width: c.width,
+          height: c.height,
+          css: c.clientWidth,
+          maxView: (gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array)[0]!,
+        }
+      })
+    expect(await drawn(page)).toContain('f24')
+    const f = box(stage, 24)
+    const mid = { x: Math.round((f.left + f.right) / 2), y: Math.round((f.top + f.bottom) / 2) }
+    try {
+      await page.setViewport({ width: 1600, height: 1000, deviceScaleFactor: 2 })
+      await nudge()
+      await sleep(300)
+      const two = await backing()
+      expect(two.width).toBe(two.css * 2)
+      expect(await drawn(page)).toContain('f24')
+      for (const [i, c] of (await pixel(page, mid.x, mid.y)).entries())
+        expect(Math.abs(c - PICTURE[i]!)).toBeLessThanOrEqual(2)
+      const past = Math.ceil((two.maxView + 1) / two.css)
+      if (past <= 8) {
+        await page.setViewport({ width: 1600, height: 1000, deviceScaleFactor: past })
+        await nudge()
+        await sleep(300)
+        expect(await drawn(page)).toEqual([])
+        expect((await backing()).width).toBe(1)
+        expect(await shells(page)).toBeGreaterThan(FRAMES / 2)
+      }
+    } finally {
+      await page.setViewport({ width: 1600, height: 1000, deviceScaleFactor: 1 })
+      await nudge()
+    }
+    await page.waitForFunction(
+      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.has('f24'))`,
+      { timeout: 15_000 },
+    )
+    expect((await backing()).width).toBe(1600)
+  }, 60_000)
+})
+
+/* Names are measured where the DOM lays its title out: at the screen's
+   density (zoom for device scale), not at the CSS size, whose advances
+   differ from it by pixels at a fractional density. A guard only: the
+   density setViewport emulates does not shape text at the device size, so
+   here the CSS-size measure matches too; a browser started with
+   --force-device-scale-factor shows the difference. */
+describe.skipIf(!findBrowserPath())('GPU picture names', () => {
+  let browser: TestBrowser
+  beforeAll(async () => {
+    browser = await openBrowser()
+  }, 60_000)
+  afterAll(async () => {
+    await browser?.close()
+  })
+
+  for (const dpr of [1.25, 1.5, 2])
+    it(`measures a name as wide as the title at ${dpr}x`, async () => {
+      const page = await browser.newPage()
+      await page.setViewport({ width: 800, height: 600, deviceScaleFactor: dpr })
+      await page.goto(fixtureUrl('pages.html'))
+      const r = (await page.evaluate(`import('/src/lib/gpuLabels.ts').then(({ NameAtlas }) => {
+        const names = ['Frame 1', 'Checkout, step 2 of 3', 'Linh joined (Linh)', 'Onboarding / Welcome back, Ana', 'WWW iii lll 0123456789']
+        const span = document.createElement('span')
+        span.style.cssText = 'position:absolute;left:0;top:0;white-space:nowrap;font:600 12px sans-serif'
+        document.body.append(span)
+        const atlas = new NameAtlas()
+        atlas.build(names, { fontStyle: 'normal', fontWeight: '600', fontSize: 12, fontFamily: 'sans-serif', letterSpacing: 0, color: '#000', lineHeight: 16, baseline: 12 }, devicePixelRatio, 4096)
+        let atlasOff = 0
+        for (const n of names) {
+          span.textContent = n
+          atlasOff = Math.max(atlasOff, Math.abs(span.getBoundingClientRect().width - atlas.cells.get(n).advance))
+        }
+        span.remove()
+        return { dpr: devicePixelRatio, atlasOff }
+      })`)) as { dpr: number; atlasOff: number }
+      await page.close()
+      expect(r.dpr).toBe(dpr)
+      expect(r.atlasOff).toBeLessThan(0.1)
+    }, 30_000)
+})
+
+/* A phone in the reviewer layout (tests/phoneReviewBrowser.test.ts) over
+   drawn frames: a finger pans from one in the Hand and the Comment tool, a
+   tap selects it, a long hold opens its menu, as on a shell. */
+describe.skipIf(!findBrowserPath())('GPU pictures on a phone', () => {
+  let browser: TestBrowser
+  let page: Page
+  let webgl = false
+  let stage = { left: 0, top: 0 }
+  const menuOpen = () => page.evaluate(() => !!document.querySelector('[role="menu"]'))
+  const viewport = () =>
+    page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().viewport)`) as Promise<{
+      x: number
+      y: number
+    }>
+  const centre = (i: number) => {
+    const f = box(stage, i)
+    return { x: (f.left + f.right) / 2, y: (f.top + f.bottom) / 2 }
+  }
+  beforeAll(async () => {
+    browser = await openBrowser()
+    page = await browser.newPage()
+    await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true })
+    await page.evaluateOnNewDocument(() => {
+      localStorage.setItem('doop:full-ui', 'off')
+      localStorage.setItem('doop:gpu', 'force')
+      document.addEventListener('readystatechange', () => {
+        if (document.readyState !== 'interactive') return
+        const meta = document.createElement('meta')
+        meta.name = 'viewport'
+        meta.content = 'width=device-width, initial-scale=1.0, viewport-fit=cover'
+        document.head.append(meta)
+      })
+    })
+    await page.goto(fixtureUrl('canvasClipboard.html'))
+    webgl = await page.evaluate(() => !!document.createElement('canvas').getContext('webgl2'))
+    await servePreviews(page)
+    type Harness = { canvasClipboardHarness: { seed: (frames: Frame[]) => void } }
+    await page.waitForFunction(
+      () => !!(window as unknown as Harness).canvasClipboardHarness && !!document.querySelector('.stage'),
+    )
+    /* the harness's canvas has no pages, so the frames go on its default one */
+    const frames = canvas.frames.map(({ pageId: _page, ...frame }) => frame)
+    await page.evaluate((list) => (window as unknown as Harness).canvasClipboardHarness.seed(list), frames)
+    await page.evaluate(
+      `import('/src/lib/store.ts').then(({ useStore }) => useStore.setState({ uiHidden: false, viewport: { x: 20, y: 60, zoom: 0.08 } }))`,
+    )
+    stage = await page.evaluate(() => {
+      const r = document.querySelector('.stage')!.getBoundingClientRect()
+      return { left: r.left, top: r.top }
+    })
+    if (webgl)
+      await page.waitForFunction(
+        `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => ['f2', 'f8', 'f16', 'f17'].every((id) => useGpuPictures.getState().drawn.has(id)))`,
+        { timeout: 30_000 },
+      )
+  }, 60_000)
+  afterAll(async () => {
+    await page?.close()
+    await browser?.close()
+  })
+
+  /* columns 0-2 are on this screen; a press wakes its frame, and the column
+     under a woken frame goes to shells, so each test takes a frame no earlier
+     one has put under a woken one */
+  for (const [tool, i] of [
+    ['hand', 16],
+    ['comment', 17],
+  ] as const)
+    it(`pans with a finger dragged from a drawn frame in the ${tool} tool`, async (ctx) => {
+      if (!webgl) ctx.skip()
+      await store(page, `setTool('${tool}')`)
+      expect(await drawn(page)).toContain(`f${i}`)
+      const at = centre(i)
+      const before = await viewport()
+      await page.touchscreen.touchStart(at.x, at.y)
+      for (let k = 1; k <= 8; k++) {
+        await sleep(30)
+        await page.touchscreen.touchMove(at.x + k * 6, at.y + k * 5)
+      }
+      await page.touchscreen.touchEnd()
+      await sleep(300)
+      const after = await viewport()
+      expect(after.x).toBeGreaterThan(before.x + 30)
+      expect(await selected(page)).toEqual([])
+      expect(await menuOpen()).toBe(false)
+      await store(page, 'setViewport({ x: 20, y: 60, zoom: 0.08 })')
+      await sleep(200)
+    }, 20_000)
+
+  it('selects a drawn frame on a tap in the comment tool', async (ctx) => {
+    if (!webgl) ctx.skip()
+    await store(page, "setTool('comment')")
+    expect(await drawn(page)).toContain('f2')
+    const at = centre(2)
+    await page.touchscreen.tap(at.x, at.y)
+    await sleep(400)
+    expect(await selected(page)).toEqual(['f2'])
+    await store(page, 'select(null)')
+  }, 20_000)
+
+  it('opens the frame menu on a drawn frame only after the long hold', async (ctx) => {
+    if (!webgl) ctx.skip()
+    await store(page, "setTool('hand')")
+    expect(await drawn(page)).toContain('f8')
+    const at = centre(8)
+    await page.touchscreen.touchStart(at.x, at.y)
+    await sleep(1000)
+    expect(await menuOpen()).toBe(false)
+    await page.waitForSelector('[role="menu"]', { timeout: TOUCH_HOLD_MS + 2000 })
+    await page.touchscreen.touchEnd()
+    expect(await selected(page)).toEqual(['f8'])
+  }, 20_000)
 })

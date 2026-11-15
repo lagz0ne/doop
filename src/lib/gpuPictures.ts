@@ -441,6 +441,9 @@ export class PictureRenderer {
   private loadTimer = 0
   private frameNo = 0
   private maxSide = 4096
+  private maxView = [4096, 4096]
+  /** the backing store is the size asked for: see resize */
+  private fits = true
   private lost = false
   private disposed = false
   private texturesChanged = false
@@ -550,6 +553,8 @@ export class PictureRenderer {
     this.atlasUploaded = -1
 
     this.maxSide = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number
+    const view = gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array | null
+    this.maxView = [view?.[0] ?? 4096, view?.[1] ?? 4096]
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true)
     gl.enable(gl.BLEND)
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
@@ -582,8 +587,16 @@ export class PictureRenderer {
       return
     }
     this.lost = false
+    this.resize()
     this.events.lost(false)
     this.invalidate()
+  }
+
+  /** False while the GPU could not give the canvas a backing store of the
+   *  stage's size at the screen's density: nothing is drawn then, and every
+   *  frame stays in the DOM (StagePictures). */
+  get fitsStage() {
+    return this.fits
   }
 
   /** True once a picture of this frame (any version) is on the GPU. */
@@ -678,8 +691,32 @@ export class PictureRenderer {
   setStage(stage: Size, dpr: number) {
     this.stage = stage
     this.dpr = dpr
+    this.resize()
     this.invalidate()
     this.scheduleLoad(0)
+  }
+
+  /* Sizes the backing store to the stage at the screen's density. A browser
+     gives a WebGL canvas less than it asks for past its limits (Chromium caps
+     the drawing buffer by area, and not in proportion: 9000×5400 asked at 3x
+     came back 7094×4676 with SwiftShader), and a draw laid out for the size
+     asked for would then put every picture in the wrong place. So a store
+     that is not the size asked for, or a size past the viewport's limit, is
+     given up: the canvas goes down to one pixel (the memory goes back) and
+     draws nothing, and its frames are shells, until a resize asks again. */
+  private resize() {
+    if (this.lost) return
+    const { canvas, gl, dpr, stage } = this
+    const w = Math.max(1, Math.round(stage.width * dpr))
+    const h = Math.max(1, Math.round(stage.height * dpr))
+    const allowed = w <= (this.maxView[0] ?? 0) && h <= (this.maxView[1] ?? 0)
+    if (allowed && (canvas.width !== w || canvas.height !== h)) {
+      canvas.width = w
+      canvas.height = h
+    }
+    const fits = allowed && gl.drawingBufferWidth === w && gl.drawingBufferHeight === h
+    if (!fits) canvas.width = canvas.height = 1
+    this.fits = fits
   }
 
   /** Draw now: for a change the DOM shows in this same frame (a frame that
@@ -710,15 +747,11 @@ export class PictureRenderer {
   }
 
   private draw() {
-    if (this.lost || this.disposed) return
+    if (this.lost || this.disposed || !this.fits) return
     const gl = this.gl
     const { canvas, dpr, stage, camera } = this
-    const w = Math.max(1, Math.round(stage.width * dpr))
-    const h = Math.max(1, Math.round(stage.height * dpr))
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w
-      canvas.height = h
-    }
+    const w = canvas.width
+    const h = canvas.height
     if (this.uploads.length) this.upload()
     this.frameNo++
     const atlas = this.atlas
