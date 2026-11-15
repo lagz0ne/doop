@@ -21,9 +21,9 @@ const fs = require("fs"); const rows = fs.readFileSync(process.argv[2], "utf8").
 const med = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[Math.floor((s.length - 1) / 2)] : NaN; };
 const side = (k) => rows.filter((r) => r.name.startsWith(k));
 const names = Object.keys(rows[0]?.raw || {});
-console.log("scenario".padEnd(20), "main thread ms A -> B".padEnd(26), "worst frame A -> B".padEnd(22), "slow frames A -> B");
+console.log("scenario".padEnd(20), "main thread ms A -> B".padEnd(26), "worst frame A -> B".padEnd(22), "slow frames A -> B".padEnd(22), "renderers CPU A -> B".padEnd(24), "GPU process CPU A -> B");
 for (const n of names) { const g = (k, f) => med(side(k).map((r) => r.raw[n]?.[f]).filter((x) => x != null));
-  console.log(n.padEnd(20), `${g("A", "task")} -> ${g("B", "task")}`.padEnd(26), `${g("A", "worst")} -> ${g("B", "worst")}`.padEnd(22), `${g("A", "slow")} -> ${g("B", "slow")}`); }
+  console.log(n.padEnd(20), `${g("A", "task")} -> ${g("B", "task")}`.padEnd(26), `${g("A", "worst")} -> ${g("B", "worst")}`.padEnd(22), `${g("A", "slow")} -> ${g("B", "slow")}`.padEnd(22), `${g("A", "rend")} -> ${g("B", "rend")}`.padEnd(24), `${g("A", "gpu")} -> ${g("B", "gpu")}`); }
 if (rows.some((r) => Object.values(r.raw).some((x) => x.shown != null))) for (const n of names) { const v = (k) => med(side(k).map((r) => r.raw[n]?.shown).filter((x) => x != null)); if (!Number.isNaN(v("A"))) console.log(n.padEnd(20), `every frame shown after ${v("A")} -> ${v("B")} ms`); }
 for (const n of names) { const v = (k) => med(side(k).map((r) => r.raw[n]?.live).filter((x) => x != null)); if (!Number.isNaN(v("A")) && (v("A") || v("B"))) console.log(n.padEnd(20), `live documents after ${v("A")} -> ${v("B")}`); }
 console.log(`runs: A ${side("A").length}, B ${side("B").length}`);

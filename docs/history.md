@@ -125,16 +125,63 @@ frame stack, behind `localStorage['doop:gpu']` (`on` for hardware WebGL2 only, `
 with the shells left in the DOM, transparent, for the pointer and the names. WebGPU was ruled out
 first (not enabled by default in Chrome on Linux yet), and PixiJS too (a new dependency for one
 textured-quad shader). It works: the same pictures, a little sharper (mipmaps), 1549 → 1174
-elements on the 188-frame page, a lost context handing the pictures back to the shells. It did not
-pay where it could be measured: this machine has no GPU, and under SwiftShader (`force`,
-`CHROME_ARGS=--enable-unsafe-swiftshader perf/ab.sh`, four interleaved runs, main thread ms off →
-force) pan at fit went 169 → 1042, pan at 60% 253 → 2047, zoom 8→60% 335 → 770, fit jump
-184 → 659, with only zoom 95>130>95% (702 → 604) and six clicks (147 → 112) better. A software
-GL redraws the whole canvas on the CPU at every camera move, where the DOM moves tiles it already
-has. On a real GPU Chrome already rasterizes and composites the `<img>`s there, so the canvas
-would save mostly the elements, and the zoom cost that remains, style recalculation on the
-shells, is untouched. The commit is kept outside the series (`perf/gpucheck.mjs` is its probe);
-it is worth another look only together with moving the names and shells off the DOM as well.
+elements on the 188-frame page, a lost context handing the pictures back to the shells. As built
+it does not pay, and the first measurement gave the wrong reason. Under Chrome's software
+compositor (the default without a GPU) it looked several times slower (pan at fit 169 → 1042 ms
+of main thread), but that is the WebGL canvas being read back every frame, an artifact. With GPU
+compositing on (SwiftShader behind ANGLE, the flags in `perf/README.md`) the true reason shows:
+a shell that still paints its name is still a compositor layer, so the canvas was added to the
+~190 layers, not put in their place (`perf/layervariants.mjs`: 201 drawing layers off, 194
+forced; with the names hidden too only 6 draw, but 198 layers remain). A real wheel pan at fit
+(`perf/camera.mjs`, 30 events, main / compositor thread ms): 290-367 / 191-258 as shipped,
+443-540 / 331-369 with the canvas as built, 247-322 / 235-284 with the names hidden as well:
+empty layers still cost. The commit is kept outside the series (`perf/gpucheck.mjs` is its
+probe).
+
+Where a camera frame's time goes (2026-11-15, the investigation after that). Measured with GPU
+compositing and by counts and thread time that do not depend on the GPU, since this machine has
+none: CPU time of the GPU process under SwiftShader is pixel fill on eight worker threads and
+says nothing about a real GPU.
+
+- Every culled frame is one compositor layer of its own (1440×900, no compositing reason:
+  Chrome's layerizer will not merge sparse content). Nothing in the DOM merges them: not the
+  names hidden, the clips off, the stacking contexts off, nor the pictures as bare `<img>`s or
+  background divs with no wrapper at all (`perf/layervariants.mjs`).
+- Every camera frame rebuilds that layer list. A transform written to a `will-change: transform`
+  element (the world, or the dot grid alone) makes Blink run a full
+  `PaintArtifactCompositor::Update` ("Layerize" in a trace), whose cost follows the number of
+  layers: about 5 ms a frame on the 188-frame page, 0.2 ms with the shells not painted. It is the
+  largest single item on the editor's main thread in every gesture: 196 of 375 ms in a pan at
+  fit, 155 of 671 in a pinch 60→95%, 260 of 936 in a pan at 60%. The compositor thread pays per
+  layer too.
+- It is paid at every zoom, not only at fit. At 60% six frames are in view and 96 shells still
+  have layers (Chrome paints 4000 px around the view under a composited transform), and the
+  rebuild runs over all of them.
+- What it is worth (a real wheel pan, 30 events, main / compositor thread ms, two interleaved
+  rounds). At 60%: 521-587 / 324-349 as shipped, 187-221 / 114-122 with the shells more than a
+  screen away taken out of the render tree (`display: none`, what tldraw does with shapes outside
+  the view). At fit, where every frame is in view: 290-367 / 191-258 as shipped, 92-108 / 46-48
+  with no shell painted, which is the ceiling for one canvas drawing every picture, provided the
+  shells it replaces paint nothing (names on the canvas or in one overlay, the pointer resolved
+  by arithmetic).
+- Refuted: getting Blink's direct transform update with an idle additive `transform` animation
+  on the world and the grid. It does skip the rebuild (30 → 0 full updates), but commits and the
+  compositor thread then cost more than was saved (pan at fit: main 290 → 230 ms, compositor
+  205 → 350). Refuted too: pinning the raster scale of live frames with `will-change: transform`
+  inside the frame documents, or with a perspective ancestor.
+- Live frames re-raster on every zoom step (`perf/trace-pinch.mjs`, `perf/raster.mjs`): in a
+  pinch of 30 frames each of the 4 live documents' layers was rastered in 27-28 of them, about 3
+  tiles each time (348 raster tasks in the frames' process, 678 of 1111 ms of the GPU process's
+  main thread spent flushing them). Only hiding the live frames stops it (`visibility: hidden`
+  does, measured), so the lever is their pictures in their place while a zoom gesture lasts, as
+  map tiles are scaled and then redrawn; the picture is the server's render and can differ from
+  the live document.
+- The dot grid is re-rastered whole on every zoom frame (a layer the size of the view, about 4.7
+  tiles a frame), since its `background-size` follows the zoom, and so is one tile of the floating
+  chrome's layer (the zoom pill's text). Scaling the grid's layer by transform during the
+  gesture and repainting it at rest would stop the first.
+- Not measurable here: how much of the raster work above a real GPU hides. A probe in a real
+  browser (frame intervals with the grid, the live frames and the shells toggled) would say.
 
 Preview fidelity (0007-0009, 2026-11-12: culled frames looked too rasterized, and a clicked
 frame looked very different from its neighbours). Three causes, measured on a copy of a real

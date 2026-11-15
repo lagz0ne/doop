@@ -11,7 +11,7 @@ const puppeteer = createRequire(new URL("../build/doop/package.json", import.met
 const [out, pageId = "stress"] = process.argv.slice(2);
 const loc = JSON.parse(readFileSync(new URL(process.env.LOCAL || "./local.json", import.meta.url)));
 const L = process.env.DOOP || "http://localhost:4477";
-const b = await puppeteer.launch({ executablePath: process.env.CHROME_PATH, headless: true, args: ["--no-sandbox", "--window-size=1600,1000", "--site-per-process", "--enable-features=IsolateSandboxedIframes"] });
+const b = await puppeteer.launch({ executablePath: process.env.CHROME_PATH, headless: true, args: ["--no-sandbox", "--window-size=1600,1000", "--site-per-process", "--enable-features=IsolateSandboxedIframes", ...(process.env.CHROME_ARGS || "").split(" ").filter(Boolean)] }); // CHROME_ARGS: extra browser flags, as for bench.mjs
 const p = await b.newPage();
 await p.setViewport({ width: 1600, height: 1000 });
 await p.goto(L + "/", { waitUntil: "domcontentloaded" });
