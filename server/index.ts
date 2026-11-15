@@ -134,6 +134,7 @@ import { handleMcpRequest } from './mcp.ts'
 import { RendererBusyError } from './renderBrowser.ts'
 import { getAsset, reconcileAssetRefs, beginTicketUpload, endTicketUpload, createAsset } from './assets.ts'
 import * as ingest from './ingest.ts'
+import { renderTelemetry } from './telemetry.ts'
 import * as agentKeys from './agentKeys.ts'
 import * as backgrounds from './backgrounds.ts'
 import { serveIcon } from './iconProxy.ts'
@@ -805,6 +806,21 @@ app.post('/stripe/webhook', express.raw({ type: '*/*', limit: '1mb' }), (req, re
 for (const extension of extensions) {
   if (extension.webhookRouter) app.use(`/webhooks/${extension.id}`, extension.webhookRouter())
 }
+
+/* The render trial's reports (server/telemetry.ts). Ahead of the JSON parser,
+   for its own small body limit, and ahead of the /api gate, which keeps a
+   share-link guest to its canvas routes: a guest's browser measures and
+   reports like anyone else's. Any session may report, an embedded panel's
+   too; without one there is no report. */
+app.post(
+  '/api/telemetry/render',
+  ...renderTelemetry(async (req) => {
+    const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) })
+    if (!session) return null
+    const impersonated = !!(session.session as { impersonatedBy?: string | null }).impersonatedBy
+    return { id: session.user.id, impersonated }
+  }),
+)
 
 app.use(express.json({ limit: '10mb' }))
 app.all('/gemini-cloud/mcp/:id', (req, res, next) => {
