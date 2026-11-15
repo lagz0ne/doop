@@ -1,0 +1,897 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 15:07:00 +0000
+Subject: [PATCH 38/39] feat(telemetry): render trial reports, forwarded to an
+ OpenTelemetry collector
+
+The canvas has two render experiments behind switches (the GPU picture
+layer and zoom pictures). Whether they help depends on the device, so the
+editor is about to measure them per browser; this is where the
+measurements go. POST /api/telemetry/render takes one small JSON report
+from the browser: which level of each experiment it had and why, its
+device class, and frame counts and timings per kind of camera gesture.
+
+The route
+- validates against a closed zod schema (shared/renderTrialSchema.ts, apart
+  from the vocabulary in shared/renderTrial.ts so the editor's bundle does
+  not carry zod): enums,
+  bounded numbers, a renderer string of printable ASCII up to 80
+  characters, at most 8 rows, unknown keys refused. Nothing in it names a
+  user, canvas, frame or address, and the schema cannot carry one;
+- caps the body at 8 KB with its own parser, ahead of the 10 MB one, and
+  answers 413/400 itself instead of Express's HTML error page;
+- sits ahead of the /api gate, which keeps a share-link guest to its
+  canvas routes: any session may report (account, link guest, embedded
+  panel), no session gets 401, a cross-site request 403;
+- answers 204 for a valid report, also past the rate limit (30 per ten
+  minutes per session user, the in-memory sliding window the import and
+  sync limits use) and for an impersonating admin, whose reports are
+  dropped: the browser has nothing to retry and nothing to show.
+
+Forwarding
+When OTEL_EXPORTER_OTLP_ENDPOINT is set, each report goes to
+<endpoint>/v1/logs as OTLP/HTTP JSON logs, one INFO record per row with
+the body "render trial" and flat doop.render.* attributes (arm A-D,
+levels and reasons, gesture kind/stratum/live, frames, slow frames, slow
+share, mean and p95 interval, device class, current verdicts), so a log
+query can sum frames and slow frames by arm without unpacking a body.
+Rows count only what was measured since the page's previous report, so
+sums across reports count each frame once. Resource attributes follow
+the SDK variables: OTEL_SERVICE_NAME (default doop, and it wins over a
+service.name in the list) plus OTEL_RESOURCE_ATTRIBUTES (k=v,k=v,
+percent-decoded). Plain fetch with a 3 s timeout, after the response;
+failures are swallowed with one warning per ten minutes. Unset, a report
+is validated and dropped. The OpenTelemetry JS SDK was ruled out: one
+record type a few times per page load does not need a dependency, a
+batcher or a provider.
+
+Tests: tests/telemetry.test.ts (validation and garbage, 413, no session,
+cross-site, a guest allowed, rate limit, impersonation, the drop when
+unset, the exact OTLP body against a local HTTP collector, resource
+attributes, a failing collector warning once).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .env.example                |  17 ++
+ server/env.ts               |   9 +
+ server/index.ts             |  16 ++
+ server/telemetry.ts         | 247 +++++++++++++++++++++++++++
+ shared/renderTrial.ts       |  54 ++++++
+ shared/renderTrialSchema.ts | 102 ++++++++++++
+ tests/telemetry.test.ts     | 321 ++++++++++++++++++++++++++++++++++++
+ 7 files changed, 766 insertions(+)
+ create mode 100644 server/telemetry.ts
+ create mode 100644 shared/renderTrial.ts
+ create mode 100644 shared/renderTrialSchema.ts
+ create mode 100644 tests/telemetry.test.ts
+
+diff --git a/.env.example b/.env.example
+index 5dd2cf1..25ce57a 100644
+--- a/.env.example
++++ b/.env.example
+@@ -365,6 +365,23 @@
+ #POSTHOG_INGEST_HOST=https://us.i.posthog.com
+ #POSTHOG_ASSETS_HOST=https://us-assets.i.posthog.com
+ 
++# ---------------------------------------- render telemetry (optional, OFF)
++# The editor measures how smoothly the canvas pans and zooms and reports it to
++# POST /api/telemetry/render: frame counts and timings, the render experiments
++# the browser had on, and its device class (GPU renderer, screen size, cores).
++# No user, canvas, frame or address goes in a report. Unset, reports are
++# validated and dropped. Set to an OpenTelemetry collector's OTLP/HTTP base
++# URL (port 4318 by convention) to receive them as log records at
++# <endpoint>/v1/logs: per report, one record for each kind of gesture
++# measured (pan or zoom, light or heavy scene), body "render trial".
++#OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
++# The records' service.name. Unset = service.name from the attributes below,
++# else doop.
++#OTEL_SERVICE_NAME=doop
++# Extra resource attributes on every record, k=v,k=v (values may be
++# percent-encoded), e.g. deployment.environment=production
++#OTEL_RESOURCE_ATTRIBUTES=
++
+ # ------------------------------------------------------------- backgrounds
+ # The list_backgrounds library ships as a checked-in catalog
+ # (server/backgrounds.json) whose image bytes live in object storage under
+diff --git a/server/env.ts b/server/env.ts
+index 593af06..d8f094e 100644
+--- a/server/env.ts
++++ b/server/env.ts
+@@ -276,6 +276,15 @@ const schema = {
+   POSTHOG_INGEST_HOST: origin({ default: 'https://us.i.posthog.com' }),
+   POSTHOG_ASSETS_HOST: origin({ default: 'https://us-assets.i.posthog.com' }),
+ 
++  /* ---------------------------------------------- render telemetry */
++  /* unset = the render trial's reports (server/telemetry.ts) are validated
++     and dropped; set = forwarded as OTLP/HTTP JSON logs to <this>/v1/logs */
++  OTEL_EXPORTER_OTLP_ENDPOINT: origin({ default: undefined }),
++  /* unset = service.name from OTEL_RESOURCE_ATTRIBUTES, else doop */
++  OTEL_SERVICE_NAME: str({ default: undefined }),
++  /* k=v,k=v resource attributes on every record */
++  OTEL_RESOURCE_ATTRIBUTES: str({ default: undefined }),
++
+   /* ---------------------------------------------------- backgrounds */
+   BACKGROUNDS_ORIGIN: origin({ default: undefined }),
+ 
+diff --git a/server/index.ts b/server/index.ts
+index b292d67..0f6effe 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -89,6 +89,7 @@ import {
+   MAX_ASSET_BYTES,
+ } from './assets.ts'
+ import * as ingest from './ingest.ts'
++import { renderTelemetry } from './telemetry.ts'
+ import * as agentKeys from './agentKeys.ts'
+ import * as backgrounds from './backgrounds.ts'
+ import * as storage from './storage.ts'
+@@ -652,6 +653,21 @@ for (const extension of extensions) {
+   if (extension.webhookRouter) app.use(`/webhooks/${extension.id}`, extension.webhookRouter())
+ }
+ 
++/* The render trial's reports (server/telemetry.ts). Ahead of the JSON parser,
++   for its own small body limit, and ahead of the /api gate, which keeps a
++   share-link guest to its canvas routes: a guest's browser measures and
++   reports like anyone else's. Any session may report, an embedded panel's
++   too; without one there is no report. */
++app.post(
++  '/api/telemetry/render',
++  ...renderTelemetry(async (req) => {
++    const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) })
++    if (!session) return null
++    const impersonated = !!(session.session as { impersonatedBy?: string | null }).impersonatedBy
++    return { id: session.user.id, impersonated }
++  }),
++)
++
+ app.use(express.json({ limit: '10mb' }))
+ app.all('/gemini-cloud/mcp/:id', (req, res, next) => {
+   handleGeminiCloudMcp(req, res).catch(next)
+diff --git a/server/telemetry.ts b/server/telemetry.ts
+new file mode 100644
+index 0000000..81cca33
+--- /dev/null
++++ b/server/telemetry.ts
+@@ -0,0 +1,247 @@
++import express, { type NextFunction, type Request, type RequestHandler, type Response } from 'express'
++import { env } from './env.ts'
++import { RENDER_REPORT_MAX_BYTES, armOf } from '../shared/renderTrial.ts'
++import { renderReportSchema, type RenderReport, type RenderVerdict } from '../shared/renderTrialSchema.ts'
++
++/**
++ * POST /api/telemetry/render: the render trial's report from a browser
++ * (shared/renderTrialSchema.ts). Valid reports are forwarded to an OpenTelemetry
++ * collector as OTLP/HTTP JSON logs when OTEL_EXPORTER_OTLP_ENDPOINT is set,
++ * and dropped otherwise. The body is a closed schema of enums and numbers,
++ * so nothing about the caller reaches a log record: the caller's id is used
++ * only to rate-limit.
++ *
++ * Plain fetch with the JSON encoding, not the OpenTelemetry SDK: one record
++ * type, sent a few times per page load, does not need a dependency, a
++ * batcher or a meter provider.
++ */
++
++/** Who is reporting: any signed-in session, a share-link guest's and an
++ *  embedded panel's included. Impersonated sessions are an admin looking,
++ *  not the person's browser, so their reports are dropped. */
++export interface TelemetryCaller {
++  id: string
++  impersonated: boolean
++}
++
++export const TELEMETRY_WINDOW_MS = 10 * 60_000
++/* a page reports at most every few minutes plus once per hide; 30 per ten
++   minutes leaves room for a handful of tabs and still bounds a flood */
++export const TELEMETRY_REPORTS_PER_WINDOW = 30
++const COLLECTOR_TIMEOUT_MS = 3_000
++const WARN_EVERY_MS = 10 * 60_000
++
++const hits = new Map<string, number[]>()
++
++function takeSlot(id: string, now: number): boolean {
++  const recent = (hits.get(id) ?? []).filter((t) => now - t < TELEMETRY_WINDOW_MS)
++  if (recent.length >= TELEMETRY_REPORTS_PER_WINDOW) {
++    hits.set(id, recent)
++    return false
++  }
++  recent.push(now)
++  hits.set(id, recent)
++  /* every caller who ever reported keeps an entry otherwise */
++  if (hits.size > 10_000) {
++    for (const [key, times] of hits) if (!times.some((t) => now - t < TELEMETRY_WINDOW_MS)) hits.delete(key)
++  }
++  return true
++}
++
++/** For tests: forget every caller's window. */
++export function resetTelemetryLimits(): void {
++  hits.clear()
++}
++
++/* the body parser's own errors (too large, not JSON) would reach Express's
++   default handler, which answers with an HTML page; a report needs a status */
++const parseBody = express.json({ limit: RENDER_REPORT_MAX_BYTES, type: () => true })
++function quietBody(req: Request, res: Response, next: NextFunction): void {
++  parseBody(req, res, (err?: unknown) => {
++    if (!err) return next()
++    const status = (err as { status?: unknown }).status
++    res.status(status === 413 ? 413 : 400).end()
++  })
++}
++
++export function renderTelemetry(callerOf: (req: Request) => Promise<TelemetryCaller | null>): RequestHandler[] {
++  const handle = async (req: Request, res: Response): Promise<void> => {
++    /* a beacon from another site would carry this browser's cookies only
++       where SameSite allows; refuse it either way */
++    if (req.get('sec-fetch-site') === 'cross-site') {
++      res.status(403).end()
++      return
++    }
++    const caller = await callerOf(req).catch(() => null)
++    if (!caller) {
++      res.status(401).end()
++      return
++    }
++    const parsed = renderReportSchema.safeParse(req.body)
++    if (!parsed.success) {
++      res.status(400).end()
++      return
++    }
++    /* over the limit or impersonated: accepted and dropped, so the browser
++       has nothing to retry and nothing to show */
++    res.status(204).end()
++    if (caller.impersonated || !takeSlot(caller.id, Date.now())) return
++    void forwardRenderReport(parsed.data)
++  }
++  return [
++    quietBody,
++    (req, res, next) => {
++      handle(req, res).catch(next)
++    },
++  ]
++}
++
++/* ------------------------------------------------------------------ */
++/* OTLP/HTTP JSON                                                      */
++/* ------------------------------------------------------------------ */
++
++type AnyValue = { stringValue: string } | { boolValue: boolean } | { intValue: string } | { doubleValue: number }
++export interface KeyValue {
++  key: string
++  value: AnyValue
++}
++
++const str = (key: string, value: string): KeyValue => ({ key, value: { stringValue: value } })
++const bool = (key: string, value: boolean): KeyValue => ({ key, value: { boolValue: value } })
++/* int64 travels as a decimal string in OTLP's JSON encoding */
++const int = (key: string, value: number): KeyValue => ({ key, value: { intValue: String(Math.round(value)) } })
++const dbl = (key: string, value: number): KeyValue => ({ key, value: { doubleValue: value } })
++
++export const RENDER_LOG_BODY = 'render trial'
++const SCOPE = 'doop.render-trial'
++
++/** `k=v,k=v`, values percent-decoded, as the OpenTelemetry SDKs read it. */
++export function parseResourceAttributes(raw: string | undefined): Map<string, string> {
++  const attrs = new Map<string, string>()
++  for (const pair of (raw ?? '').split(',')) {
++    const at = pair.indexOf('=')
++    if (at <= 0) continue
++    const key = pair.slice(0, at).trim()
++    let value = pair.slice(at + 1).trim()
++    try {
++      value = decodeURIComponent(value)
++    } catch {
++      /* a stray % keeps the raw text */
++    }
++    if (key) attrs.set(key, value)
++  }
++  return attrs
++}
++
++function resourceAttributes(): KeyValue[] {
++  const attrs = parseResourceAttributes(env.OTEL_RESOURCE_ATTRIBUTES)
++  /* OTEL_SERVICE_NAME wins over a service.name in the attribute list */
++  attrs.set('service.name', env.OTEL_SERVICE_NAME ?? attrs.get('service.name') ?? 'doop')
++  return [...attrs].map(([key, value]) => str(key, value))
++}
++
++function verdictAttributes(prefix: string, v: RenderVerdict): KeyValue[] {
++  const out = [
++    str(prefix, v.winner ?? 'exploring'),
++    int(`${prefix}.on_frames`, v.onFrames),
++    int(`${prefix}.off_frames`, v.offFrames),
++    int(`${prefix}.on_loads`, v.onLoads),
++    int(`${prefix}.off_loads`, v.offLoads),
++  ]
++  if (v.onShare !== null) out.push(dbl(`${prefix}.on_share`, v.onShare))
++  if (v.offShare !== null) out.push(dbl(`${prefix}.off_share`, v.offShare))
++  return out
++}
++
++/** One flat attribute list per row, so a log query can group by arm, kind
++ *  and stratum and sum frames and slow frames without unpacking a body. */
++export function renderLogRecords(report: RenderReport, now: number): object[] {
++  const time = `${now}000000`
++  const e = report.env
++  const shared: KeyValue[] = [
++    int('doop.render.epoch', report.epoch),
++    str('doop.render.arm', armOf(report.gpu.level, report.zoomPictures.level)),
++    str('doop.render.gpu', report.gpu.level),
++    str('doop.render.gpu.reason', report.gpu.reason),
++    str('doop.render.zoom_pictures', report.zoomPictures.level),
++    str('doop.render.zoom_pictures.reason', report.zoomPictures.reason),
++    str('doop.render.env.renderer', e.renderer),
++    dbl('doop.render.env.dpr', e.dpr),
++    str('doop.render.env.viewport', `${e.width}x${e.height}`),
++    dbl('doop.render.env.display_ms', e.display),
++    bool('doop.render.env.touch', e.touch),
++    str('doop.render.env.frames', e.frames),
++    ...verdictAttributes('doop.render.verdict.gpu', report.verdicts.gpu),
++    ...verdictAttributes('doop.render.verdict.zoom_pictures', report.verdicts.zoomPictures),
++  ]
++  if (e.hardware !== null) shared.push(bool('doop.render.env.hardware', e.hardware))
++  if (e.cores !== null) shared.push(int('doop.render.env.cores', e.cores))
++  if (e.memory !== null) shared.push(dbl('doop.render.env.memory_gb', e.memory))
++  return report.rows.map((row) => ({
++    timeUnixNano: time,
++    observedTimeUnixNano: time,
++    severityNumber: 9,
++    severityText: 'INFO',
++    body: { stringValue: RENDER_LOG_BODY },
++    attributes: [
++      ...shared,
++      str('doop.render.gesture.kind', row.kind),
++      str('doop.render.gesture.stratum', row.stratum),
++      bool('doop.render.gesture.live', row.live),
++      int('doop.render.gestures', row.gestures),
++      int('doop.render.frames', row.frames),
++      int('doop.render.slow_frames', row.slow),
++      dbl('doop.render.slow_share', row.frames ? row.slow / row.frames : 0),
++      dbl('doop.render.interval.mean_ms', row.mean),
++      dbl('doop.render.interval.p95_ms', row.p95),
++    ],
++  }))
++}
++
++export function otlpLogsBody(report: RenderReport, now: number): object {
++  return {
++    resourceLogs: [
++      {
++        resource: { attributes: resourceAttributes() },
++        scopeLogs: [{ scope: { name: SCOPE }, logRecords: renderLogRecords(report, now) }],
++      },
++    ],
++  }
++}
++
++let lastWarning = -Infinity
++function warn(message: string): void {
++  const now = Date.now()
++  if (now - lastWarning < WARN_EVERY_MS) return
++  lastWarning = now
++  console.warn(`[telemetry] ${message} (further failures are quiet for ${WARN_EVERY_MS / 60_000} minutes)`)
++}
++
++/** For tests: let the next failure warn again. */
++export function resetTelemetryWarning(): void {
++  lastWarning = -Infinity
++}
++
++/** Sends one report's records; never throws. Resolves false when nothing
++ *  was sent (no collector configured, or it failed). */
++export async function forwardRenderReport(report: RenderReport, now = Date.now()): Promise<boolean> {
++  const endpoint = env.OTEL_EXPORTER_OTLP_ENDPOINT
++  if (!endpoint) return false
++  try {
++    const res = await fetch(`${endpoint}/v1/logs`, {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body: JSON.stringify(otlpLogsBody(report, now)),
++      signal: AbortSignal.timeout(COLLECTOR_TIMEOUT_MS),
++    })
++    await res.body?.cancel()
++    if (!res.ok) {
++      warn(`the collector answered ${res.status}`)
++      return false
++    }
++    return true
++  } catch (err) {
++    warn(`the collector is unreachable: ${err instanceof Error ? err.message : String(err)}`)
++    return false
++  }
++}
+diff --git a/shared/renderTrial.ts b/shared/renderTrial.ts
+new file mode 100644
+index 0000000..20684d0
+--- /dev/null
++++ b/shared/renderTrial.ts
+@@ -0,0 +1,54 @@
++/**
++ * The render trial's vocabulary, shared by the browser that measures
++ * (src/lib/renderTrial.ts) and the server that forwards its reports to an
++ * OpenTelemetry collector (server/telemetry.ts). The report's schema is in
++ * renderTrialSchema.ts, apart, so the editor's bundle does not carry zod.
++ *
++ */
++
++export const TRIAL_FACTORS = ['gpu', 'zoomPictures'] as const
++export type TrialFactor = (typeof TRIAL_FACTORS)[number]
++
++export const TRIAL_LEVELS = ['off', 'on'] as const
++export type TrialLevel = (typeof TRIAL_LEVELS)[number]
++
++/** Why a factor has the level it has on this page load:
++ *  explore - the trial is still sampling both levels;
++ *  exploit - the trial has a winner and uses it;
++ *  epsilon - the trial has a winner and took the other level this once;
++ *  override - an explicit localStorage key set it;
++ *  ineligible - this browser cannot have it on (no hardware WebGL2, or the layer failed);
++ *  off - the trial is switched off, or its storage is unusable. */
++export const TRIAL_REASONS = ['explore', 'exploit', 'epsilon', 'override', 'ineligible', 'off'] as const
++export type TrialReason = (typeof TRIAL_REASONS)[number]
++
++export const GESTURE_KINDS = ['pan', 'zoom'] as const
++export type GestureKind = (typeof GESTURE_KINDS)[number]
++
++/** heavy: at least HEAVY_CULLED culled frames (shells or pictures) were in
++ *  view when the gesture started; light: fewer. */
++export const STRATA = ['light', 'heavy'] as const
++export type Stratum = (typeof STRATA)[number]
++
++export const FRAME_BUCKETS = ['<20', '20-49', '50-99', '100-199', '200+'] as const
++export type FrameBucket = (typeof FRAME_BUCKETS)[number]
++
++export function frameBucket(frames: number): FrameBucket {
++  if (frames < 20) return '<20'
++  if (frames < 50) return '20-49'
++  if (frames < 100) return '50-99'
++  if (frames < 200) return '100-199'
++  return '200+'
++}
++
++/** The 2x2 cell: A neither experiment, B the GPU layer, C both, D zoom pictures only. */
++export type TrialArm = 'A' | 'B' | 'C' | 'D'
++export function armOf(gpu: TrialLevel, zoomPictures: TrialLevel): TrialArm {
++  if (gpu === 'on') return zoomPictures === 'on' ? 'C' : 'B'
++  return zoomPictures === 'on' ? 'D' : 'A'
++}
++
++export const RENDER_REPORT_VERSION = 1
++/** The body limit of the telemetry route; a full report is about 2 KB. */
++export const RENDER_REPORT_MAX_BYTES = 8 * 1024
++export const RENDERER_MAX_CHARS = 80
+diff --git a/shared/renderTrialSchema.ts b/shared/renderTrialSchema.ts
+new file mode 100644
+index 0000000..4a1c1b9
+--- /dev/null
++++ b/shared/renderTrialSchema.ts
+@@ -0,0 +1,102 @@
++import { z } from 'zod'
++import {
++  FRAME_BUCKETS,
++  GESTURE_KINDS,
++  RENDERER_MAX_CHARS,
++  RENDER_REPORT_VERSION,
++  STRATA,
++  TRIAL_LEVELS,
++  TRIAL_REASONS,
++} from './renderTrial.ts'
++
++/**
++ * The render trial's report: what one browser measured while the camera
++ * moved, and which of the two render experiments it had on. The browser
++ * builds it (src/lib/renderTrial.ts), the server validates it here and
++ * forwards it (server/telemetry.ts). The browser imports only the types.
++ *
++ * Nothing in it names a person, a canvas or a frame: the trial needs the arm,
++ * the device class and the frame timings, and nothing else leaves the
++ * browser. Counts in `rows` cover only the time since the previous report of
++ * the same page load, so summing rows across reports never counts a frame
++ * twice.
++ */
++
++const count = z.number().int().min(0).max(10_000_000)
++const ms = z.number().finite().min(0).max(1000)
++const share = z.number().finite().min(0).max(1)
++const level = z.enum(TRIAL_LEVELS)
++
++const factor = z.object({ level, reason: z.enum(TRIAL_REASONS) }).strict()
++
++const row = z
++  .object({
++    kind: z.enum(GESTURE_KINDS),
++    stratum: z.enum(STRATA),
++    /* a live document was in view when the gesture started */
++    live: z.boolean(),
++    gestures: count,
++    frames: count,
++    slow: count,
++    mean: ms,
++    p95: ms,
++  })
++  .strict()
++  .refine((r) => r.slow <= r.frames, { message: 'more slow frames than frames' })
++
++/** The trial's current leaning for one factor in this browser; winner null
++ *  while it is still exploring. Shares are null while a level has no frames. */
++const verdict = z
++  .object({
++    winner: level.nullable(),
++    onShare: share.nullable(),
++    offShare: share.nullable(),
++    onFrames: count,
++    offFrames: count,
++    onLoads: count,
++    offLoads: count,
++  })
++  .strict()
++
++const environment = z
++  .object({
++    /* the unmasked WebGL renderer, truncated; printable ASCII only, so a log
++       line never carries control characters */
++    renderer: z
++      .string()
++      .max(RENDERER_MAX_CHARS)
++      .regex(/^[\x20-\x7e]*$/),
++    /* hardware WebGL2 without a major performance caveat; null = not probed */
++    hardware: z.boolean().nullable(),
++    dpr: z.number().finite().min(0.1).max(10),
++    /* the window, rounded to 100 px */
++    width: z.number().int().min(0).max(20_000),
++    height: z.number().int().min(0).max(20_000),
++    cores: z.number().int().min(1).max(1024).nullable(),
++    memory: z.number().finite().min(0).max(1024).nullable(),
++    /* the estimated display refresh interval, ms */
++    display: z.number().finite().min(1).max(100),
++    touch: z.boolean(),
++    frames: z.enum(FRAME_BUCKETS),
++  })
++  .strict()
++
++export const renderReportSchema = z
++  .object({
++    v: z.literal(RENDER_REPORT_VERSION),
++    epoch: z.number().int().min(0).max(1_000_000),
++    gpu: factor,
++    zoomPictures: factor,
++    env: environment,
++    rows: z
++      .array(row)
++      .min(1)
++      .max(GESTURE_KINDS.length * STRATA.length * 2),
++    verdicts: z.object({ gpu: verdict, zoomPictures: verdict }).strict(),
++  })
++  .strict()
++
++export type RenderReport = z.infer<typeof renderReportSchema>
++export type RenderReportRow = RenderReport['rows'][number]
++export type RenderVerdict = RenderReport['verdicts']['gpu']
++export type RenderEnvironment = RenderReport['env']
+diff --git a/tests/telemetry.test.ts b/tests/telemetry.test.ts
+new file mode 100644
+index 0000000..a04ee4f
+--- /dev/null
++++ b/tests/telemetry.test.ts
+@@ -0,0 +1,321 @@
++import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
++import express from 'express'
++import { createServer, type IncomingMessage, type Server } from 'node:http'
++import type { AddressInfo } from 'node:net'
++import {
++  RENDER_LOG_BODY,
++  TELEMETRY_REPORTS_PER_WINDOW,
++  forwardRenderReport,
++  parseResourceAttributes,
++  renderTelemetry,
++  resetTelemetryLimits,
++  resetTelemetryWarning,
++  type KeyValue,
++  type TelemetryCaller,
++} from '../server/telemetry.ts'
++import { renderReportSchema, type RenderReport } from '../shared/renderTrialSchema.ts'
++import { stubEnv, unstubAllEnvs } from './envStub.ts'
++
++/**
++ * The render trial's report route: what it accepts, who may call it, and the
++ * OTLP/HTTP JSON it sends to a collector. A local HTTP server stands in for
++ * the collector.
++ */
++
++function sampleReport(): RenderReport {
++  return {
++    v: 1,
++    epoch: 1,
++    gpu: { level: 'on', reason: 'explore' },
++    zoomPictures: { level: 'off', reason: 'override' },
++    env: {
++      renderer: 'ANGLE (Vendor, Some GPU Direct3D11 vs_5_0 ps_5_0, D3D11)',
++      hardware: true,
++      dpr: 2,
++      width: 1500,
++      height: 900,
++      cores: 8,
++      memory: 8,
++      display: 16.7,
++      touch: false,
++      frames: '100-199',
++    },
++    rows: [
++      { kind: 'pan', stratum: 'heavy', live: false, gestures: 3, frames: 120, slow: 12, mean: 18.5, p95: 33.2 },
++      { kind: 'zoom', stratum: 'light', live: true, gestures: 1, frames: 40, slow: 0, mean: 16.8, p95: 17.4 },
++    ],
++    verdicts: {
++      gpu: { winner: null, onShare: 0.1, offShare: 0.25, onFrames: 120, offFrames: 300, onLoads: 1, offLoads: 2 },
++      zoomPictures: {
++        winner: 'off',
++        onShare: null,
++        offShare: null,
++        onFrames: 0,
++        offFrames: 0,
++        onLoads: 0,
++        offLoads: 0,
++      },
++    },
++  }
++}
++
++/* the collector stand-in: records every request body */
++const received: { path: string; type: string; body: unknown }[] = []
++let collectorStatus = 200
++let collector: Server
++let collectorOrigin: string
++let waiters: (() => void)[] = []
++const nextDelivery = () => new Promise<void>((resolve) => waiters.push(resolve))
++
++/* the route under test, with callers chosen by a test header */
++let app: Server
++let origin: string
++const callers: Record<string, TelemetryCaller> = {
++  alice: { id: 'user-alice', impersonated: false },
++  guest: { id: 'guest-1', impersonated: false },
++  admin: { id: 'user-alice', impersonated: true },
++}
++
++const readBody = (req: IncomingMessage) =>
++  new Promise<string>((resolve) => {
++    let text = ''
++    req.on('data', (chunk) => (text += chunk))
++    req.on('end', () => resolve(text))
++  })
++
++beforeAll(async () => {
++  collector = createServer((req, res) => {
++    void readBody(req).then((text) => {
++      received.push({ path: req.url ?? '', type: req.headers['content-type'] ?? '', body: JSON.parse(text) })
++      res.statusCode = collectorStatus
++      res.end()
++      waiters.forEach((w) => w())
++      waiters = []
++    })
++  })
++  await new Promise<void>((resolve) => collector.listen(0, '127.0.0.1', resolve))
++  collectorOrigin = `http://127.0.0.1:${(collector.address() as AddressInfo).port}`
++
++  const server = express()
++  server.post(
++    '/api/telemetry/render',
++    ...renderTelemetry(async (req) => callers[req.get('x-test-caller') ?? ''] ?? null),
++  )
++  await new Promise<void>((resolve) => {
++    app = server.listen(0, '127.0.0.1', resolve)
++  })
++  origin = `http://127.0.0.1:${(app.address() as AddressInfo).port}`
++})
++afterAll(async () => {
++  await new Promise<void>((resolve) => app.close(() => resolve()))
++  await new Promise<void>((resolve) => collector.close(() => resolve()))
++})
++beforeEach(() => {
++  received.length = 0
++  collectorStatus = 200
++  resetTelemetryLimits()
++  resetTelemetryWarning()
++})
++afterEach(() => {
++  unstubAllEnvs()
++  vi.restoreAllMocks()
++})
++
++const post = (body: unknown, caller: string | null = 'alice', headers: Record<string, string> = {}) =>
++  fetch(`${origin}/api/telemetry/render`, {
++    method: 'POST',
++    /* sendBeacon with a string body sends text/plain; the route reads any type */
++    headers: { 'content-type': 'text/plain;charset=UTF-8', ...(caller ? { 'x-test-caller': caller } : {}), ...headers },
++    body: typeof body === 'string' ? body : JSON.stringify(body),
++  })
++
++const attrs = (list: KeyValue[]) =>
++  Object.fromEntries(list.map(({ key, value }) => [key, Object.values(value)[0] as unknown]))
++
++describe('POST /api/telemetry/render', () => {
++  it('accepts a valid report with 204 and drops it while no collector is set', async () => {
++    const send = vi.spyOn(globalThis, 'fetch')
++    const res = await post(sampleReport())
++    expect(res.status).toBe(204)
++    expect(await res.text()).toBe('')
++    /* the only fetch is the test's own request */
++    expect(send).toHaveBeenCalledTimes(1)
++    expect(await forwardRenderReport(sampleReport())).toBe(false)
++  })
++
++  it('lets a share-link guest report', async () => {
++    stubEnv('OTEL_EXPORTER_OTLP_ENDPOINT', collectorOrigin)
++    const delivered = nextDelivery()
++    expect((await post(sampleReport(), 'guest')).status).toBe(204)
++    await delivered
++    expect(received).toHaveLength(1)
++  })
++
++  it('refuses a request without a session, and a cross-site one', async () => {
++    expect((await post(sampleReport(), null)).status).toBe(401)
++    expect((await post(sampleReport(), 'alice', { 'sec-fetch-site': 'cross-site' })).status).toBe(403)
++    expect((await post(sampleReport(), 'alice', { 'sec-fetch-site': 'same-origin' })).status).toBe(204)
++  })
++
++  it('refuses garbage: not JSON, wrong shapes, extra fields, identifying fields, oversize', async () => {
++    const r = sampleReport()
++    const bad: unknown[] = [
++      'not json',
++      '',
++      null,
++      [],
++      { ...r, v: 2 },
++      { ...r, gpu: { level: 'maybe', reason: 'explore' } },
++      { ...r, rows: [] },
++      { ...r, rows: [{ ...r.rows[0], slow: 500 }] },
++      { ...r, rows: [{ ...r.rows[0], mean: -1 }] },
++      { ...r, rows: [{ ...r.rows[0], frames: 1.5 }] },
++      { ...r, rows: Array.from({ length: 9 }, () => r.rows[0]) },
++      { ...r, userId: 'user-alice' },
++      { ...r, env: { ...r.env, canvasId: 'c1' } },
++      { ...r, env: { ...r.env, renderer: 'x'.repeat(81) } },
++      { ...r, env: { ...r.env, renderer: 'line\nbreak' } },
++      { ...r, env: { ...r.env, userAgent: 'Mozilla/5.0' } },
++    ]
++    for (const body of bad) {
++      const res = await post(body)
++      expect(res.status, JSON.stringify(body)?.slice(0, 80)).toBe(400)
++    }
++    const huge = await post({ ...r, padding: 'x'.repeat(10_000) })
++    expect(huge.status).toBe(413)
++  })
++
++  it('answers 204 past the rate limit but forwards nothing more', async () => {
++    stubEnv('OTEL_EXPORTER_OTLP_ENDPOINT', collectorOrigin)
++    for (let i = 0; i < TELEMETRY_REPORTS_PER_WINDOW; i++) {
++      const delivered = nextDelivery()
++      expect((await post(sampleReport())).status).toBe(204)
++      await delivered
++    }
++    expect((await post(sampleReport())).status).toBe(204)
++    /* another caller has a window of its own */
++    const delivered = nextDelivery()
++    expect((await post(sampleReport(), 'guest')).status).toBe(204)
++    await delivered
++    expect(received).toHaveLength(TELEMETRY_REPORTS_PER_WINDOW + 1)
++  })
++
++  it('drops an impersonating admin’s report', async () => {
++    stubEnv('OTEL_EXPORTER_OTLP_ENDPOINT', collectorOrigin)
++    expect((await post(sampleReport(), 'admin')).status).toBe(204)
++    expect(await forwardRenderReport(sampleReport())).toBe(true)
++    /* only the direct forward arrived */
++    expect(received).toHaveLength(1)
++  })
++})
++
++describe('the OTLP body', () => {
++  it('sends one INFO log record per row with flat attributes and the resource', async () => {
++    stubEnv('OTEL_EXPORTER_OTLP_ENDPOINT', `${collectorOrigin}/`)
++    stubEnv('OTEL_RESOURCE_ATTRIBUTES', 'deployment.environment=test,service.name=ignored,team=a%2Cb')
++    stubEnv('OTEL_SERVICE_NAME', 'doop-test')
++    expect(await forwardRenderReport(sampleReport(), 1_700_000_000_000)).toBe(true)
++    expect(received).toHaveLength(1)
++    const [{ path, type, body }] = received as [{ path: string; type: string; body: OtlpBody }]
++    expect(path).toBe('/v1/logs')
++    expect(type).toBe('application/json')
++    const [resourceLogs] = body.resourceLogs
++    expect(attrs(resourceLogs!.resource.attributes)).toEqual({
++      'deployment.environment': 'test',
++      'service.name': 'doop-test',
++      team: 'a,b',
++    })
++    const [scope] = resourceLogs!.scopeLogs
++    expect(scope!.scope.name).toBe('doop.render-trial')
++    const records = scope!.logRecords
++    expect(records).toHaveLength(2)
++    const [pan, zoom] = records
++    expect(pan).toMatchObject({
++      timeUnixNano: '1700000000000000000',
++      severityNumber: 9,
++      severityText: 'INFO',
++      body: { stringValue: RENDER_LOG_BODY },
++    })
++    expect(attrs(pan!.attributes)).toEqual({
++      'doop.render.epoch': '1',
++      'doop.render.arm': 'B',
++      'doop.render.gpu': 'on',
++      'doop.render.gpu.reason': 'explore',
++      'doop.render.zoom_pictures': 'off',
++      'doop.render.zoom_pictures.reason': 'override',
++      'doop.render.env.renderer': 'ANGLE (Vendor, Some GPU Direct3D11 vs_5_0 ps_5_0, D3D11)',
++      'doop.render.env.hardware': true,
++      'doop.render.env.dpr': 2,
++      'doop.render.env.viewport': '1500x900',
++      'doop.render.env.cores': '8',
++      'doop.render.env.memory_gb': 8,
++      'doop.render.env.display_ms': 16.7,
++      'doop.render.env.touch': false,
++      'doop.render.env.frames': '100-199',
++      'doop.render.verdict.gpu': 'exploring',
++      'doop.render.verdict.gpu.on_share': 0.1,
++      'doop.render.verdict.gpu.off_share': 0.25,
++      'doop.render.verdict.gpu.on_frames': '120',
++      'doop.render.verdict.gpu.off_frames': '300',
++      'doop.render.verdict.gpu.on_loads': '1',
++      'doop.render.verdict.gpu.off_loads': '2',
++      'doop.render.verdict.zoom_pictures': 'off',
++      'doop.render.verdict.zoom_pictures.on_frames': '0',
++      'doop.render.verdict.zoom_pictures.off_frames': '0',
++      'doop.render.verdict.zoom_pictures.on_loads': '0',
++      'doop.render.verdict.zoom_pictures.off_loads': '0',
++      'doop.render.gesture.kind': 'pan',
++      'doop.render.gesture.stratum': 'heavy',
++      'doop.render.gesture.live': false,
++      'doop.render.gestures': '3',
++      'doop.render.frames': '120',
++      'doop.render.slow_frames': '12',
++      'doop.render.slow_share': 0.1,
++      'doop.render.interval.mean_ms': 18.5,
++      'doop.render.interval.p95_ms': 33.2,
++    })
++    expect(attrs(zoom!.attributes)).toMatchObject({ 'doop.render.gesture.kind': 'zoom', 'doop.render.slow_share': 0 })
++  })
++
++  it('defaults service.name to doop, or takes it from the attribute list', async () => {
++    stubEnv('OTEL_EXPORTER_OTLP_ENDPOINT', collectorOrigin)
++    await forwardRenderReport(sampleReport())
++    stubEnv('OTEL_RESOURCE_ATTRIBUTES', 'service.name=design')
++    await forwardRenderReport(sampleReport())
++    const names = (received as { body: OtlpBody }[]).map(
++      (r) => attrs(r.body.resourceLogs[0]!.resource.attributes)['service.name'],
++    )
++    expect(names).toEqual(['doop', 'design'])
++  })
++
++  it('swallows a failing or unreachable collector and warns once', async () => {
++    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
++    stubEnv('OTEL_EXPORTER_OTLP_ENDPOINT', collectorOrigin)
++    collectorStatus = 500
++    expect(await forwardRenderReport(sampleReport())).toBe(false)
++    stubEnv('OTEL_EXPORTER_OTLP_ENDPOINT', 'http://127.0.0.1:9')
++    expect(await forwardRenderReport(sampleReport())).toBe(false)
++    expect(warn).toHaveBeenCalledTimes(1)
++    expect(String(warn.mock.calls[0]?.[0])).toMatch(/collector answered 500/)
++  })
++
++  it('parses resource attributes the way the SDKs do', () => {
++    expect([...parseResourceAttributes(' a = 1 ,=x,b,c=%E2%9C%93,d=50%')]).toEqual([
++      ['a', '1'],
++      ['c', '✓'],
++      ['d', '50%'],
++    ])
++    expect(parseResourceAttributes(undefined).size).toBe(0)
++  })
++
++  it('keeps the sample report valid, so the tests above test the route and not the sample', () => {
++    expect(renderReportSchema.safeParse(sampleReport()).success).toBe(true)
++  })
++})
++
++interface OtlpBody {
++  resourceLogs: {
++    resource: { attributes: KeyValue[] }
++    scopeLogs: { scope: { name: string }; logRecords: { attributes: KeyValue[] }[] }[]
++  }[]
++}

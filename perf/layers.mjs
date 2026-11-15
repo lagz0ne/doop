@@ -4,7 +4,7 @@ const loc = JSON.parse(readFileSync(new URL("./local.json", import.meta.url))); 
 const b = await puppeteer.launch({ executablePath: process.env.CHROME_PATH, headless: true, args: ["--no-sandbox", "--window-size=1600,1000"] });
 const p = await b.newPage(); await p.setViewport({ width: 1600, height: 1000 });
 await p.goto(L + "/", { waitUntil: "domcontentloaded" });
-await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); }, { email: loc.email, password: loc.password });
+await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); localStorage.setItem("doop:render-trial", "off"); }, { email: loc.email, password: loc.password });
 await p.goto(`${L}/c/${loc.canvas}?page=${process.argv[2] || "stress"}`, { waitUntil: "domcontentloaded" });
 await new Promise((r) => setTimeout(r, 6000));
 const c = await p.createCDPSession(); let layers = [];

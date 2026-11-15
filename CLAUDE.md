@@ -136,10 +136,20 @@ transform still applies, then `bin/doop check --test` and commit (`vendor/doop` 
   in place.
 - Render switches, each a `localStorage` key read at load (set it, then reload), per browser:
   `doop:cull='off'` (0001: every frame a live document again), `doop:cull-shells='off'` (0033:
-  far shells stay in the render tree), `doop:zoom-pictures='on'` (0035: pictures stand in for
-  live documents while the zoom moves), `doop:gpu='on'` or `'force'` (0036: culled frames drawn on
-  one WebGL2 canvas; `on` needs hardware WebGL2). The last two are experiments, off by default;
-  `docs/history.md` has what each measured and what is not verified.
+  far shells stay in the render tree), `doop:zoom-pictures='on'` or `'off'` (0035: pictures stand
+  in for live documents while the zoom moves), `doop:gpu='on'`, `'force'` or `'off'` (0036: culled
+  frames drawn on one WebGL2 canvas; `on` needs hardware WebGL2). With either of the last two
+  unset, the render trial decides it per browser (0039): each page load gets a level, slow frames
+  are counted in real pans and zooms, and the browser keeps what is smoother there (the GPU layer
+  only ever on hardware WebGL2). `doop:render-trial='off'` turns the trial off (an unset switch is
+  then off, and nothing is measured or sent), `'force'` lets a software GL in; its state is
+  `doop:render-trial-data`. `docs/history.md` has what each measured and what is not verified.
+- Render reports: each browser in the trial posts its counts to `/api/telemetry/render` (0038: a
+  closed schema, nothing about the canvas or the account). The server forwards them as OTLP/HTTP
+  JSON logs when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (with `OTEL_SERVICE_NAME` and
+  `OTEL_RESOURCE_ATTRIBUTES`, all optional, in doop's `.env.example`) and drops them otherwise.
+  Records: body `render trial`, attributes `doop.render.*` (arm, gesture kind, frames, slow frames,
+  each browser's verdicts).
 - The UI hides the team/product chrome (Share, Owned/Shared scopes, Community, Automations,
   Integrations, Webhooks, plan line, Help, and on Home the Agents rail section and the "Ask me what
   to design" hero) behind `FULL_UI` (`src/lib/fullUi.ts`, our `feat(ui)` patch). Workspaces stay.

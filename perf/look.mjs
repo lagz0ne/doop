@@ -15,7 +15,7 @@ const p = await b.newPage();
 await p.setViewport({ width: 1600, height: 1000, deviceScaleFactor: Number(dpr) });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 await p.goto(L + "/", { waitUntil: "domcontentloaded" });
-await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); }, { email: loc.email, password: loc.password });
+await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); localStorage.setItem("doop:render-trial", "off"); }, { email: loc.email, password: loc.password });
 if (process.env.CULL) await p.evaluate((c) => localStorage.setItem("doop:cull", c), process.env.CULL); // CULL=off: every frame live, the reference picture
 await p.goto(`${L}/c/${loc.canvas}?page=${pageId}`, { waitUntil: "domcontentloaded" });
 await p.waitForSelector(".world", { timeout: 30000 });

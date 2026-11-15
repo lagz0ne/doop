@@ -34,6 +34,7 @@ outside this repo.)
 | 2026-11-15 | Upstream: still no release after v0.14.0, `main` unchanged since 2026-11-11. Its open PR #505 (four security fixes, not merged) carried in part, until upstream releases it: 0029 (a frame's own script could post the editing runtime's save message and store its HTML under the viewer's name; saves are refused for frames with scripts, inline handlers or `javascript:` URLs) and 0030 (`AGENT_GUIDELINE_WRITES=false` stops agents writing the style guides every later agent run reads as rules), both unchanged and under their author's name, plus 0031 (inline text editing is not offered where 0029 would drop its save). Not carried: the frame CSP (it blocks remote scripts, so a design loading one from a CDN would stop rendering) and the non-root container (a Dockerfile change, and the data volume would need new ownership). A local copy of a production canvas (271 frames) has no frame 0029 refuses |
 | 2026-11-15 | Agents work over MCP as their own account, so the canvases they create are theirs, and the person they work for was only a member, without Share. Two answers, both taken: hand those canvases to the person (`doopctl share owner`, the agent stays a member with edit), and 0032, which lets a canvas's own people (owner, members, workspace members) set its link, as Google Docs and Figma let editors share by default. Someone in by the link alone still cannot change it, so a link cannot widen itself. No migration |
 | 2026-11-15 | The GPU picture layer tried and shelved, then measured properly (GPU compositing on a software GL, counts over timings): a camera frame's cost follows the number of compositor layers, and every frame shell is one. Four levers came out of it and were built in parallel side trees, then merged: 0033 (shells far from the view leave the render tree) and 0034 (the grids scale while the zoom moves) are on; 0035 (pictures in place of live documents while the zoom moves, `doop:zoom-pictures`) and 0036 (the picture layer reworked so a drawn frame has nothing in the DOM, `doop:gpu`) are switches, off by default: one changes what is on screen mid-gesture, the other could only be measured on a software GL here |
+| 2026-11-15 | Asked whether anything observed how the canvas renders for real people: nothing did (the product analytics are off on a self-hosted build, and no trace of a gesture left the browser). So the two switches became a trial every browser runs on itself (0039): it tries each level over page loads, counts slow frames in real pans and zooms, and keeps what is smoother there; the GPU layer only ever on hardware WebGL2. Each browser reports its counts to the server, which forwards them to an OpenTelemetry collector when one is configured (0038). Before the GPU layer could be handed to real browsers its untested paths were audited and two defects fixed (0037) |
 
 ## Patches
 
@@ -75,6 +76,9 @@ outside this repo.)
 | 0034 | perf(canvas): scale the stage grids while the zoom moves, paint them at rest | the dot grid's `background-size` followed the zoom, so its layer (the size of the view) was rastered whole on every zoom frame. Now painted at one zoom and scaled by transform up to 10% above it, exact 120 ms after the zoom rests; the pixel grid the same (`src/lib/stageGrid.ts`). A 30-frame pinch: 140 tiles in 30 frames → 24 in 5 |
 | 0035 | perf(canvas): show frame pictures in place of live documents while the zoom moves | a live document is rastered again at every zoom step. With `localStorage['doop:zoom-pictures']='on'` its picture stands in while the zoom moves and the document comes back once it has painted at the new zoom (`doop:painted`); a frame being worked in (selected, edited, moved, streaming, Prototype mode) keeps its document. Raster tasks in the frames' process over a pinch: 338 → 28. Off by default: the picture is the server's render, without the document's scroll or script state |
 | 0036 | perf(canvas): culled frames drawn whole on one WebGL2 canvas, no DOM for them (experiment, doop:gpu) | the shelved picture layer, reworked on what the measurement showed: a drawn frame has no element at all, its picture, name and hover ring are on the canvas and a press is resolved by arithmetic (`src/lib/gpuPictures.ts`, `gpuLabels.ts`, `StagePictures.tsx`). Frames with a badge or icon, or with DOM under them, stay shells. Layers at fit: 204 → 9. `localStorage['doop:gpu']='on'` (hardware WebGL2) or `'force'`; off by default until measured on a real GPU |
+| 0037 | fix(canvas): the GPU layer at any screen density, and shells where the GPU falls short | what 0036 left untested. Names were measured at the CSS size, but Chromium shapes text at the device size, so above 1x a name was cut at another letter than its title (up to 6 px off): now measured at the device size (`gpuLabels.ts`). A WebGL canvas asked for more than the GPU gives comes back smaller and not in proportion, and every picture was drawn in the wrong place: such a canvas is given up and every frame stays a shell (`PictureRenderer.fitsStage`). A change of screen density is noticed on the next camera move. Browser tests for marquee, peers' changes, an agent's stream, a phone's pan, tap and hold |
+| 0038 | feat(telemetry): render trial reports, forwarded to an OpenTelemetry collector | `POST /api/telemetry/render` takes a browser's report (a closed schema of enums and numbers, `shared/renderTrialSchema.ts`: no canvas, frame or account in it), from a signed-in session only, same site only, 30 per ten minutes per account. With `OTEL_EXPORTER_OTLP_ENDPOINT` set each row goes out as an OTLP/HTTP JSON log record (body `render trial`, attributes `doop.render.*`); unset, reports are dropped. Plain `fetch`, no SDK dependency (`server/telemetry.ts`) |
+| 0039 | perf(canvas): a render trial decides the GPU layer and zoom pictures per browser | with `doop:gpu` or `doop:zoom-pictures` unset, each page load is given a level of each (2×2), the Stage's gestures are timed frame by frame, and the browser leans to the level with fewer slow frames (`src/lib/renderTrial.ts`, `renderTrialClient.ts`). `localStorage['doop:render-trial']='off'` turns it off (the switches as they were, nothing measured or sent); an explicit switch still wins and is still measured |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -219,6 +223,56 @@ real wheel pan of 30 events, main / compositor thread ms, on a loaded machine.
   on a drawn frame.
 - All switches together: 9 layers at fit, 31 at 60%.
 
+The render trial (0037-0039, 2026-11-15). The question was whether the two switches could be
+decided by observation, per environment, and not by a guess made on a machine without a GPU.
+Nothing observed rendering before: the product analytics are off in a self-hosted build and
+would not carry frame timings anyway. What was built, and why this way:
+
+- The unit is the browser, not the fleet. What decides whether the GPU layer or the pictures pay
+  is the machine (its GPU, its display, its canvases), so each browser tries the levels on its
+  own page loads and keeps its own verdict in `localStorage`; the server only hears about it.
+  The arms are the 2×2 of the two switches: neither, the GPU layer, zoom pictures, both.
+- The measure is the interval between animation frames while the camera moves, the only frame
+  timing a page can read. A frame is slow when its interval is over 1.5× the display's own
+  (estimated from the shortest intervals seen). Counts of slow frames are compared, not means.
+- A factor is judged only on gestures it can change: the GPU layer on every gesture that starts
+  with a culled frame in view, zoom pictures on zooms with a live document in view. The first
+  version judged the GPU layer on heavy scenes only; on a software GL it also made a pinch at
+  60% worse (14 → 157 slow frames of 360), which that rule would not have seen.
+- Exploration: a level is drawn at random until one is two loads ahead, then the other is due
+  (the big stick design of Soares and Wu, a standard restricted randomization). The first
+  version alternated strictly, which paired the two factors' levels load after load, so one
+  factor's effect would have been read as the other's. A level needs 600 judged frames and 3
+  judged loads before a verdict.
+- The verdict is conservative: a level is kept on only when it has at least 20% fewer slow
+  frames and at least two percentage points fewer; otherwise off. A browser with no slow frames
+  at either level settles on off and stops exploring. While a verdict is open to revision the
+  other level is still tried on one load in ten (epsilon-greedy).
+- The GPU layer is only ever tried on hardware WebGL2 (`failIfMajorPerformanceCaveat`, as Mapbox
+  GL gates its renderer, plus the unmasked renderer's name), and a lost context or a renderer
+  that cannot be made takes that load's frames back to shells; after two such loads the browser
+  stops trying it.
+- An explicit switch (`doop:gpu`, `doop:zoom-pictures`) wins, is measured and reported, and
+  teaches the trial nothing. `doop:render-trial='force'` lets a software GL into the trial, for
+  testing it here.
+
+Measured here (188-frame page, 1600×1000, SwiftShader, two interleaved rounds, slow frames of
+frames recorded by the trial's own recorder). Pan at fit: neither 0/240, zoom pictures 0/240,
+GPU layer 61/240, both 56/240. Pinch at 60%: neither 14/360, zoom pictures 0/360, GPU layer
+157/360, both 22/360. So on this machine the trial settles on zoom pictures on and the GPU layer
+off, and the hardware gate keeps the GPU layer away from any software GL to begin with. What the
+recorder itself costs in a wheel pan: full compositor updates 30-32 against 30-31, main thread
+257-414 against 278-409 ms; it asks for an animation frame between sparse wheel events, so
+empty frames are counted in a trace (Layerize 86-111 → 129-135 in the author's runs) while
+update count and time stay as they were.
+
+Not verified: any real GPU, any phone, Safari. That is what the trial is for, and the reports
+are how to read it; a query over the forwarded records, by arm, summing `doop.render.frames` and
+`doop.render.slow_frames`, gives each arm's share of slow frames, and
+`doop.render.verdict.gpu` / `doop.render.verdict.zoom_pictures` say what each browser settled on.
+Known gap of the GPU layer: a drawn frame has no element, so its name is not exposed to
+assistive technology while it is drawn.
+
 Preview fidelity (0007-0009, 2026-11-12: culled frames looked too rasterized, and a clicked
 frame looked very different from its neighbours). Three causes, measured on a copy of a real
 canvas with `perf/look.mjs`, `perf/boot.mjs`, `perf/fonts.mts`: one fixed-size JPEG for every
@@ -268,6 +322,16 @@ Tests for 0033-0036 (2026-11-15): `bin/doop check --browser` 2731 pass, 12 fail:
 `elementPanelBrowser` failures pristine v0.14.0 has here, and `oidc` and `elementIds` (1 each,
 timeouts under load; 19 of 19 run alone). The patches add 8 test files (`shellCull`, `stageGrid`,
 `zoomPictures`, `gpuPictures`, each with a browser file).
+
+Tests for 0037-0039 (2026-11-15): `bin/doop check --browser` 2786 pass, 10 fail: the 10
+`elementPanelBrowser` failures pristine v0.14.0 has here. New files: `renderTrial` (the rules:
+eligibility, exploration, verdicts, the recorder), `renderTrialBrowser` (a load assigned, its
+gestures recorded, the report sent on hide and saying nothing of the canvas; an explicit switch;
+the trial off), `telemetry` (the route and the OTLP encoding); `gpuPicturesBrowser` grew by the
+audited paths. The other browser tests run with the trial off (`tests/browser.ts`). End to end
+on a local production build with a stand-in collector: an unset browser on a software GL got the
+GPU layer `ineligible` and explored zoom pictures, and each report arrived as `POST /v1/logs`
+with one record per row under the configured resource attributes.
 
 Upgrading past v0.14.0 (found 2026-11-14): drizzle's migrator applies a migration only when it is
 newer than the last one applied (`created_at` < the journal's `when`), not by name. Upstream's

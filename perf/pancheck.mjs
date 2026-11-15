@@ -4,7 +4,7 @@ const loc = JSON.parse(readFileSync(new URL("./local.json", import.meta.url))); 
 const b = await puppeteer.launch({ executablePath: process.env.CHROME_PATH, headless: true, args: ["--no-sandbox", "--window-size=1600,1000"] });
 const p = await b.newPage(); await p.setViewport({ width: 1600, height: 1000 });
 await p.goto(L + "/", { waitUntil: "domcontentloaded" });
-await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); }, { email: loc.email, password: loc.password });
+await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); localStorage.setItem("doop:render-trial", "off"); }, { email: loc.email, password: loc.password });
 await p.goto(`${L}/c/${loc.canvas}?page=stress`, { waitUntil: "domcontentloaded" }); const sleep = (ms) => new Promise((r) => setTimeout(r, ms)); await sleep(5000);
 const cam = () => p.evaluate(() => { const st = document.querySelector(".stage"); const w = document.querySelector(".world"); const z = Number(getComputedStyle(st).getPropertyValue("--zoom")); const m = new DOMMatrix(getComputedStyle(w).transform); const shells = [...document.querySelectorAll("[data-frame-shell],[data-frame-surface]")]; const vis = shells.filter((e) => { const r = e.getBoundingClientRect(); return r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight; }).length; return { zoom: z, tx: Math.round(m.e), ty: Math.round(m.f), worldView: [Math.round(-m.e / z), Math.round(-m.f / z)], framesOnScreen: vis, iframes: document.querySelectorAll("iframe[data-doop-frame]").length }; });
 console.log("fit     ", await cam());

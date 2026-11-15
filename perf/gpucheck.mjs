@@ -10,7 +10,7 @@ for (const mode of ["off", "force"]) {
   const p = await b.newPage(); await p.setViewport({ width: 1600, height: 1000 });
   p.on("console", (m) => { if (/doop|error/i.test(m.text())) console.log(`[${mode}] ${m.text()}`); });
   await p.goto(L + "/", { waitUntil: "domcontentloaded" });
-  await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); }, { email: loc.email, password: loc.password });
+  await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); localStorage.setItem("doop:render-trial", "off"); }, { email: loc.email, password: loc.password });
   await p.evaluate((m) => localStorage.setItem("doop:gpu", m), mode);
   await p.goto(`${L}/c/${loc.canvas}?page=${page}`, { waitUntil: "domcontentloaded" }); await sleep(6000);
   const state = () => p.evaluate(() => ({

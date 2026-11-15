@@ -5,7 +5,7 @@ const b = await puppeteer.launch({ executablePath: process.env.CHROME_PATH, head
 const p = await b.newPage(); await p.setViewport({ width: 1600, height: 1000 });
 p.on("console", (m) => console.log("  [page]", m.text().slice(0, 200))); p.on("pageerror", (e) => console.log("  [pageerror]", e.message.slice(0, 300)));
 await p.goto(L + "/", { waitUntil: "domcontentloaded" });
-await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); }, { email: loc.email, password: loc.password });
+await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); localStorage.setItem("doop:render-trial", "off"); }, { email: loc.email, password: loc.password });
 await p.goto(`${L}/c/${loc.canvas}?page=stress`, { waitUntil: "domcontentloaded" });
 await new Promise((r) => setTimeout(r, 5000));
 const info = await p.evaluate(() => { const s = [...document.querySelectorAll("[data-frame-shell]")]; const el = s.find((e) => { const r = e.getBoundingClientRect(); return r.x > 300 && r.y > 200 && r.x < 1200 && r.y < 700; }); const r = el.querySelector("[data-frame-surface]").getBoundingClientRect(); window.addEventListener("pointerdown", (e) => console.log("pointerdown", e.isTrusted, e.target.tagName, (e.target.className || "").toString().slice(0, 50), e.target.closest("[data-frame-shell]") ? "IN-SHELL" : "not-shell"), true); return { n: s.length, id: el.getAttribute("data-frame-shell"), x: r.x + r.width / 2, y: r.y + r.height / 2, top: document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.outerHTML.slice(0, 120) }; });

@@ -7,7 +7,7 @@ const L = process.env.DOOP || "http://localhost:4477"; const loc = JSON.parse(re
 const b = await puppeteer.launch({ executablePath: process.env.CHROME_PATH, headless: true, args: ["--no-sandbox", "--window-size=1600,1000", "--site-per-process", "--enable-features=IsolateSandboxedIframes"] });
 const p = await b.newPage(); await p.setViewport({ width: 1600, height: 1000 }); const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 await p.goto(L + "/", { waitUntil: "domcontentloaded" });
-await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); }, { email: loc.email, password: loc.password });
+await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); localStorage.setItem("doop:render-trial", "off"); }, { email: loc.email, password: loc.password });
 await p.goto(`${L}/c/${loc.canvas}?page=${process.env.PAGE || "stress"}`, { waitUntil: "domcontentloaded" }); await sleep(5000);
 const cdp = await p.createCDPSession(); await cdp.send("Performance.enable");
 const metric = async (n) => (await cdp.send("Performance.getMetrics")).metrics.find((x) => x.name === n)?.value || 0;

@@ -10,7 +10,7 @@ const b = await puppeteer.launch({ executablePath: process.env.CHROME_PATH, head
 const p = await b.newPage();
 await p.setViewport({ width: 1600, height: 1000 });
 await p.goto(L + "/", { waitUntil: "domcontentloaded" });
-await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); }, { email: loc.email, password: loc.password });
+await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); localStorage.setItem("doop:render-trial", "off"); }, { email: loc.email, password: loc.password });
 await p.evaluate((c) => localStorage.setItem("doop:cull", c), cull);
 if (process.env.LS) await p.evaluate((kv) => { for (const [k, v] of Object.entries(kv)) localStorage.setItem(k, v); }, JSON.parse(process.env.LS));
 const cdp = await b.target().createCDPSession();

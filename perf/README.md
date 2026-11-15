@@ -51,6 +51,12 @@ anything about layers, raster or compositing, run with GPU compositing on a soft
 
     CHROME_ARGS="--enable-unsafe-swiftshader --use-angle=swiftshader --ignore-gpu-blocklist --enable-gpu-rasterization --enable-gpu"
 
+The render trial (patch 0039) would give every run a random level of zoom pictures (and of the
+GPU layer on a hardware GL), so the scripts that open a canvas set `doop:render-trial='off'`
+before `LS=` is applied: a run measures the switches it names and nothing else. To watch the
+trial itself, pass `LS='{"doop:render-trial":"force"}'` (a software GL is let in) and read
+`localStorage['doop:render-trial-data']`.
+
 `bench.mjs` prints the mode it got. Even so, CPU time of the GPU process is then SwiftShader
 filling pixels on eight worker threads: it follows layer area times frames and is no measure of
 a real GPU. Compare what does not depend on the GPU: main-thread and compositor-thread time,
