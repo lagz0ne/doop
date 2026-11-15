@@ -1498,7 +1498,7 @@ export const FrameView = memo(function FrameView({
   }, [selected]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ---- inline text editing ---- */
-  const canEdit = !!frame.html && !stream && !frame.locked && !readOnly && !/<script/i.test(frame.html)
+  const canEdit = !!frame.html && !stream && !frame.locked && !readOnly && !hasExecutableContent(frame.html)
 
   async function enterGroup(at: { x: number; y: number }): Promise<boolean> {
     const selected = pickedHere()
