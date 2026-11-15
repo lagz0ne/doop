@@ -134,6 +134,12 @@ transform still applies, then `bin/doop check --test` and commit (`vendor/doop` 
   `bin/shims` and bun on PATH) when committing in build/doop, or doop's husky hooks fail.
 - `bun install` and `vite build` are slow on a slow disk, so leave `build/doop/node_modules`
   in place.
+- Render switches, each a `localStorage` key read at load (set it, then reload), per browser:
+  `doop:cull='off'` (0001: every frame a live document again), `doop:cull-shells='off'` (0033:
+  far shells stay in the render tree), `doop:zoom-pictures='on'` (0035: pictures stand in for
+  live documents while the zoom moves), `doop:gpu='on'` or `'force'` (0036: culled frames drawn on
+  one WebGL2 canvas; `on` needs hardware WebGL2). The last two are experiments, off by default;
+  `docs/history.md` has what each measured and what is not verified.
 - The UI hides the team/product chrome (Share, Owned/Shared scopes, Community, Automations,
   Integrations, Webhooks, plan line, Help, and on Home the Agents rail section and the "Ask me what
   to design" hero) behind `FULL_UI` (`src/lib/fullUi.ts`, our `feat(ui)` patch). Workspaces stay.

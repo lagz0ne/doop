@@ -1,0 +1,675 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 11:09:42 +0000
+Subject: [PATCH 33/36] perf(canvas): frame shells far from the view leave the
+ render tree
+
+Chrome gives every FrameShell it paints a compositor layer of its own, and
+under the world's composited transform it paints a few thousand pixels
+around the view. On a page of 182 desktop frames at 60%, about 6 frames are
+in view, 96 shells are painted and the page has 134 layers. Every camera
+frame rebuilds that layer list (PaintArtifactCompositor::Update) and the
+compositor walks it, so a pan costs in proportion to the shells painted,
+wherever they are.
+
+A shell more than half a viewport from the view now gets the `hidden`
+attribute (display:none), as tldraw culls the shapes outside its viewport.
+The element stays, so nothing that reads data-frame-shell changes (wake
+press, marquee, deep links, drag targets). FrameViews are never touched: a
+selected, woken or streamed frame is drawn whatever the camera does, and a
+culled shell still turns into one. A layout effect in Stage follows the
+store's viewport in the same task as the camera write, in its own
+subscription so apply() is unchanged, and a ResizeObserver follows the
+stage. The in/out test is arithmetic over the frames' boxes (a turned frame
+by its rotated bounds), and a camera frame in which no shell crosses a
+margin writes nothing.
+
+The margins, in viewports: a shell comes back at 0.5 (the previews' sharp
+margin), goes at rest beyond 0.75, and goes while the camera moves only
+beyond 1.5. Taking a shell out costs about 0.25 ms of style and layout.
+Hiding at 0.75 during motion made the back-and-forth pan at fit 20-25%
+slower (114 toggles); with the 1.5 margin it toggles nothing. Hiding only at
+rest let a continuous 120-event wheel sweep at 60% grow to 29 shells in the
+tree; with the drop margin it stays at 14.
+
+localStorage['doop:cull'] = 'off' turns this off along with the rest of the
+culling, and 'doop:cull-shells' = 'off' turns off this alone, for an A/B.
+
+Rejected:
+- visibility:hidden: needs an @layer override of Tailwind's [hidden] rule.
+  It gives the same layer count at about 2x the style cost per toggle, and
+  no difference in pictures at entry.
+- content-visibility:hidden: 115 layers at 60%, against 40.
+- Not rendering the shell: a React render per crossing, and the element is
+  lost (its decoded picture, the wake press target), for the same layers.
+- An inline display style: no different from the attribute.
+
+Pictures at entry: the preview <img> is lazy, so under display:none it does
+not load until the shell comes back at the 0.5 margin. With a deep link
+plus 30 wheel events at 60% in a fresh profile, the on-screen shells with an
+unloaded picture were the same with and without culling, all from local
+preview failures. No shell was on screen while out of the tree. The browser
+test pans at 2400 px/s into frames never seen at 25%. In every animation
+frame it finds each on-screen shell in the tree with its picture loaded, and
+frame 199's picture painted at the end.
+
+Measured in headless Chromium with SwiftShader GPU compositing, 1600x1000,
+on the 182-frame page. Wheel pan = 30 wheel events back and forth; long
+pan = 30 one-way. Times are main / compositor thread ms, runs interleaved,
+load 2.9-6.1.
+Layers: 60% 134 -> 40, 28% 384 -> 116, fit (8%) 204 -> 198.
+60% wheel pan: off 499/293 561/317 512/297 521/298;
+               on  259/145 278/136 247/143 284/162 (2.0x / 2.1x)
+60% long pan:  off 789/381 615/294 789/416 636/321;
+               on  550/232 388/220 609/273 437/201
+28% wheel pan: off 960/453 699/307 923/437 688/305;
+               on  262/222 205/153 296/223 204/146 (3.4x / 2.0x)
+28% long pan:  off 841/356 1447/299 815/339 1151/266;
+               on  272/188 184/65 262/183 192/74
+fit wheel pan: off 396/283 597/449 381/265 303/192;
+               on  360/282 273/202 308/232 296/202 (no shell toggled)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/components/FrameView.tsx   |   4 +
+ src/components/Stage.tsx       |  33 ++++++
+ src/lib/shellCull.ts           | 123 +++++++++++++++++++++
+ tests/shellCull.test.ts        | 185 +++++++++++++++++++++++++++++++
+ tests/shellCullBrowser.test.ts | 191 +++++++++++++++++++++++++++++++++
+ 5 files changed, 536 insertions(+)
+ create mode 100644 src/lib/shellCull.ts
+ create mode 100644 tests/shellCull.test.ts
+ create mode 100644 tests/shellCullBrowser.test.ts
+
+diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
+index 91683f8..961c29a 100644
+--- a/src/components/FrameView.tsx
++++ b/src/components/FrameView.tsx
+@@ -18,6 +18,7 @@ import { throttle } from '../lib/throttle'
+ import { getIdentity } from '../lib/identity'
+ import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
+ import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
++import { trackShell } from '../lib/shellCull'
+ 
+ /** `<script>`, inline event handlers or `javascript:` URLs: anything that runs inside the frame. */
+ export function hasExecutableContent(html: string): boolean {
+@@ -2263,8 +2264,11 @@ function FramePreview({ frame }: { frame: Frame }) {
+  */
+ const FrameShell = memo(function FrameShell({ frame, stack }: { frame: Frame; stack?: number }) {
+   const element = isCanvasElement(frame.html)
++  /* far from the view it leaves the render tree (shellCull.ts) */
++  const track = useCallback((el: HTMLDivElement | null) => trackShell(frame.id, el), [frame.id])
+   return (
+     <div
++      ref={track}
+       data-frame-shell={frame.id}
+       data-frame-locked={frame.locked ? '' : undefined}
+       className="absolute"
+diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
+index b9688df..d39b6c7 100644
+--- a/src/components/Stage.tsx
++++ b/src/components/Stage.tsx
+@@ -64,6 +64,7 @@ import {
+   useLiveFrames,
+   type FrameBox,
+ } from '../lib/liveFrames'
++import { cullShells, SHELL_SETTLE_MS, shellBox, shellCullingEnabled } from '../lib/shellCull'
+ 
+ const MIN_ZOOM = 0.08
+ /* how long the camera holds still before the chrome inside the world is put
+@@ -541,6 +542,38 @@ export function Stage({
+     }
+   }, [canvas])
+ 
++  /* Shells far from the view leave the render tree (shellCull.ts). The camera
++     is followed in the same task as apply() writes it, not once it rests, so
++     a shell is back in the tree before a pan, a zoom or a jump reaches it;
++     the ones it leaves behind go once far behind, or once it rests. A
++     layout effect, so a page's shells are culled before its first paint. */
++  useLayoutEffect(() => {
++    const el = ref.current
++    if (!el || !shellCullingEnabled()) return
++    const boxes = (canvas?.frames ?? []).filter((f) => !f.hidden).map(shellBox)
++    let size = { ...measuredStage(el) }
++    let rest = 0
++    const settle = () => cullShells(boxes, useStore.getState().viewport, size)
++    settle()
++    const unsub = useStore.subscribe((s, prev) => {
++      if (s.viewport === prev.viewport) return
++      cullShells(boxes, s.viewport, size, false)
++      window.clearTimeout(rest)
++      rest = window.setTimeout(settle, SHELL_SETTLE_MS)
++    })
++    const resize = new ResizeObserver(([entry]) => {
++      if (!entry) return
++      size = { width: entry.contentRect.width, height: entry.contentRect.height }
++      settle()
++    })
++    resize.observe(el)
++    return () => {
++      unsub()
++      window.clearTimeout(rest)
++      resize.disconnect()
++    }
++  }, [canvas])
++
+   /* A press on a FrameShell wakes it first. The listener sits on the window's
+      capture phase, ahead of React's root: the shell becomes a FrameView
+      synchronously, the original press is withheld, and the same press is
+diff --git a/src/lib/shellCull.ts b/src/lib/shellCull.ts
+new file mode 100644
+index 0000000..ef2de83
+--- /dev/null
++++ b/src/lib/shellCull.ts
+@@ -0,0 +1,123 @@
++import { rotatedBounds } from '../../shared/frameRotation'
++import { cullingEnabled, viewRect, type Camera, type FrameBox, type Size } from './liveFrames'
++
++/* Frame shells far from the view leave the render tree.
++
++   A culled frame is a FrameShell (liveFrames.ts), and Chrome gives every
++   shell it paints a compositor layer of its own: sparse content does not
++   merge. Under the world's composited transform it paints a few thousand
++   pixels around the view, so at 60% on a page of desktop screens about six
++   frames are in view and nearly a hundred shells have layers, and every
++   camera frame rebuilds that whole layer list (Blink's full
++   PaintArtifactCompositor update) and the compositor walks it. A pan costs
++   in proportion to the shells painted, wherever they are.
++
++   So a shell farther from the view than a margin is taken out of the render
++   tree, as tldraw culls the shapes outside its viewport. Its element stays
++   (the DOM, React and every reader of `data-frame-shell` see what they saw);
++   only the `hidden` attribute goes on and off, written straight to the
++   element in the same task as the camera, so a frame coming into view has
++   been back in the tree for a while before it gets there. The in/out test is
++   arithmetic over the frames' boxes; a camera frame in which no shell crosses
++   a margin writes nothing. Shells come back inside SHELL_ENTER_MARGIN and go
++   only past SHELL_KEEP_MARGIN, so a camera that jitters at an edge does not
++   toggle them; while the camera moves, only past SHELL_DROP_MARGIN. FrameViews are not touched: a frame that wakes, is selected
++   or is streamed into is drawn whatever this says. */
++
++/** A shell comes back into the render tree within this many viewports of the
++ *  view… It is the sharp margin of the previews (liveFrames.ts), so every
++ *  picture fetched at the sharp level is in the tree and loads, and a pan of
++ *  half a screen between two animation frames still finds it painted. */
++export const SHELL_ENTER_MARGIN = 0.5
++/** …and leaves it beyond this many (hysteresis for a camera at an edge). */
++export const SHELL_KEEP_MARGIN = 0.75
++/** While the camera moves, a shell in the tree leaves it only beyond this
++ *  many; at rest the keep margin applies again. See cullShells. */
++export const SHELL_DROP_MARGIN = 1.5
++/** The camera is at rest once it has not moved for this long (as the live
++ *  frames' culling waits, Stage.tsx). */
++export const SHELL_SETTLE_MS = 120
++
++/** On with live-frame culling, unless `localStorage['doop:cull-shells'] ===
++ *  'off'`: the A side of a before/after measurement in one build. */
++export function shellCullingEnabled(): boolean {
++  if (!cullingEnabled()) return false
++  try {
++    return localStorage.getItem('doop:cull-shells') !== 'off'
++  } catch {
++    return true
++  }
++}
++
++/** The box a frame covers on the canvas: a rotated frame turns about its
++ *  centre (CSS rotate), so its axis-aligned bounds. */
++export function shellBox(frame: FrameBox & { rotation?: number }): FrameBox {
++  if (!frame.rotation) return { id: frame.id, x: frame.x, y: frame.y, width: frame.width, height: frame.height }
++  return { id: frame.id, ...rotatedBounds(frame, frame.rotation) }
++}
++
++type Rect = ReturnType<typeof viewRect>
++
++export interface ShellRects {
++  enter: Rect
++  keep: Rect
++  drop: Rect
++}
++
++/** The world rectangles a shell must reach to come back (`enter`), to stay
++ *  at rest (`keep`) and to stay while the camera moves (`drop`); null for a stage not measured yet, where nothing is culled. */
++export function shellRects(camera: Camera, stage: Size): ShellRects | null {
++  if (stage.width <= 0 || stage.height <= 0 || camera.zoom <= 0) return null
++  return {
++    enter: viewRect(camera, stage, SHELL_ENTER_MARGIN),
++    keep: viewRect(camera, stage, SHELL_KEEP_MARGIN),
++    drop: viewRect(camera, stage, SHELL_DROP_MARGIN),
++  }
++}
++
++/** Whether a shell belongs in the render tree: it overlaps the enter
++ *  rectangle, or it is in the tree already and overlaps the keep one (the
++ *  drop one while the camera moves, `settled` false). */
++export function shellInView(box: FrameBox, rects: ShellRects | null, wasIn: boolean, settled = true): boolean {
++  if (!rects) return true
++  const r = !wasIn ? rects.enter : settled ? rects.keep : rects.drop
++  return box.x < r.x + r.width && box.x + box.width > r.x && box.y < r.y + r.height && box.y + box.height > r.y
++}
++
++/* The mounted shells' elements, and the frames currently out of the tree.
++   The state is kept per frame, whether it is a shell at the moment or not,
++   so a shell that mounts (a FrameView going back to sleep, a page shown
++   again) starts in the state the camera last gave it. */
++const shells = new Map<string, HTMLElement>()
++const culled = new Set<string>()
++
++/** A FrameShell's ref: registers its element and puts it in its state. */
++export function trackShell(frameId: string, el: HTMLElement | null): void {
++  if (!el) {
++    shells.delete(frameId)
++    return
++  }
++  shells.set(frameId, el)
++  el.hidden = culled.has(frameId)
++}
++
++/** Brings the shells' state up to the camera: only the ones that cross a
++ *  margin are written to. Taking a shell out costs a style and layout pass
++ *  over it (about 0.25 ms, as much as several camera frames of it being
++ *  painted), so a camera that pans back and forth over a dense page (the
++ *  whole page at fit) would pay that for dozens of shells a frame and win
++ *  nothing. While it moves (`settled` false) a shell stays out to the drop
++ *  margin, so such a pan writes nothing and a long one still sheds what it
++ *  leaves far behind; once it rests the keep margin applies again. */
++export function cullShells(boxes: readonly FrameBox[], camera: Camera, stage: Size, settled = true): void {
++  const rects = shellRects(camera, stage)
++  for (const box of boxes) {
++    const wasIn = !culled.has(box.id)
++    const inView = shellInView(box, rects, wasIn, settled)
++    if (inView === wasIn) continue
++    if (inView) culled.delete(box.id)
++    else culled.add(box.id)
++    const el = shells.get(box.id)
++    if (el) el.hidden = !inView
++  }
++}
+diff --git a/tests/shellCull.test.ts b/tests/shellCull.test.ts
+new file mode 100644
+index 0000000..db5b427
+--- /dev/null
++++ b/tests/shellCull.test.ts
+@@ -0,0 +1,185 @@
++import { describe, expect, it } from 'vitest'
++import {
++  cullShells,
++  SHELL_DROP_MARGIN,
++  SHELL_ENTER_MARGIN,
++  SHELL_KEEP_MARGIN,
++  shellBox,
++  shellInView,
++  shellRects,
++  trackShell,
++} from '../src/lib/shellCull'
++
++const stage = { width: 1600, height: 1000 }
++/** a 1440×900 frame whose left edge is `gap` screen px right of the view's right edge at `zoom` */
++function rightOfView(gap: number, zoom: number) {
++  return { id: 'f', x: (stage.width + gap) / zoom, y: 0, width: 1440, height: 900 }
++}
++
++describe('shellInView', () => {
++  const camera = { x: 0, y: 0, zoom: 0.6 }
++  const rects = shellRects(camera, stage)
++
++  it('keeps a shell in view, or within the enter margin, in the tree', () => {
++    expect(shellInView(rightOfView(-100, 0.6), rects, false)).toBe(true)
++    expect(shellInView(rightOfView(stage.width * SHELL_ENTER_MARGIN - 10, 0.6), rects, false)).toBe(true)
++  })
++
++  it('takes a shell past the margin out', () => {
++    expect(shellInView(rightOfView(stage.width * SHELL_ENTER_MARGIN + 10, 0.6), rects, false)).toBe(false)
++  })
++
++  it('lets a shell in the tree stay out to the keep margin, so a camera at an edge does not toggle it', () => {
++    const between = rightOfView(stage.width * ((SHELL_ENTER_MARGIN + SHELL_KEEP_MARGIN) / 2), 0.6)
++    expect(shellInView(between, rects, false)).toBe(false)
++    expect(shellInView(between, rects, true)).toBe(true)
++    expect(shellInView(rightOfView(stage.width * SHELL_KEEP_MARGIN + 10, 0.6), rects, true)).toBe(false)
++  })
++
++  it('lets a shell stay out to the drop margin while the camera moves', () => {
++    const between = rightOfView(stage.width * ((SHELL_KEEP_MARGIN + SHELL_DROP_MARGIN) / 2), 0.6)
++    expect(shellInView(between, rects, true)).toBe(false)
++    expect(shellInView(between, rects, true, false)).toBe(true)
++    expect(shellInView(rightOfView(stage.width * SHELL_DROP_MARGIN + 10, 0.6), rects, true, false)).toBe(false)
++    /* a shell out of the tree comes back at the enter margin, moving or not */
++    expect(shellInView(between, rects, false, false)).toBe(false)
++  })
++
++  it('measures the margins in screen px at every zoom', () => {
++    for (const zoom of [0.08, 0.25, 0.6, 2]) {
++      const r = shellRects({ x: 0, y: 0, zoom }, stage)
++      expect(shellInView(rightOfView(stage.width * SHELL_ENTER_MARGIN - 10, zoom), r, false)).toBe(true)
++      expect(shellInView(rightOfView(stage.width * SHELL_ENTER_MARGIN + 10, zoom), r, false)).toBe(false)
++    }
++  })
++
++  it('looks above and left of the view as well', () => {
++    const above = {
++      id: 'a',
++      x: 0,
++      y: -(stage.height * SHELL_ENTER_MARGIN + 900 * 0.6 + 10) / 0.6,
++      width: 1440,
++      height: 900,
++    }
++    expect(shellInView(above, rects, false)).toBe(false)
++    expect(shellInView({ ...above, y: above.y + 40 / 0.6 }, rects, false)).toBe(true)
++  })
++
++  it('culls nothing before the stage is measured', () => {
++    expect(shellRects(camera, { width: 0, height: 0 })).toBeNull()
++    expect(shellInView(rightOfView(1e6, 0.6), null, false)).toBe(true)
++  })
++})
++
++describe('shellBox', () => {
++  it('is the frame itself when unturned', () => {
++    expect(shellBox({ id: 'f', x: 10, y: 20, width: 300, height: 100 })).toEqual({
++      id: 'f',
++      x: 10,
++      y: 20,
++      width: 300,
++      height: 100,
++    })
++  })
++
++  it('covers a turned frame about its centre', () => {
++    const b = shellBox({ id: 'f', x: 0, y: 0, width: 300, height: 100, rotation: 90 })
++    expect(b.x).toBeCloseTo(100)
++    expect(b.y).toBeCloseTo(-100)
++    expect(b.width).toBeCloseTo(100)
++    expect(b.height).toBeCloseTo(300)
++  })
++
++  it('keeps a turned frame whose corner reaches into the margin in the tree', () => {
++    /* a tall thin frame just below the margin: unturned it is out; turned
++       90° it reaches up into it */
++    const zoom = 1
++    const rects = shellRects({ x: 0, y: 0, zoom }, stage)
++    const top = stage.height * (1 + SHELL_ENTER_MARGIN) + 200
++    const frame = { id: 'f', x: 0, y: top, width: 1000, height: 100 }
++    expect(shellInView(shellBox(frame), rects, false)).toBe(false)
++    expect(shellInView(shellBox({ ...frame, rotation: 90 }), rects, false)).toBe(true)
++  })
++})
++
++describe('cullShells', () => {
++  function element() {
++    return { hidden: false } as unknown as HTMLElement
++  }
++  const frames = [
++    { id: 'near', x: 100, y: 100, width: 1440, height: 900 },
++    { id: 'far', x: 20000, y: 0, width: 1440, height: 900 },
++  ]
++
++  it('hides the far shells and shows them again when the camera reaches them', () => {
++    const near = element()
++    const far = element()
++    trackShell('near', near)
++    trackShell('far', far)
++    cullShells(frames, { x: 0, y: 0, zoom: 1 }, stage)
++    expect(near.hidden).toBe(false)
++    expect(far.hidden).toBe(true)
++    cullShells(frames, { x: -19000, y: 0, zoom: 1 }, stage)
++    expect(near.hidden).toBe(true)
++    expect(far.hidden).toBe(false)
++    trackShell('near', null)
++    trackShell('far', null)
++  })
++
++  it('keeps the shells a moving camera leaves out to the drop margin, and takes them out once it rests', () => {
++    /* 3000 px right: near is past the keep margin but within the drop one */
++    const near = element()
++    trackShell('near', near)
++    cullShells(frames, { x: 0, y: 0, zoom: 1 }, stage)
++    cullShells(frames, { x: -3000, y: 0, zoom: 1 }, stage, false)
++    expect(near.hidden).toBe(false)
++    cullShells(frames, { x: -3000, y: 0, zoom: 1 }, stage)
++    expect(near.hidden).toBe(true)
++    trackShell('near', null)
++  })
++
++  it('takes a shell out while the camera moves once it is past the drop margin', () => {
++    const near = element()
++    const far = element()
++    trackShell('near', near)
++    trackShell('far', far)
++    cullShells(frames, { x: 0, y: 0, zoom: 1 }, stage)
++    cullShells(frames, { x: -19000, y: 0, zoom: 1 }, stage, false)
++    expect(far.hidden).toBe(false)
++    expect(near.hidden).toBe(true)
++    trackShell('near', null)
++    trackShell('far', null)
++  })
++
++  it('writes nothing when no shell crosses a margin', () => {
++    const writes: boolean[] = []
++    const el = {
++      set hidden(v: boolean) {
++        writes.push(v)
++      },
++      get hidden() {
++        return writes.at(-1) ?? false
++      },
++    } as unknown as HTMLElement
++    cullShells(frames, { x: 0, y: 0, zoom: 1 }, stage)
++    trackShell('far', el)
++    expect(writes).toEqual([true])
++    for (let i = 0; i < 20; i++) cullShells(frames, { x: -i * 30, y: i * 10, zoom: 1 }, stage)
++    expect(writes).toEqual([true])
++    trackShell('far', null)
++  })
++
++  it('gives a shell that mounts later the state the camera last gave its frame', () => {
++    cullShells(frames, { x: 0, y: 0, zoom: 1 }, stage)
++    const far = element()
++    trackShell('far', far)
++    expect(far.hidden).toBe(true)
++    trackShell('far', null)
++    /* the camera moves while the frame is not a shell (a FrameView, say) */
++    cullShells(frames, { x: -19000, y: 0, zoom: 1 }, stage)
++    const again = element()
++    trackShell('far', again)
++    expect(again.hidden).toBe(false)
++    trackShell('far', null)
++  })
++})
+diff --git a/tests/shellCullBrowser.test.ts b/tests/shellCullBrowser.test.ts
+new file mode 100644
+index 0000000..bd99bf7
+--- /dev/null
++++ b/tests/shellCullBrowser.test.ts
+@@ -0,0 +1,191 @@
++import { inflateSync } from 'node:zlib'
++import { afterAll, beforeAll, describe, expect, it } from 'vitest'
++import type { Page } from 'puppeteer-core'
++import { findBrowserPath } from '../server/screenshot'
++import { fixtureUrl, openBrowser, type TestBrowser } from './browser'
++import type { Canvas, Frame } from '../shared/types'
++
++/* Frame shells far from the view leave the render tree (src/lib/shellCull.ts):
++   200 desktop frames, 8 per row, previews served as a solid blue picture, so
++   a shell that is painted with its picture is blue on screen and one that is
++   not is white. */
++
++declare global {
++  interface Window {
++    seedPages: (canvas: Canvas) => void
++  }
++}
++
++const FRAMES = 200
++const canvas: Canvas = {
++  id: 'c',
++  name: 'Big page',
++  pages: [{ id: 'p', name: 'Main' }],
++  frames: Array.from({ length: FRAMES }, (_, i): Frame => ({
++    id: `f${i}`,
++    canvasId: 'c',
++    pageId: 'p',
++    name: `Frame ${i}`,
++    x: (i % 8) * 1600,
++    y: Math.floor(i / 8) * 1100,
++    width: 1440,
++    height: 900,
++    html: `<!doctype html><html><body><h1>Screen ${i}</h1></body></html>`,
++    createdAt: 0,
++    updatedAt: 1,
++    updatedBy: 'User',
++  })),
++  createdAt: 0,
++  updatedAt: 0,
++}
++/** frame 199, the last one, sits at (11200, 26400) */
++const LAST = { x: 11200, y: 26400 }
++const BLUE = [51, 102, 204]
++const PICTURE = `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="225"><rect width="100%" height="100%" fill="rgb(${BLUE.join(',')})"/></svg>`
++
++/** call a store action in the page (a string, so the test transform leaves the import alone) */
++const store = (page: Page, call: string) =>
++  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
++const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
++async function camera(page: Page, viewport: { x: number; y: number; zoom: number }) {
++  await store(page, `setViewport(${JSON.stringify(viewport)})`)
++  await sleep(400)
++}
++const shell = (page: Page, id: string) =>
++  page.evaluate((id) => {
++    const el = document.querySelector<HTMLElement>(`[data-frame-shell="${id}"]`)
++    return el ? { hidden: el.hidden, rendered: el.checkVisibility() } : null
++  }, id)
++
++/** the colour painted at one screen point, from a 1×1 PNG screenshot: a
++ *  single pixel's row is unchanged by every PNG filter, so the inflated
++ *  image data is its filter byte and then the pixel */
++async function pixel(page: Page, x: number, y: number): Promise<number[]> {
++  const png = Buffer.from(await page.screenshot({ clip: { x, y, width: 1, height: 1 }, type: 'png' }))
++  const data: Buffer[] = []
++  for (let at = 8; at < png.length;) {
++    const length = png.readUInt32BE(at)
++    if (png.toString('latin1', at + 4, at + 8) === 'IDAT') data.push(png.subarray(at + 8, at + 8 + length))
++    at += 12 + length
++  }
++  return [...inflateSync(Buffer.concat(data)).subarray(1, 4)]
++}
++
++describe.skipIf(!findBrowserPath())('frame shells far from the view', () => {
++  let browser: TestBrowser
++  let page: Page
++  beforeAll(async () => {
++    browser = await openBrowser()
++    page = await browser.newPage()
++    await page.setViewport({ width: 1600, height: 1000 })
++    await page.setRequestInterception(true)
++    page.on('request', (request) => {
++      if (/^\/i\/f\d+\.webp$/.test(new URL(request.url()).pathname))
++        void request.respond({ status: 200, contentType: 'image/svg+xml', body: PICTURE })
++      else void request.continue()
++    })
++    await page.goto(fixtureUrl('pages.html'))
++    await page.waitForFunction(() => typeof window.seedPages === 'function')
++    await page.evaluate((c) => window.seedPages(c), canvas)
++    await sleep(600)
++  }, 120_000)
++  afterAll(async () => {
++    await page?.close()
++    await browser?.close()
++  })
++
++  it('takes a far shell out of the render tree and leaves its element in place', async () => {
++    await camera(page, { x: 0, y: 0, zoom: 0.25 })
++    expect(await shell(page, 'f1')).toEqual({ hidden: false, rendered: true })
++    expect(await shell(page, 'f199')).toEqual({ hidden: true, rendered: false })
++    const counts = await page.evaluate(() => ({
++      shells: document.querySelectorAll('[data-frame-shell]').length,
++      hidden: document.querySelectorAll('[data-frame-shell][hidden]').length,
++    }))
++    expect(counts.shells).toBe(FRAMES)
++    expect(counts.hidden).toBeGreaterThan(FRAMES / 2)
++  }, 30_000)
++
++  it('puts a shell back in the same task as the camera reaches it, and takes out the ones it leaves far behind', async () => {
++    await camera(page, { x: 0, y: 0, zoom: 0.25 })
++    const atLast = { x: -LAST.x * 0.25 + 100, y: -LAST.y * 0.25 + 100, zoom: 0.25 }
++    const jump = await page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => {
++      useStore.getState().setViewport(${JSON.stringify(atLast)})
++      const at = (id) => document.querySelector('[data-frame-shell="' + id + '"]').hidden
++      return { last: at('f199'), first: at('f0') }
++    })`)
++    expect(jump).toEqual({ last: false, first: true })
++    await sleep(400)
++    /* 2200 px on, frame 199 is past the keep margin but not the drop one: it
++       stays while the camera moves and goes once it rests */
++    const moved = await page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => {
++      useStore.getState().setViewport(${JSON.stringify({ ...atLast, x: atLast.x - 2200 })})
++      return document.querySelector('[data-frame-shell="f199"]').hidden
++    })`)
++    expect(moved).toBe(false)
++    await sleep(400)
++    expect((await shell(page, 'f199'))?.hidden).toBe(true)
++  }, 30_000)
++
++  it('has the picture loaded on every shell the camera shows during a fast pan into frames never seen', async () => {
++    /* the camera starts 2.5 view widths left of the last row, waits for the
++       frames it shows, then pans right at 40 screen px an animation frame
++       (2400 px/s) until frame 199 is in the middle. In every animation frame
++       each shell on screen must be in the tree with its picture loaded. */
++    const zoom = 0.25
++    const startX = 1600 * 2.5 - LAST.x * zoom
++    const y = 300 - LAST.y * zoom
++    await camera(page, { x: startX, y, zoom })
++    await sleep(600)
++    const misses = (await page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => new Promise((resolve) => {
++      const misses = []
++      let x = ${startX}
++      let steps = 0
++      const end = ${800 - (LAST.x + 720) * zoom}
++      ;(function step() {
++        for (const el of document.querySelectorAll('[data-frame-shell]')) {
++          const r = el.getBoundingClientRect()
++          if (r.right <= 0 || r.left >= innerWidth || r.bottom <= 0 || r.top >= innerHeight) continue
++          const img = el.querySelector('img')
++          if (el.hidden || !img || !img.complete || !img.naturalWidth) misses.push({ step: steps, id: el.dataset.frameShell, hidden: el.hidden })
++        }
++        if (x <= end) return resolve({ misses, steps })
++        x = Math.max(end, x - 40)
++        steps++
++        useStore.getState().setViewport({ x, y: ${y}, zoom: ${zoom} })
++        requestAnimationFrame(step)
++      })()
++    }))`)) as { misses: unknown[]; steps: number }
++    expect(misses.steps).toBeGreaterThan(50)
++    expect(misses.misses).toEqual([])
++    /* and it is painted: blue in the middle of frame 199, not the white of its surface */
++    await sleep(300)
++    expect(await pixel(page, 800, 300 + 450 * zoom)).toEqual(BLUE)
++  }, 30_000)
++
++  it('draws a far frame selected from afar, and gives it back as a hidden shell', async () => {
++    await camera(page, { x: 0, y: 0, zoom: 0.25 })
++    expect((await shell(page, 'f199'))?.hidden).toBe(true)
++    /* the Layers panel selects it: it becomes a FrameView, which culling never touches */
++    await store(page, "select('f199')")
++    await sleep(300)
++    expect(await shell(page, 'f199')).toBeNull()
++    expect(await page.evaluate(() => !!document.querySelector('iframe[title="Frame 199"]'))).toBe(true)
++    /* let go of, it is a shell again, still out of the tree, and back in it when the camera goes there */
++    await store(page, 'select(null)')
++    await sleep(300)
++    expect(await shell(page, 'f199')).toEqual({ hidden: true, rendered: false })
++    await camera(page, { x: -LAST.x * 0.25 + 100, y: -LAST.y * 0.25 + 100, zoom: 0.25 })
++    expect(await shell(page, 'f199')).toEqual({ hidden: false, rendered: true })
++  }, 30_000)
++
++  it('culls nothing with the switch off', async () => {
++    await page.evaluate(() => localStorage.setItem('doop:cull-shells', 'off'))
++    await page.reload()
++    await page.waitForFunction(() => typeof window.seedPages === 'function')
++    await page.evaluate((c) => window.seedPages(c), canvas)
++    await camera(page, { x: 0, y: 0, zoom: 0.25 })
++    expect(await page.evaluate(() => document.querySelectorAll('[data-frame-shell][hidden]').length)).toBe(0)
++    await page.evaluate(() => localStorage.removeItem('doop:cull-shells'))
++  }, 30_000)
++})

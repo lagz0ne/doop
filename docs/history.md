@@ -33,6 +33,7 @@ outside this repo.)
 | 2026-11-14 | On phones a finger on a frame in the Comment tool commented instead of panning, a pinch or double tap could zoom the page, and a frame's menu opened mid-pan or while a finger rested (Radix's 700 ms touch press is cancelled only by a move over the trigger, and the stage captures the pointer for a pan). Decided: a phone only reviews, 0028 feat(ui). A touch pans in Hand and Comment, a tap comments; the page is held still as tldraw and Excalidraw do it (`user-scalable=no`, WebKit gesture events cancelled, `touch-action: manipulation`); the menu waits for a 1600 ms hold (the platforms' long press is about 500 ms) that a drift of 10 px, a lift or a second finger ends; the role counts as review at most on the client (the server's role is untouched), so every edit control steps aside |
 | 2026-11-15 | Upstream: still no release after v0.14.0, `main` unchanged since 2026-11-11. Its open PR #505 (four security fixes, not merged) carried in part, until upstream releases it: 0029 (a frame's own script could post the editing runtime's save message and store its HTML under the viewer's name; saves are refused for frames with scripts, inline handlers or `javascript:` URLs) and 0030 (`AGENT_GUIDELINE_WRITES=false` stops agents writing the style guides every later agent run reads as rules), both unchanged and under their author's name, plus 0031 (inline text editing is not offered where 0029 would drop its save). Not carried: the frame CSP (it blocks remote scripts, so a design loading one from a CDN would stop rendering) and the non-root container (a Dockerfile change, and the data volume would need new ownership). A local copy of a production canvas (271 frames) has no frame 0029 refuses |
 | 2026-11-15 | Agents work over MCP as their own account, so the canvases they create are theirs, and the person they work for was only a member, without Share. Two answers, both taken: hand those canvases to the person (`doopctl share owner`, the agent stays a member with edit), and 0032, which lets a canvas's own people (owner, members, workspace members) set its link, as Google Docs and Figma let editors share by default. Someone in by the link alone still cannot change it, so a link cannot widen itself. No migration |
+| 2026-11-15 | The GPU picture layer tried and shelved, then measured properly (GPU compositing on a software GL, counts over timings): a camera frame's cost follows the number of compositor layers, and every frame shell is one. Four levers came out of it and were built in parallel side trees, then merged: 0033 (shells far from the view leave the render tree) and 0034 (the grids scale while the zoom moves) are on; 0035 (pictures in place of live documents while the zoom moves, `doop:zoom-pictures`) and 0036 (the picture layer reworked so a drawn frame has nothing in the DOM, `doop:gpu`) are switches, off by default: one changes what is on screen mid-gesture, the other could only be measured on a software GL here |
 
 ## Patches
 
@@ -70,6 +71,10 @@ outside this repo.)
 | 0030 | feat(agents): a switch to keep agents from writing style guides (AGENT_GUIDELINE_WRITES) | from kgoedecke/doop#505: `AGENT_GUIDELINE_WRITES=false` makes `set_guidelines` (MCP and resident) refuse and point to a comment; people still write guides. Default true |
 | 0031 | fix(frames): offer inline text editing only where its save is accepted | `canEdit` uses 0029's test, so text editing is not offered on a frame with inline handlers; a test for 0030's switch |
 | 0032 | feat(share): a canvas's editors set its link, not only its owner | `canSetLink` (owner, members, workspace members) gates the link's level and password; `canSetLink: true` on the person's canvas copies drives Share; link-only visitors and guests refused |
+| 0033 | perf(canvas): frame shells far from the view leave the render tree | every shell is a compositor layer and each camera frame rebuilds the layer list, at every zoom. Shells more than 0.5 viewports out (kept to 0.75 once in, 1.5 while the camera moves, exact 120 ms after it rests) get `hidden`, written only for the shells that cross a margin (`src/lib/shellCull.ts`). Layers at 60%: 136 → 40. `localStorage['doop:cull-shells']='off'` turns it off |
+| 0034 | perf(canvas): scale the stage grids while the zoom moves, paint them at rest | the dot grid's `background-size` followed the zoom, so its layer (the size of the view) was rastered whole on every zoom frame. Now painted at one zoom and scaled by transform up to 10% above it, exact 120 ms after the zoom rests; the pixel grid the same (`src/lib/stageGrid.ts`). A 30-frame pinch: 140 tiles in 30 frames → 24 in 5 |
+| 0035 | perf(canvas): show frame pictures in place of live documents while the zoom moves | a live document is rastered again at every zoom step. With `localStorage['doop:zoom-pictures']='on'` its picture stands in while the zoom moves and the document comes back once it has painted at the new zoom (`doop:painted`); a frame being worked in (selected, edited, moved, streaming, Prototype mode) keeps its document. Raster tasks in the frames' process over a pinch: 338 → 28. Off by default: the picture is the server's render, without the document's scroll or script state |
+| 0036 | perf(canvas): culled frames drawn whole on one WebGL2 canvas, no DOM for them (experiment, doop:gpu) | the shelved picture layer, reworked on what the measurement showed: a drawn frame has no element at all, its picture, name and hover ring are on the canvas and a press is resolved by arithmetic (`src/lib/gpuPictures.ts`, `gpuLabels.ts`, `StagePictures.tsx`). Frames with a badge or icon, or with DOM under them, stay shells. Layers at fit: 204 → 9. `localStorage['doop:gpu']='on'` (hardware WebGL2) or `'force'`; off by default until measured on a real GPU |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -135,8 +140,8 @@ a shell that still paints its name is still a compositor layer, so the canvas wa
 forced; with the names hidden too only 6 draw, but 198 layers remain). A real wheel pan at fit
 (`perf/camera.mjs`, 30 events, main / compositor thread ms): 290-367 / 191-258 as shipped,
 443-540 / 331-369 with the canvas as built, 247-322 / 235-284 with the names hidden as well:
-empty layers still cost. The commit is kept outside the series (`perf/gpucheck.mjs` is its
-probe).
+empty layers still cost. That version stayed outside the series (`perf/gpucheck.mjs`
+is its probe); 0036 is its rework, below.
 
 Where a camera frame's time goes (2026-11-15, the investigation after that). Measured with GPU
 compositing and by counts and thread time that do not depend on the GPU, since this machine has
@@ -183,6 +188,37 @@ says nothing about a real GPU.
 - Not measurable here: how much of the raster work above a real GPU hides. A probe in a real
   browser (frame intervals with the grid, the live frames and the shells toggled) would say.
 
+Built from that (0033-0036, 2026-11-15), each in a side tree of its own and measured again after
+the merge, on the same 188-frame page under the same software GL. Counts first; timings are a
+real wheel pan of 30 events, main / compositor thread ms, on a loaded machine.
+
+- 0033, shells out of the render tree (on). Compositor layers at 60%: 136 → 40; at 28%: 116
+  remain; at fit 204 → 198 (every frame is in view there, so fit is unchanged). Wheel pan at 60%:
+  499-561 / 293-317 → 247-284 / 136-162; at 28%: 688-960 / 305-453 → 204-296 / 146-223. That is
+  about 2× at 60%, short of the 2.7× the bare `display: none` variant measured: 21 shells stay
+  painted inside the margins, which are what keeps a pan from showing holes. `hidden` was chosen
+  over `visibility: hidden` (twice the style cost per toggle and an override of the framework's
+  `[hidden]` rule), `content-visibility: hidden` (115 layers stay) and not rendering the shell
+  (React work on every crossing). Known cost: a lazy preview image under `display: none` starts
+  loading only when its shell comes within half a viewport.
+- 0034, the grids (on). Dot grid raster in a 30-frame pinch 60→95%: 140 tiles in 30 frames → 24
+  in 5; back down: 139 → 79 in 6 (zooming out the grid is painted one band below the camera, so
+  it is only ever magnified, up to 10%); a deep pinch: 450 → 75; the pixel grid 120 → 20.
+- 0035, pictures during a zoom (switch). Raster tasks in the frames' process over the pinch:
+  309-338 → 25-30; a live document's layer: 70-87 tiles in 25-27 frames → 7 in 2. Editor main
+  thread 415-450 → 347-360 ms; the editor rasters a little more (the pictures). Not captured
+  frame by frame: the moment the document comes back. A picture can stay up to 1 s after the
+  zoom rests if its document does not report a paint.
+- 0036, the picture layer (switch). Layers at fit: 204 → 9; Layerize in a pan at fit:
+  151-254 ms → 11-21; wheel pan at fit: 304-474 / 215-355 → 238-290 / 118-154 on the merged
+  build (the author's runs: 270-337 / 196-246 → 128-216 / 97-120). Still above the 92-108 / 46-48
+  ceiling: the canvas is drawn synchronously on every camera change, and under a software GL
+  that draw is the main thread's. Frame names are drawn from an atlas, 0.84/255 mean pixel
+  difference from the DOM's in light, 2.5/255 in dark; kerning is lost across the ellipsis cut.
+  Not verified: a real GPU, a device pixel ratio above 1, a touch long hold and a double click
+  on a drawn frame.
+- All switches together: 9 layers at fit, 31 at 60%.
+
 Preview fidelity (0007-0009, 2026-11-12: culled frames looked too rasterized, and a clicked
 frame looked very different from its neighbours). Three causes, measured on a copy of a real
 canvas with `perf/look.mjs`, `perf/boot.mjs`, `perf/fonts.mts`: one fixed-size JPEG for every
@@ -227,6 +263,11 @@ Tests for 0029-0031 (2026-11-15): `bin/doop check --test` 2265 pass, 0 fail (wit
 fail: the 10 `elementPanelBrowser` failures pristine v0.14.0 has here, and `interactionsPanelBrowser`,
 which passed twice run alone. At the next upgrade, drop
 0029 and 0030 if upstream merged #505 (0031 then depends on how upstream left `canEdit`).
+
+Tests for 0033-0036 (2026-11-15): `bin/doop check --browser` 2731 pass, 12 fail: the 10
+`elementPanelBrowser` failures pristine v0.14.0 has here, and `oidc` and `elementIds` (1 each,
+timeouts under load; 19 of 19 run alone). The patches add 8 test files (`shellCull`, `stageGrid`,
+`zoomPictures`, `gpuPictures`, each with a browser file).
 
 Upgrading past v0.14.0 (found 2026-11-14): drizzle's migrator applies a migration only when it is
 newer than the last one applied (`created_at` < the journal's `when`), not by name. Upstream's
