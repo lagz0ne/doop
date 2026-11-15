@@ -20,6 +20,7 @@ import { getIdentity } from '../lib/identity'
 import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
 import { trackShell } from '../lib/shellCull'
+import { keepsDocument, registerZoomPicture, zoomPicturesEnabled } from '../lib/zoomPictures'
 
 /** `<script>`, inline event handlers or `javascript:` URLs: anything that runs inside the frame. */
 export function hasExecutableContent(html: string): boolean {
@@ -1298,6 +1299,35 @@ export const FrameView = memo(function FrameView({
   )
   const picked = JSON.parse(pickedKey) as string[]
   const multiPick = picked.length > 1
+  /* ---- the picture in place of the document while the zoom moves ----
+     (zoomPictures.ts, off unless switched on). With the switch on, a live
+     frame keeps its picture mounted under the document, hidden, so a zoom
+     can show it at once; it registers while nobody works in it, and taking
+     it back (selected, edited, streamed into…) puts its document back. */
+  const [zoomPictures] = useState(zoomPicturesEnabled)
+  const pictureRef = useRef<HTMLDivElement>(null)
+  const prototypeMode = useStore((s) => s.prototypeMode)
+  const pictureStandby = zoomPictures && live && previews && documentShown && !stream
+  const keepDocument = keepsDocument({
+    documentShown,
+    canvasElement: isCanvasElement(frame.html),
+    selected,
+    elementPicked: !!wantedSel,
+    editing,
+    pathEditing: !!pathEdit,
+    moving: dragging || resizing || shapeMoving || elementMove.moving,
+    streaming: !!stream,
+    peerEditing: editors.length > 0,
+    prototypeMode,
+  })
+  useEffect(() => {
+    if (!pictureStandby || keepDocument) return
+    return registerZoomPicture(frame.id, {
+      iframe: () => iframeRef.current,
+      picture: () => pictureRef.current,
+      painted: () => requestFrame(frame.id, 'doop:painted', {}, ZOOM_PICTURE_PAINT_MS),
+    })
+  }, [pictureStandby, keepDocument, frame.id])
   /* the picked element's grips and rotate zones: only where a drag can
      change the box, and never on a locked layer or frame, or under the
      Comment tool — nor on a multi-element pick, where a drag would size
@@ -2017,8 +2047,14 @@ export const FrameView = memo(function FrameView({
             them. A frame being streamed into has no picture of what is
             arriving, and shows its document as it comes. It sits at the
             frame's box, not out by the bleed. */}
-            {(!live || (!documentShown && previews && !stream)) && (
-              <div className={live ? 'pointer-events-none absolute inset-0' : undefined}>
+            {(!live || (!documentShown && previews && !stream) || pictureStandby) && (
+              <div
+                ref={pictureRef}
+                className={live ? 'pointer-events-none absolute inset-0' : undefined}
+                /* under a shown document the picture waits hidden for a zoom
+                   (zoomPictures.ts), which shows it by writing this style */
+                style={pictureStandby ? { visibility: 'hidden' } : undefined}
+              >
                 <FramePreview frame={frame} />
               </div>
             )}
@@ -2413,6 +2449,9 @@ export const FrameView = memo(function FrameView({
 })
 
 const PREVIEW_RETRIES = 4
+/* how long a document shown again after a zoom has to say it painted before
+   its picture goes anyway (zoomPictures.ts) */
+const ZOOM_PICTURE_PAINT_MS = 1000
 
 /** What a frame shows without its document: the persisted preview image.
  *  Lazy and async, so a page of hundreds fetches and decodes the ones near
