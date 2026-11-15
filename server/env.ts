@@ -276,6 +276,15 @@ const schema = {
   POSTHOG_INGEST_HOST: origin({ default: 'https://us.i.posthog.com' }),
   POSTHOG_ASSETS_HOST: origin({ default: 'https://us-assets.i.posthog.com' }),
 
+  /* ---------------------------------------------- render telemetry */
+  /* unset = the render trial's reports (server/telemetry.ts) are validated
+     and dropped; set = forwarded as OTLP/HTTP JSON logs to <this>/v1/logs */
+  OTEL_EXPORTER_OTLP_ENDPOINT: origin({ default: undefined }),
+  /* unset = service.name from OTEL_RESOURCE_ATTRIBUTES, else doop */
+  OTEL_SERVICE_NAME: str({ default: undefined }),
+  /* k=v,k=v resource attributes on every record */
+  OTEL_RESOURCE_ATTRIBUTES: str({ default: undefined }),
+
   /* ---------------------------------------------------- backgrounds */
   BACKGROUNDS_ORIGIN: origin({ default: undefined }),
 
