@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { PREVIEW_SCALES, previewLevelFor, type PreviewScale } from '../../shared/types'
 import { previewSrc, type Camera, type Size } from './liveFrames'
 import { ellipsisCut, PAD, type NameAtlas, type NameCell } from './gpuLabels'
+import { renderTrial, type GpuMode } from './renderTrialClient'
 
 /* Culled frames drawn on one GPU canvas, with nothing of them in the DOM.
 
@@ -31,18 +32,16 @@ import { ellipsisCut, PAD, type NameAtlas, type NameCell } from './gpuLabels'
    documents stay iframes: they are sandboxed (an opaque origin), so no canvas
    API may draw them.
 
-   Off unless `localStorage['doop:gpu']` is 'on' (or 'force', which accepts a
-   software GL as well, for measuring on a machine without a GPU). */
+   `localStorage['doop:gpu']` = 'on' turns it on, 'force' too and accepts a
+   software GL as well (for measuring on a machine without a GPU), 'off' turns
+   it off. Unset, the render trial decides per page load (renderTrialClient.ts):
+   only ever on hardware WebGL2, and kept on only where it measures smoother. */
 
-export type GpuMode = 'off' | 'on' | 'force'
+export type { GpuMode } from './renderTrialClient'
 
+/** This page load's mode, fixed at its first call. */
 export function gpuMode(): GpuMode {
-  try {
-    const v = localStorage.getItem('doop:gpu')
-    return v === 'on' || v === 'force' ? v : 'off'
-  } catch {
-    return 'off'
-  }
+  return renderTrial().gpu.mode
 }
 
 /** Screen px between a frame's name and its top edge (FrameView's LABEL_GAP). */

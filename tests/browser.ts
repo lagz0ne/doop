@@ -179,10 +179,14 @@ export async function openBrowser(): Promise<TestBrowser> {
       /* the tests drive the editor's full layout (the top bar, the tool rail,
          the select tool first), which is what they were written against; this
          build's reviewer layout (FULL_UI off, CanvasDock.tsx) has its own test,
-         which sets doop:full-ui to off before the page loads */
+         which sets doop:full-ui to off before the page loads. The render
+         trial (renderTrialClient.ts) is off too, so a test that leaves an
+         experiment's key unset gets it off, as written, not a random arm;
+         the trial's own test removes the key. */
       await page.evaluateOnNewDocument(() => {
         try {
           if (localStorage.getItem('doop:full-ui') === null) localStorage.setItem('doop:full-ui', 'on')
+          if (localStorage.getItem('doop:render-trial') === null) localStorage.setItem('doop:render-trial', 'off')
         } catch {
           /* no storage on this page */
         }
