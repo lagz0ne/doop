@@ -31,6 +31,7 @@ outside this repo.)
 | 2026-11-14 | PR #1 (written against 0001-0020) carried over as 0025-0026. Its review found the direct-only switch trusts the proxy to add `X-Forwarded-For`/`Forwarded`; rather than drop it, 0027 adds a separate listener for the operator API (the admin-port model of Caddy and Envoy), and the switch's limit is documented |
 | 2026-11-14 | Upstream checked: no release after v0.14.0; 44 commits on `main`, none covering #2. Its migrations 0049-0052 are dated before ours (see Upgrading) |
 | 2026-11-14 | On phones a finger on a frame in the Comment tool commented instead of panning, a pinch or double tap could zoom the page, and a frame's menu opened mid-pan or while a finger rested (Radix's 700 ms touch press is cancelled only by a move over the trigger, and the stage captures the pointer for a pan). Decided: a phone only reviews, 0028 feat(ui). A touch pans in Hand and Comment, a tap comments; the page is held still as tldraw and Excalidraw do it (`user-scalable=no`, WebKit gesture events cancelled, `touch-action: manipulation`); the menu waits for a 1600 ms hold (the platforms' long press is about 500 ms) that a drift of 10 px, a lift or a second finger ends; the role counts as review at most on the client (the server's role is untouched), so every edit control steps aside |
+| 2026-11-15 | Upstream: still no release after v0.14.0, `main` unchanged since 2026-11-11. Its open PR #505 (four security fixes, not merged) carried in part, until upstream releases it: 0029 (a frame's own script could post the editing runtime's save message and store its HTML under the viewer's name; saves are refused for frames with scripts, inline handlers or `javascript:` URLs) and 0030 (`AGENT_GUIDELINE_WRITES=false` stops agents writing the style guides every later agent run reads as rules), both unchanged and under their author's name, plus 0031 (inline text editing is not offered where 0029 would drop its save). Not carried: the frame CSP (it blocks remote scripts, so a design loading one from a CDN would stop rendering) and the non-root container (a Dockerfile change, and the data volume would need new ownership). A local copy of a production canvas (271 frames) has no frame 0029 refuses |
 
 ## Patches
 
@@ -64,6 +65,9 @@ outside this repo.)
 | 0026 | feat(operator): a direct-only switch keeps the operator API off the public edge | `DOOP_OPERATOR_DIRECT_ONLY=true`: `/api/operator` is 404 for any request a proxy forwarded (`X-Forwarded-For` / `Forwarded`), token or not; only direct calls to doop's port reach it. Holds only behind a proxy that adds one of those headers (a bare nginx `proxy_pass` adds neither). Default off (PR #1) |
 | 0027 | feat(operator): serve the operator API on a listener of its own | the form of 0026 that does not depend on the proxy (review of PR #1): `DOOP_OPERATOR_LISTEN=[host:]port` (host 127.0.0.1 by default) serves the API there and nowhere on `PORT`, as Caddy keeps its admin API on `localhost:2019`. Default off |
 | 0028 | feat(ui): a phone reviews: one finger pans, a long hold for menus, no editing | reviewer layout on a phone: `reviewOnly` caps `roleOf` at review (`grantedRole` keeps the server's), dock is back, Hand, Comment, Comments, Layers, •••; a touch pans in Hand and Comment and a tap comments; viewport `maximum-scale=1, user-scalable=no` while mounted; `useTouchHold` replaces Radix's 700 ms touch press with a 1600 ms hold tracked on window. Mouse unchanged |
+| 0029 | fix(frames): refuse doop:edited saves for frames with executable content | from kgoedecke/doop#505, unchanged: the save message from a frame is ignored when the stored or incoming HTML has a script, an inline handler or a `javascript:` URL. Such frames still render; the Design panel's style and image edits on them apply live but are not saved |
+| 0030 | feat(agents): a switch to keep agents from writing style guides (AGENT_GUIDELINE_WRITES) | from kgoedecke/doop#505: `AGENT_GUIDELINE_WRITES=false` makes `set_guidelines` (MCP and resident) refuse and point to a comment; people still write guides. Default true |
+| 0031 | fix(frames): offer inline text editing only where its save is accepted | `canEdit` uses 0029's test, so text editing is not offered on a frame with inline handlers; a test for 0030's switch |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -152,6 +156,12 @@ machine's, not the patches' (which touch the server only). `operator` and `acces
 Tests for 0028 (2026-11-14): `bin/doop check --test` 2264 pass, 0 fail; the new
 `phoneReviewBrowser` (390x844 touch) and the reviewer layout, clipboard, context menu and comment
 browser files: 78 of 78.
+
+Tests for 0029-0031 (2026-11-15): `bin/doop check --test` 2265 pass, 0 fail (with
+`agentGuidelineWrites`, the switch refusing an agent's guide over MCP). `--browser`: 2641 pass, 11
+fail: the 10 `elementPanelBrowser` failures pristine v0.14.0 has here, and `interactionsPanelBrowser`,
+which passed twice run alone. At the next upgrade, drop
+0029 and 0030 if upstream merged #505 (0031 then depends on how upstream left `canEdit`).
 
 Upgrading past v0.14.0 (found 2026-11-14): drizzle's migrator applies a migration only when it is
 newer than the last one applied (`created_at` < the journal's `when`), not by name. Upstream's
