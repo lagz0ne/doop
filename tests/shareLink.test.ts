@@ -93,7 +93,7 @@ describe('a link with a password', () => {
     })
   })
 
-  it('is the owner’s alone', async () => {
+  it('is not for an account outside the canvas', async () => {
     const other = await new Client(server).signUp('other@example.com', 'Otto Other')
     expect((await other.patch(`/api/canvases/${canvasId}`, { linkPassword: 'mine' })).status).toBe(403)
   })
@@ -184,6 +184,53 @@ describe('a link without a password', () => {
     const { client } = await joinLink(id, 'Nell Nameonly')
     await setLink(id, { linkPassword: 'lock' })
     expect((await client.get(`/api/canvases/${id}`)).status).not.toBe(200)
+  })
+})
+
+describe('who sets the link', () => {
+  let teamCanvasId: string
+  let member: Client
+  let stranger: Client
+
+  beforeAll(async () => {
+    teamCanvasId = await newCanvas('Team canvas')
+    member = await new Client(server).signUp('member@example.com', 'Mia Member')
+    stranger = await new Client(server).signUp('stranger@example.com', 'Sam Stranger')
+    const invite = await owner.post(`/api/canvases/${teamCanvasId}/members`, { email: 'member@example.com' })
+    expect(invite.status, await invite.clone().text()).toBe(200)
+  })
+
+  it('is told to the owner and the members, in the canvas, the list and the room', async () => {
+    expect(await (await owner.get(`/api/canvases/${teamCanvasId}`)).json()).toMatchObject({ canSetLink: true })
+    expect(await (await member.get(`/api/canvases/${teamCanvasId}`)).json()).toMatchObject({
+      role: 'edit',
+      canSetLink: true,
+    })
+    const list = (await (await member.get('/api/canvases')).json()) as { id: string; canSetLink?: true }[]
+    expect(list.find((c) => c.id === teamCanvasId)?.canSetLink).toBe(true)
+    const room = join(member, teamCanvasId)
+    expect(await room.ready).toMatchObject({ type: 'init', canvas: { id: teamCanvasId, canSetLink: true } })
+    room.close()
+  })
+
+  it('lets a member set the level and the password', async () => {
+    const res = await member.patch(`/api/canvases/${teamCanvasId}`, { linkAccess: 'comment', linkPassword: 'daisy' })
+    expect(res.status, await res.clone().text()).toBe(200)
+    expect(await (await info(teamCanvasId)).json()).toMatchObject({ access: 'comment', password: true })
+    expect((await joinLink(teamCanvasId, 'Gus Guest', 'daisy')).status).toBe(200)
+    expect((await member.patch(`/api/canvases/${teamCanvasId}`, { linkPassword: null })).status).toBe(200)
+  })
+
+  it('is not for someone in by the link alone, even at edit', async () => {
+    await setLink(teamCanvasId, { linkAccess: 'edit', linkPassword: null })
+    const seen = (await (await stranger.get(`/api/canvases/${teamCanvasId}`)).json()) as Record<string, unknown>
+    expect(seen.role).toBe('edit')
+    expect(seen.canSetLink).toBeUndefined()
+    expect((await stranger.patch(`/api/canvases/${teamCanvasId}`, { linkAccess: 'none' })).status).toBe(403)
+    expect((await stranger.patch(`/api/canvases/${teamCanvasId}`, { linkPassword: 'mine' })).status).toBe(403)
+    const { client: guest } = await joinLink(teamCanvasId, 'Eda Editor')
+    expect((await guest.patch(`/api/canvases/${teamCanvasId}`, { linkAccess: 'none' })).status).toBe(403)
+    expect(await (await info(teamCanvasId)).json()).toMatchObject({ access: 'edit', password: false })
   })
 })
 

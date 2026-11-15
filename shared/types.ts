@@ -110,6 +110,8 @@ export interface CanvasMeta {
   /** the owner first, then everyone invited — the home tile's avatar stack;
    *  `image` is a profile photo's URL when the person uploaded one */
   people?: { id: string; name: string; image?: string }[]
+  /** the caller may set this canvas's share link (server/access.ts `canSetLink`) */
+  canSetLink?: true
 }
 
 /** The dashboard/gallery preview render (`/i/<id>.jpg?preview`) clips a
@@ -229,6 +231,9 @@ export interface Canvas {
   /** the caller's own role, set on the copy a canvas GET or a room `init`
    *  hands one person; never stored */
   role?: CanvasRole
+  /** the caller may set the share link (server/access.ts `canSetLink`),
+   *  set beside `role` on the same per-person copies; never stored */
+  canSetLink?: true
   /** user ids invited to collaborate (the owner is not listed) */
   memberIds?: string[]
   /** the shared workspace this canvas belongs to — every workspace member

@@ -158,7 +158,7 @@ describe('share link roles', () => {
     }
   }
 
-  it('validates the level and keeps it owner-only', async () => {
+  it('validates the level and keeps it from visitors', async () => {
     expect((await setLink('bogus')).status).toBe(400)
     expect((await visitor.patch(`/api/canvases/${canvasId}`, { linkAccess: 'view' })).status).toBe(403)
   })

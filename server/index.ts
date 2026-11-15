@@ -35,6 +35,7 @@ import { fontsForCanvas, hydrateFonts } from './fonts.ts'
 import { tokensCss, tokensMarkdown, tokensTailwind } from '../shared/designTokens.ts'
 import {
   canManageCanvas,
+  canSetLink,
   canvasRole,
   guestCanvasRole,
   hasDurableCanvasAccess,
@@ -1258,6 +1259,7 @@ app.get('/api/canvases', async (req, res) => {
       }
       return {
         ...c,
+        ...linkRight(req.user!.id, store.getCanvas(c.id)),
         people: canvasPeopleIds(c.id).map((id) => ({
           id,
           name: users.get(id)?.name ?? 'Unknown',
@@ -1269,6 +1271,11 @@ app.get('/api/canvases', async (req, res) => {
     }),
   )
 })
+
+/** `canSetLink: true` on a person's copy of a canvas when they may set its link */
+function linkRight(userId: string | undefined, c: Canvas | undefined): { canSetLink?: true } {
+  return c && canSetLink(userId, c) ? { canSetLink: true } : {}
+}
 
 /** owner first, then invited members, each once */
 function canvasPeopleIds(canvasId: string): string[] {
@@ -1324,10 +1331,14 @@ app.get('/api/canvases/:id', (req, res) => {
   /* the caller's own role rides along, so the editor knows to go read-only */
   if (!c) return
   /* a reviewer reads the canvas without its memory or member list */
-  res.json(req.embed ? { ...canvasForReviewer(c), role: callerRole(req, c) } : { ...c, role: callerRole(req, c) })
+  res.json(
+    req.embed
+      ? { ...canvasForReviewer(c), role: callerRole(req, c) }
+      : { ...c, role: callerRole(req, c), ...linkRight(req.user?.id, c) },
+  )
 })
 
-/* Community gallery listing — the owner's call alone, like link access.
+/* Community gallery listing — the owner's call alone (link access is any editor's, canSetLink).
    PUT both lists and re-describes; DELETE takes it down. */
 app.put('/api/canvases/:id/publish', (req, res) => {
   const c = requireCanvas(req, res, req.params.id, 'edit')
@@ -1408,9 +1419,10 @@ app.patch('/api/canvases/:id', async (req, res) => {
   const c = requireCanvas(req, res, req.params.id, 'edit')
   if (!c) return
   const { name, linkAccess, linkPassword } = req.body ?? {}
-  /* the link policy is the owner's alone — collaborators can rename, not lock */
+  /* the canvas's own people set the link (canSetLink); someone in by the link alone cannot widen it */
   if (linkAccess !== undefined || linkPassword !== undefined) {
-    if (c.ownerId !== req.user!.id) return res.status(403).json({ error: 'only the owner can change link access' })
+    if (!canSetLink(req.user!.id, c))
+      return res.status(403).json({ error: 'only the canvas’s editors can change link access' })
     if (linkAccess !== undefined && !isLinkAccess(linkAccess))
       return res.status(400).json({ error: 'linkAccess must be "none", "view", "comment", "review" or "edit"' })
     /* a password string sets it, null or '' takes it away */
@@ -2752,7 +2764,9 @@ wss.on('connection', (ws, upgradeReq) => {
       const agents = [...(agentPresences.get(msg.canvasId)?.values() ?? [])]
       send(ws, {
         type: 'init',
-        canvas: embed ? { ...canvasForReviewer(canvas), role } : { ...canvas, role },
+        canvas: embed
+          ? { ...canvasForReviewer(canvas), role }
+          : { ...canvas, role, ...linkRight(session.user.id, canvas) },
         presences: embed ? [...others, ...agents].map(presenceForReviewer) : [...others, ...agents],
         ...(embed
           ? { activity: [], tasks: [], feedback: [], decisions: [], proposals: [] }

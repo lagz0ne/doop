@@ -702,8 +702,8 @@ export function CanvasPage({
   /* a share-link guest (server/shareLink.ts) has this canvas and no account:
      no way back to a canvas list, no settings, no sharing */
   const linkGuest = !!useMe(session?.user.id)?.linkGuest
-  /* the full UI shares as upstream does; put away, the owner still shares */
-  const canShare = !guest && !linkGuest && (FULL_UI || (!!canvas?.ownerId && canvas.ownerId === session?.user.id))
+  /* the full UI shares as upstream does; put away, whoever may set the link shares */
+  const canShare = !guest && !linkGuest && (FULL_UI || !!canvas?.canSetLink)
   const others = useMemo(
     () => Object.values(presences).filter((p) => p.clientId !== me.clientId),
     [presences, me.clientId],
