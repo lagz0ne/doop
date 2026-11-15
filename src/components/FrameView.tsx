@@ -1138,7 +1138,7 @@ export const FrameView = memo(function FrameView({
   const picked = JSON.parse(pickedKey) as string[]
   const multiPick = picked.length > 1
   /* ---- the picture in place of the document while the zoom moves ----
-     (zoomPictures.ts, off unless switched on). With the switch on, a live
+     (zoomPictures.ts: its switch, or the render trial). With it on, a live
      frame keeps its picture mounted under the document, hidden, so a zoom
      can show it at once; it registers while nobody works in it, and taking
      it back (selected, edited, streamed into…) puts its document back. */

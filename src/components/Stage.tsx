@@ -51,6 +51,8 @@ import { useCanvasDrawing } from './CanvasDrawing'
 import { FrameLabelLayer } from './FrameLabelLayer'
 import { gpuFrameAt } from '../lib/gpuPictures'
 import { StagePictures } from './StagePictures'
+import { startRenderRecorder } from '../lib/renderTrialClient'
+import { sceneInView } from '../lib/renderTrial'
 import { chromeZoomStale, layoutZoomFor } from '../lib/layoutZoom'
 import { DOT_PERIOD, GRID_ZOOM_DRIFT, gridPaintZoom, gridStale, gridTransform } from '../lib/stageGrid'
 import { zoomPicturesActive, zoomPicturesEnabled, zoomPicturesEnd, zoomPicturesStart } from '../lib/zoomPictures'
@@ -486,6 +488,31 @@ export function Stage({
       window.clearTimeout(chromeRest)
       window.cancelAnimationFrame(picturesEnd)
       if (zoomPictures) zoomPicturesEnd()
+    }
+  }, [])
+
+  /* The render trial's gesture recorder (renderTrialClient.ts): a
+     subscription of its own beside the camera's, so apply() and its rest
+     timers stay as they are. It notes the time of each camera change and
+     times animation frames only while a gesture is on; what is in view is
+     counted once, when a gesture starts. */
+  useEffect(() => {
+    const recorder = startRenderRecorder(() => {
+      const el = ref.current
+      return sceneInView(
+        currentPageCanvas()?.frames ?? [],
+        useStore.getState().viewport,
+        el ? measuredStage(el) : stageSize,
+        useLiveFrames.getState(),
+      )
+    })
+    if (!recorder) return
+    const unsub = useStore.subscribe((s, prev) => {
+      if (s.viewport !== prev.viewport) recorder.change(s.viewport.zoom !== prev.viewport.zoom)
+    })
+    return () => {
+      unsub()
+      recorder.stop()
     }
   }, [])
 

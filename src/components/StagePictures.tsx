@@ -18,6 +18,7 @@ import {
   type Picture,
   type PictureFrame,
 } from '../lib/gpuPictures'
+import { renderTrialGpuFailed } from '../lib/renderTrialClient'
 
 const NONE: ReadonlySet<string> = new Set()
 
@@ -71,8 +72,8 @@ function rgba(color: string): [number, number, number, number] {
  * culled frames it can stand in for, pictures, names and the hover ring, and
  * takes them out of the DOM through `useGpuPictures`; a press on one is
  * resolved here (`setGpuHitTest`) for the Stage to wake it. Renders nothing
- * unless `doop:gpu` asks for it and culling is on (with culling off every
- * frame is live, and there is nothing to draw).
+ * unless `doop:gpu` or the render trial asks for it and culling is on (with
+ * culling off every frame is live, and there is nothing to draw).
  */
 export function StagePictures({
   frames,
@@ -105,11 +106,16 @@ export function StagePictures({
     const renderer = PictureRenderer.create(canvas, mode, {
       lost(isLost) {
         lost = isLost
+        /* a load the render trial put the layer on stops counting for it */
+        if (isLost) renderTrialGpuFailed()
         update()
       },
       textures: () => update(),
     })
-    if (!renderer) return
+    if (!renderer) {
+      renderTrialGpuFailed()
+      return
+    }
     const atlas = new NameAtlas()
     let style: NameStyle | null = null
     let styleKey = ''

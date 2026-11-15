@@ -1,3 +1,5 @@
+import { renderTrial } from './renderTrialClient'
+
 /* Pictures in place of documents while the zoom moves.
 
    A live frame is a document in another process, and every step of a zoom
@@ -13,22 +15,18 @@
    picture goes once the document has painted, so there is no blank between
    them. A pan alone changes nothing.
 
-   Off by default: the pictures are the last saved state of each frame, a
-   little softer than the document and without what only runs live
-   (animation, video, scroll position). On with
-   `localStorage['doop:zoom-pictures'] = 'on'`.
+   The pictures are the last saved state of each frame, a little softer than
+   the document and without what only runs live (animation, video, scroll
+   position). `localStorage['doop:zoom-pictures']` = 'on' or 'off' sets it;
+   unset, the render trial decides per page load (renderTrialClient.ts) and
+   keeps it on only where zooms over live frames measure smoother.
 
    The swap is a few style writes on the live frames' own elements, never a
    class or a variable on the stage, which would restyle the whole canvas. */
 
-/** The switch, read when it is needed: on only with
- *  `localStorage['doop:zoom-pictures'] === 'on'`. */
+/** The switch for this page load, fixed at its first call. */
 export function zoomPicturesEnabled(): boolean {
-  try {
-    return localStorage.getItem('doop:zoom-pictures') === 'on'
-  } catch {
-    return false
-  }
+  return renderTrial().zoomPictures.level === 'on'
 }
 
 /** What a frame is doing, for the decision below. */
