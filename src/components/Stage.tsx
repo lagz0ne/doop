@@ -64,6 +64,7 @@ import {
   useLiveFrames,
   type FrameBox,
 } from '../lib/liveFrames'
+import { cullShells, SHELL_SETTLE_MS, shellBox, shellCullingEnabled } from '../lib/shellCull'
 
 const MIN_ZOOM = 0.08
 /* how long the camera holds still before the chrome inside the world is put
@@ -540,6 +541,38 @@ export function Stage({
       unsub()
       window.clearTimeout(timer)
       window.cancelAnimationFrame(pump)
+      resize.disconnect()
+    }
+  }, [canvas])
+
+  /* Shells far from the view leave the render tree (shellCull.ts). The camera
+     is followed in the same task as apply() writes it, not once it rests, so
+     a shell is back in the tree before a pan, a zoom or a jump reaches it;
+     the ones it leaves behind go once far behind, or once it rests. A
+     layout effect, so a page's shells are culled before its first paint. */
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el || !shellCullingEnabled()) return
+    const boxes = (canvas?.frames ?? []).filter((f) => !f.hidden).map(shellBox)
+    let size = { ...measuredStage(el) }
+    let rest = 0
+    const settle = () => cullShells(boxes, useStore.getState().viewport, size)
+    settle()
+    const unsub = useStore.subscribe((s, prev) => {
+      if (s.viewport === prev.viewport) return
+      cullShells(boxes, s.viewport, size, false)
+      window.clearTimeout(rest)
+      rest = window.setTimeout(settle, SHELL_SETTLE_MS)
+    })
+    const resize = new ResizeObserver(([entry]) => {
+      if (!entry) return
+      size = { width: entry.contentRect.width, height: entry.contentRect.height }
+      settle()
+    })
+    resize.observe(el)
+    return () => {
+      unsub()
+      window.clearTimeout(rest)
       resize.disconnect()
     }
   }, [canvas])
