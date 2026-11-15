@@ -118,6 +118,22 @@ out-of-process frames costs in raster on a real GPU (each step re-rasters every 
 the zoom is past 25%), which is the reason to consider covering live frames with their pictures
 while a zoom gesture lasts.
 
+Tried and not shipped (2026-11-15): culled frames' pictures drawn on one WebGL2 canvas under the
+frame stack, behind `localStorage['doop:gpu']` (`on` for hardware WebGL2 only, `force` for any),
+with the shells left in the DOM, transparent, for the pointer and the names. WebGPU was ruled out
+first (not enabled by default in Chrome on Linux yet), and PixiJS too (a new dependency for one
+textured-quad shader). It works: the same pictures, a little sharper (mipmaps), 1549 → 1174
+elements on the 188-frame page, a lost context handing the pictures back to the shells. It did not
+pay where it could be measured: this machine has no GPU, and under SwiftShader (`force`,
+`CHROME_ARGS=--enable-unsafe-swiftshader perf/ab.sh`, four interleaved runs, main thread ms off →
+force) pan at fit went 169 → 1042, pan at 60% 253 → 2047, zoom 8→60% 335 → 770, fit jump
+184 → 659, with only zoom 95>130>95% (702 → 604) and six clicks (147 → 112) better. A software
+GL redraws the whole canvas on the CPU at every camera move, where the DOM moves tiles it already
+has. On a real GPU Chrome already rasterizes and composites the `<img>`s there, so the canvas
+would save mostly the elements, and the zoom cost that remains, style recalculation on the
+shells, is untouched. The commit is kept outside the series (`perf/gpucheck.mjs` is its probe);
+it is worth another look only together with moving the names and shells off the DOM as well.
+
 Preview fidelity (0007-0009, 2026-11-12: culled frames looked too rasterized, and a clicked
 frame looked very different from its neighbours). Three causes, measured on a copy of a real
 canvas with `perf/look.mjs`, `perf/boot.mjs`, `perf/fonts.mts`: one fixed-size JPEG for every

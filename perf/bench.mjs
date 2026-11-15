@@ -2,7 +2,7 @@
 import { createRequire } from "node:module"; import { readFileSync } from "node:fs";
 const puppeteer = createRequire(new URL("../build/doop/package.json", import.meta.url))("puppeteer-core");
 const L = process.env.DOOP || "http://localhost:4477"; const loc = JSON.parse(readFileSync(new URL(process.env.LOCAL || "./local.json", import.meta.url)));
-const b = await puppeteer.launch({ executablePath: process.env.CHROME_PATH, headless: true, args: ["--no-sandbox", "--window-size=1600,1000", "--site-per-process", "--enable-features=IsolateSandboxedIframes"] });
+const b = await puppeteer.launch({ executablePath: process.env.CHROME_PATH, headless: true, args: ["--no-sandbox", "--window-size=1600,1000", "--site-per-process", "--enable-features=IsolateSandboxedIframes", ...(process.env.CHROME_ARGS || "").split(" ").filter(Boolean)] }); // CHROME_ARGS="--enable-unsafe-swiftshader": WebGL without a GPU
 const p = await b.newPage(); await p.setViewport({ width: 1600, height: 1000 }); const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 await p.goto(L + "/", { waitUntil: "domcontentloaded" });
 await p.evaluate(async (c) => { await fetch("/api/auth/sign-in/email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c) }); }, { email: loc.email, password: loc.password });
