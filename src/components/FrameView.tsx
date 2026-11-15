@@ -18,6 +18,7 @@ import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
 import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
+import { trackShell } from '../lib/shellCull'
 
 /** `<script>`, inline event handlers or `javascript:` URLs: anything that runs inside the frame. */
 export function hasExecutableContent(html: string): boolean {
@@ -2263,8 +2264,11 @@ function FramePreview({ frame }: { frame: Frame }) {
  */
 const FrameShell = memo(function FrameShell({ frame, stack }: { frame: Frame; stack?: number }) {
   const element = isCanvasElement(frame.html)
+  /* far from the view it leaves the render tree (shellCull.ts) */
+  const track = useCallback((el: HTMLDivElement | null) => trackShell(frame.id, el), [frame.id])
   return (
     <div
+      ref={track}
       data-frame-shell={frame.id}
       data-frame-locked={frame.locked ? '' : undefined}
       className="absolute"
