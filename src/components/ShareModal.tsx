@@ -28,6 +28,7 @@ type ShareableCanvas = Pick<
   | 'ownerId'
   | 'linkAccess'
   | 'linkPassword'
+  | 'canSetLink'
   | 'memberIds'
   | 'workspaceId'
   | 'publishedAt'
@@ -86,6 +87,8 @@ export function ShareModal({
   const { data: session } = authClient.useSession()
   const meId = session?.user?.id
   const isOwner = !!canvas.ownerId && canvas.ownerId === meId
+  /* the link is set by the canvas's own people, not only its owner (server/access.ts canSetLink) */
+  const setsLink = isOwner || !!canvas.canSetLink
   const linkAccess = toLinkAccess(canvas.linkAccess)
   const [people, setPeople] = useState<CanvasMember[] | null>(null)
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([])
@@ -313,7 +316,7 @@ export function ShareModal({
           </div>
         )}
         <div className="mt-2.5 flex flex-col items-stretch justify-between gap-2.5 border-t border-line-soft pt-3.5 sm:flex-row sm:items-center">
-          {isOwner ? (
+          {setsLink ? (
             <div className="flex items-center gap-2">
               <span className="text-body font-medium text-ink">{t('panels.shareAnyoneCan')}</span>
               <Select value={linkAccess} disabled={busy} onValueChange={(value) => void setLink(toLinkAccess(value))}>
@@ -342,7 +345,7 @@ export function ShareModal({
             {t('panels.shareCopyLink')}
           </Button>
         </div>
-        {isOwner && linkAccess !== 'none' && (
+        {setsLink && linkAccess !== 'none' && (
           <LinkPassword canvas={canvas} busy={busy} setBusy={setBusy} setError={setError} onChange={onChange} />
         )}
         {isOwner && FULL_UI && (

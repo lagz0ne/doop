@@ -710,9 +710,8 @@ function CanvasActions({
   onDelete?: () => void
 }) {
   const t = useT()
-  /* with the team chrome put away, the owner still shares their own canvas */
-  const { data: session } = authClient.useSession()
-  const canShare = FULL_UI || (!!canvas.ownerId && canvas.ownerId === session?.user.id)
+  /* with the team chrome put away, whoever may set the link still shares */
+  const canShare = FULL_UI || !!canvas.canSetLink
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>

@@ -83,6 +83,15 @@ export function hasDurableCanvasAccess(userId: string | undefined, canvas: Canva
   return !!canvas.workspaceId && isWorkspaceMember(canvas.workspaceId, userId)
 }
 
+/** Who may set a canvas's share link (its level and password): anyone who
+ *  edits it as a person of the canvas (owner, member, workspace member), as
+ *  Google Docs and Figma let editors share by default. Not someone whose
+ *  only way in is the link itself, a link guest or an embedded reviewer:
+ *  the link would otherwise widen itself. */
+export function canSetLink(userId: string | undefined, canvas: Canvas): boolean {
+  return hasDurableCanvasAccess(userId, canvas)
+}
+
 /** Who may delete a canvas, or move it out of its workspace: its owner,
  *  and the owner/admins of the workspace it lives in — the org keeps
  *  control of the work done in its space. */

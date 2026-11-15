@@ -210,13 +210,15 @@ describe('canvas access model', () => {
     expect(entry?.people.map((p: { name: string }) => p.name)).toEqual(['Owner', 'Invited'])
   })
 
-  it('only the owner can flip link access; edit opens the canvas to everyone signed in', async () => {
-    expect((await invited.patch(`/api/canvases/${canvasId}`, { linkAccess: 'edit' })).status).toBe(403)
+  it('the canvas’s own people flip link access, not its visitors; edit opens the canvas to everyone signed in', async () => {
+    expect((await stranger.patch(`/api/canvases/${canvasId}`, { linkAccess: 'edit' })).status).toBe(403)
     expect((await owner.patch(`/api/canvases/${canvasId}`, { linkAccess: 'bogus' })).status).toBe(400)
 
-    expect((await owner.patch(`/api/canvases/${canvasId}`, { linkAccess: 'edit' })).status).toBe(200)
+    expect((await invited.patch(`/api/canvases/${canvasId}`, { linkAccess: 'edit' })).status).toBe(200)
     expect((await stranger.get(`/api/canvases/${canvasId}`)).status).toBe(200)
     expect(await stranger.joinWs(canvasId)).toEqual({ kind: 'init' })
+    /* in by the link alone, at edit, a visitor still cannot change the link */
+    expect((await stranger.patch(`/api/canvases/${canvasId}`, { linkAccess: 'none' })).status).toBe(403)
 
     expect((await owner.patch(`/api/canvases/${canvasId}`, { linkAccess: 'none' })).status).toBe(200)
     expect((await stranger.get(`/api/canvases/${canvasId}`)).status).toBe(403)

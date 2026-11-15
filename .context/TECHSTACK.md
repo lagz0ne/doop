@@ -1045,8 +1045,11 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   spec in `.context/specs/share-link-roles.md`. A link with a password (`canvas.linkPassword`)
   admits nobody by itself, account or not: its visitors come in as link guests.
 
-- Share-link guests (`server/shareLink.ts`, `src/pages/LinkJoin.tsx`): the owner sets the link's
-  level and, optionally, a password in the Share dialog (`PATCH /api/canvases/:id { linkAccess,
+- Share-link guests (`server/shareLink.ts`, `src/pages/LinkJoin.tsx`): the canvas's own people
+  (owner, members, workspace members: `canSetLink` in `server/access.ts`, sent to them as
+  `canSetLink: true` on the canvas GET, the canvas list and the room `init`) set the link's
+  level and, optionally, a password in the Share dialog; someone in by the link alone, at any
+  level, cannot change it (`PATCH /api/canvases/:id { linkAccess,
 linkPassword }`, null or '' removes it) or the operator API (`PUT
 /api/operator/canvases/:id/link { access, password }`). The hash (better-auth's scrypt) is
   `canvases.link_password` (migration 0050), held in `server/linkPasswords.ts` and never on the

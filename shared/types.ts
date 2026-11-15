@@ -115,6 +115,8 @@ export interface CanvasMeta {
   /** the owner first, then everyone invited — the home tile's avatar stack;
    *  `image` is a profile photo's URL when the person uploaded one */
   people?: { id: string; name: string; image?: string }[]
+  /** the caller may set this canvas's share link (server/access.ts `canSetLink`) */
+  canSetLink?: true
 }
 
 /** The dashboard/gallery preview render (`/i/<id>.jpg?preview`) clips a
@@ -244,6 +246,9 @@ export interface Canvas {
    *  a canvas GET or a room `init` hands out; never stored. Unset reads as the
    *  built-in team as it ships */
   team?: AgentRole[]
+  /** the caller may set the share link (server/access.ts `canSetLink`),
+   *  set beside `role` on the same per-person copies; never stored */
+  canSetLink?: true
   /** user ids invited to collaborate (the owner is not listed) */
   memberIds?: string[]
   /** reusable designs on this canvas; unset = none. See shared/components.ts. */
