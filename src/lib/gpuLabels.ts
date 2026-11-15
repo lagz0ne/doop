@@ -16,9 +16,13 @@
 
 /** The title's look, read off the probe (StagePictures). */
 export interface NameStyle {
-  /** the canvas `font` shorthand: style, weight, size, family */
-  font: string
-  letterSpacing: string
+  fontStyle: string
+  fontWeight: string
+  /** CSS px */
+  fontSize: number
+  fontFamily: string
+  /** CSS px */
+  letterSpacing: number
   /** the computed CSS colour of the name */
   color: string
   /** the title row's height, CSS px */
@@ -39,6 +43,11 @@ export interface NameCell {
   /** prefix[k]: the advance of the first k graphemes, CSS px (k = 0…count) */
   prefix: Float32Array
   count: number
+}
+
+/** The canvas `font` shorthand of a style, its size scaled by `scale`. */
+export function nameFont(style: NameStyle, scale = 1): string {
+  return `${style.fontStyle} ${style.fontWeight} ${style.fontSize * scale}px ${style.fontFamily}`
 }
 
 /** Device px around each cell's text, for ink outside the advance. */
@@ -94,16 +103,22 @@ export class NameAtlas {
   version = 0
   private measured = new Map<string, { advance: number; prefix: Float32Array; count: number }>()
   private measuredFont = ''
+  /** the density the names are measured at */
+  private measuredDpr = 1
 
   constructor() {
     this.canvas = document.createElement('canvas')
     this.ctx = this.canvas.getContext('2d')!
   }
 
-  private applyFont(style: NameStyle) {
+  /** The font at its device size, where the DOM's text is shaped: Chromium lays a 12px title out at
+      12 * dpr px, whose hinted advances are not the 12px ones scaled (up to 6 px wider or narrower over
+      a name at 1.25x and 1.5x, so a name was cut at another letter than its title). Measured at the
+      device size and divided back, the widths match the title's to 0 px at 1x to 2x. */
+  private applyFont(style: NameStyle, dpr: number) {
     const ctx = this.ctx
-    ctx.font = style.font
-    ctx.letterSpacing = style.letterSpacing
+    ctx.font = nameFont(style, dpr)
+    ctx.letterSpacing = `${style.letterSpacing * dpr}px`
     ctx.fontKerning = 'normal'
     ctx.textBaseline = 'alphabetic'
     ctx.textAlign = 'left'
@@ -114,7 +129,8 @@ export class NameAtlas {
     if (known) return known
     const ends = graphemeEnds(name)
     const prefix = new Float32Array(ends.length + 1)
-    for (let k = 0; k < ends.length; k++) prefix[k + 1] = this.ctx.measureText(name.slice(0, ends[k])).width
+    const dpr = this.measuredDpr
+    for (let k = 0; k < ends.length; k++) prefix[k + 1] = this.ctx.measureText(name.slice(0, ends[k])).width / dpr
     const m = { advance: prefix[ends.length] ?? 0, prefix, count: ends.length }
     this.measured.set(name, m)
     return m
@@ -123,12 +139,13 @@ export class NameAtlas {
   /** Lays out and draws `names` (no empty ones) in `style` at `dpr`. */
   build(names: Iterable<string>, style: NameStyle, dpr: number, maxSide: number) {
     const ctx = this.ctx
-    const font = `${style.font}|${style.letterSpacing}`
+    const font = `${nameFont(style, dpr)}|${style.letterSpacing}|${dpr}`
     if (font !== this.measuredFont) {
       this.measured.clear()
       this.measuredFont = font
+      this.measuredDpr = dpr
     }
-    this.applyFont(style)
+    this.applyFont(style, dpr)
     const side = Math.min(ATLAS_SIDE, maxSide)
     const cellH = Math.ceil(style.lineHeight * dpr) + 2 * PAD
     const cells = new Map<string, NameCell>()
@@ -157,17 +174,13 @@ export class NameAtlas {
     /* a resize clears the canvas and resets its state */
     this.canvas.width = side
     this.canvas.height = height
-    this.applyFont(style)
+    this.applyFont(style, dpr)
     ctx.fillStyle = style.color
     /* the baseline on a whole device pixel, as the DOM lays text out */
     const base = Math.round(style.baseline * dpr)
-    const drawCell = (name: string, c: NameCell) => {
-      ctx.setTransform(dpr, 0, 0, dpr, c.x + PAD, c.y + PAD + base)
-      ctx.fillText(name, 0, 0)
-    }
+    const drawCell = (name: string, c: NameCell) => ctx.fillText(name, c.x + PAD, c.y + PAD + base)
     if (ellipsis) drawCell('…', ellipsis)
     for (const [name, c] of cells) drawCell(name, c)
-    ctx.setTransform(1, 0, 0, 1, 0, 0)
     this.cells = cells
     this.ellipsis = ellipsis
     this.style = style

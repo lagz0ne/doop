@@ -5,7 +5,7 @@ import { isCanvasElement } from '../lib/drawing'
 import { isSyncedFrame } from '../lib/sync'
 import { isGithubFrame } from '../lib/github'
 import { cullingEnabled, useLiveFrames } from '../lib/liveFrames'
-import { NameAtlas, type NameStyle } from '../lib/gpuLabels'
+import { NameAtlas, nameFont, type NameStyle } from '../lib/gpuLabels'
 import {
   PictureRenderer,
   frameAt,
@@ -124,17 +124,21 @@ export function StagePictures({
     function restyle() {
       if (!probe || !text || !mark || !ringProbe) return
       const cs = getComputedStyle(text)
-      const font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`
       const box = probe.getBoundingClientRect()
       const next: NameStyle = {
-        font,
-        letterSpacing: cs.letterSpacing === 'normal' ? '0px' : cs.letterSpacing,
+        fontStyle: cs.fontStyle,
+        fontWeight: cs.fontWeight,
+        fontSize: parseFloat(cs.fontSize) || 12,
+        fontFamily: cs.fontFamily,
+        /* computed as 'normal' or a length in px */
+        letterSpacing: parseFloat(cs.letterSpacing) || 0,
         color: cs.color,
         lineHeight: box.height,
         baseline: mark.getBoundingClientRect().top - box.top,
       }
+      const font = nameFont(next)
       const dpr = window.devicePixelRatio || 1
-      const key = `${next.font}|${next.letterSpacing}|${next.color}|${next.lineHeight}|${next.baseline}|${dpr}`
+      const key = `${font}|${next.letterSpacing}|${next.color}|${next.lineHeight}|${next.baseline}|${dpr}`
       /* drawn in a fallback font, the names would stay so: wait for the
          page's own (once; a font that never comes is not waited for) */
       if (fontAsked !== font && !document.fonts.check(font)) {
@@ -170,7 +174,8 @@ export function StagePictures({
       const live = useLiveFrames.getState()
       const s = useStore.getState()
       const ids = live.ids
-      if (lost || ids === null || !style) {
+      densityMoved()
+      if (lost || !renderer.fitsStage || ids === null || !style) {
         drawnList = []
         renderer.setScene([])
         useGpuPictures.getState().setDrawn(NONE)
@@ -245,10 +250,34 @@ export function StagePictures({
     el.addEventListener('pointerleave', onLeave)
     el.addEventListener('pointerdown', onLeave, true)
 
+    let density = window.devicePixelRatio || 1
     function measure() {
       if (!renderer || !el) return
-      renderer.setStage({ width: el.clientWidth, height: el.clientHeight }, window.devicePixelRatio || 1)
+      const fitted = renderer.fitsStage
+      density = window.devicePixelRatio || 1
+      renderer.setStage({ width: el.clientWidth, height: el.clientHeight }, density)
       readOrigin()
+      /* a backing store the GPU would not give hands every frame to the DOM */
+      if (renderer.fitsStage !== fitted) update()
+    }
+
+    /* A window moved to a screen of another density: the media query below
+       says so, but not always in time (Chromium's emulation fired it a step
+       late), so the density is also compared on every camera move and
+       update, a read that costs no layout. */
+    let densityQuery: MediaQueryList | null = null
+    function watchDensity() {
+      densityQuery?.removeEventListener('change', onDensity)
+      densityQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`)
+      densityQuery.addEventListener('change', onDensity)
+    }
+    function onDensity() {
+      watchDensity()
+      measure()
+      restyle()
+    }
+    function densityMoved() {
+      if ((window.devicePixelRatio || 1) !== density) onDensity()
     }
 
     /* Names are cut at the frame's width and kept a set size on screen, so
@@ -256,6 +285,7 @@ export function StagePictures({
        is worked out again once the camera rests, not per frame. */
     let rest = 0
     function camera(vp: { x: number; y: number; zoom: number }) {
+      densityMoved()
       renderer!.setCamera(vp)
       window.clearTimeout(rest)
       rest = window.setTimeout(() => {
@@ -285,16 +315,7 @@ export function StagePictures({
     const theme = new MutationObserver(restyle)
     theme.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style'] })
     document.fonts.addEventListener('loadingdone', restyle)
-    /* a window moved to a screen of another density */
-    let dpr = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
-    const onDpr = () => {
-      dpr.removeEventListener('change', onDpr)
-      dpr = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
-      dpr.addEventListener('change', onDpr)
-      measure()
-      restyle()
-    }
-    dpr.addEventListener('change', onDpr)
+    watchDensity()
     return () => {
       control.current = null
       setGpuHitTest(null)
@@ -304,7 +325,7 @@ export function StagePictures({
       resize.disconnect()
       theme.disconnect()
       document.fonts.removeEventListener('loadingdone', restyle)
-      dpr.removeEventListener('change', onDpr)
+      densityQuery?.removeEventListener('change', onDensity)
       el.removeEventListener('pointermove', onMove)
       el.removeEventListener('pointerleave', onLeave)
       el.removeEventListener('pointerdown', onLeave, true)
