@@ -51,6 +51,7 @@ import { useCanvasDrawing } from './CanvasDrawing'
 import { FrameLabelLayer } from './FrameLabelLayer'
 import { pixelGridLines } from './PixelGrid'
 import { chromeZoomStale, layoutZoomFor } from '../lib/layoutZoom'
+import { DOT_PERIOD, GRID_ZOOM_DRIFT, gridPaintZoom, gridStale, gridTransform } from '../lib/stageGrid'
 import { useT, type PlainMessageKey } from '../lib/i18n'
 import { NO_INSETS, fitBox, type StageInsets } from '../lib/viewFit'
 import { spaceWouldScroll } from '../lib/spaceScroll'
@@ -295,10 +296,12 @@ export function Stage({
   }, [])
   /* the page whose previews have a density (see the culling effect) */
   const previewPage = useRef<string | null>(null)
-  /* the zoom and grid period last written to the DOM (see apply) */
+  /* the zooms last written to the DOM (see apply): the chrome's, the label
+     layer's, and the ones the dot grid and the pixel grid were painted at */
   const appliedZoom = useRef<number | null>(null)
   const labelZoom = useRef<number | null>(null)
-  const appliedPeriod = useRef<number | null>(null)
+  const gridZoom = useRef<number | null>(null)
+  const pixelZoom = useRef<number | null>(null)
   const zoomLabelRef = useRef<HTMLSpanElement>(null)
   const setViewport = useStore((s) => s.setViewport)
   const canvas = usePageCanvas()
@@ -369,11 +372,53 @@ export function Stage({
       appliedZoom.current = zoom
       ref.current.style.setProperty('--zoom', String(zoom))
     }
+    /* The dot grid and the pixel grid are scaled while the zoom moves and
+       painted afresh when they drift out of their band or the camera rests
+       (stageGrid.ts); a pan writes their translate alone. */
+    function writeGrids(vp: { x: number; y: number; zoom: number }, exact: boolean) {
+      const grid = gridRef.current
+      if (grid) {
+        if (exact ? gridZoom.current !== vp.zoom : gridStale(gridZoom.current, vp.zoom, GRID_ZOOM_DRIFT)) {
+          gridZoom.current = exact ? vp.zoom : gridPaintZoom(gridZoom.current, vp.zoom, GRID_ZOOM_DRIFT)
+          const period = DOT_PERIOD * gridZoom.current
+          grid.style.backgroundSize = `${period}px ${period}px`
+          /* one period of overhang: the layer slides back by up to a period */
+          grid.style.width = grid.style.height = `calc(100% + ${period}px)`
+        }
+        grid.style.transform = gridTransform(vp, DOT_PERIOD, gridZoom.current ?? vp.zoom)
+      }
+      const pixels = pixelGridRef.current
+      if (pixels) {
+        const opacity = useStore.getState().viewOptions.pixelGrid ? pixelGridOpacity(vp.zoom) : 0
+        /* hidden below the zoom where pixels show: then a pan writes nothing
+           here, and the frame stays a compositor-only transform */
+        if (pixels.hidden !== (opacity === 0)) pixels.hidden = opacity === 0
+        /* the frames' own grids read the same fade */
+        const fade = String(opacity)
+        const stage = ref.current
+        if (stage && stage.style.getPropertyValue('--pixel-grid') !== fade)
+          stage.style.setProperty('--pixel-grid', fade)
+        if (opacity === 0) pixelZoom.current = null
+        else {
+          pixels.style.opacity = fade
+          if (exact ? pixelZoom.current !== vp.zoom : gridStale(pixelZoom.current, vp.zoom, GRID_ZOOM_DRIFT)) {
+            pixelZoom.current = exact ? vp.zoom : gridPaintZoom(pixelZoom.current, vp.zoom, GRID_ZOOM_DRIFT)
+            pixels.style.backgroundSize = `${pixelZoom.current}px ${pixelZoom.current}px`
+          }
+          pixels.style.transform = gridTransform(vp, 1, pixelZoom.current ?? vp.zoom)
+        }
+      }
+    }
+    /* the camera has held its zoom still: the chrome and the grids get it exactly */
+    function zoomAtRest() {
+      const vp = useStore.getState().viewport
+      writeChromeZoom(vp.zoom)
+      writeGrids(vp, true)
+    }
     function apply(vp: { x: number; y: number; zoom: number }, exact = false) {
       const world = worldRef.current
-      const grid = gridRef.current
       const stage = ref.current
-      if (!world || !grid || !stage) return
+      if (!world || !gridRef.current || !stage) return
       world.style.transform = worldTransform(vp, layoutZoomRef.current)
       /* The camera's offset, for chrome drawn in screen px, goes on the label
          layer alone: it is the only reader (FrameLabelLayer), and a custom
@@ -395,33 +440,7 @@ export function Stage({
          restyles the whole canvas: it follows a moving camera in steps and
          catches up when the camera rests (chromeZoomStale, layoutZoom.ts) */
       if (exact || chromeZoomStale(appliedZoom.current, vp.zoom)) writeChromeZoom(vp.zoom)
-      const period = 26 * vp.zoom
-      if (appliedPeriod.current !== period) {
-        appliedPeriod.current = period
-        grid.style.backgroundSize = `${period}px ${period}px`
-        /* one period of overhang: the layer slides back by up to a period */
-        grid.style.width = grid.style.height = `calc(100% + ${period}px)`
-      }
-      const gx = (((vp.x % period) + period) % period) - period
-      const gy = (((vp.y % period) + period) % period) - period
-      grid.style.transform = `translate(${gx}px, ${gy}px)`
-      const pixels = pixelGridRef.current
-      if (pixels) {
-        const opacity = useStore.getState().viewOptions.pixelGrid ? pixelGridOpacity(vp.zoom) : 0
-        /* hidden below the zoom where pixels show: then a pan writes nothing
-           here, and the frame stays a compositor-only transform */
-        if (pixels.hidden !== (opacity === 0)) pixels.hidden = opacity === 0
-        /* the frames' own grids read the same fade */
-        const fade = String(opacity)
-        if (stage.style.getPropertyValue('--pixel-grid') !== fade) stage.style.setProperty('--pixel-grid', fade)
-        if (opacity !== 0) {
-          pixels.style.opacity = fade
-          pixels.style.backgroundSize = `${vp.zoom}px ${vp.zoom}px`
-          const px = (((vp.x % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
-          const py = (((vp.y % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
-          pixels.style.transform = `translate(${px}px, ${py}px)`
-        }
-      }
+      writeGrids(vp, exact)
       /* replacing a text node repaints the pill even when it reads the same */
       const percent = `${Math.round(vp.zoom * 100)}%`
       if (zoomLabelRef.current && zoomLabelRef.current.textContent !== percent)
@@ -439,8 +458,9 @@ export function Stage({
       apply(s.viewport)
       if (ref.current) sendViewport(s.viewport, ref.current)
       window.clearTimeout(chromeRest)
-      if (appliedZoom.current !== s.viewport.zoom)
-        chromeRest = window.setTimeout(() => writeChromeZoom(useStore.getState().viewport.zoom), CHROME_ZOOM_REST_MS)
+      const zoom = s.viewport.zoom
+      if (appliedZoom.current !== zoom || gridZoom.current !== zoom || (pixelZoom.current ?? zoom) !== zoom)
+        chromeRest = window.setTimeout(zoomAtRest, CHROME_ZOOM_REST_MS)
       window.clearTimeout(settle)
       settle = window.setTimeout(() => {
         setLayoutZoom(layoutZoomFor(useStore.getState().viewport.zoom, MAX_ZOOM))
@@ -1434,8 +1454,10 @@ export function Stage({
               bgAt.current = { x: e.clientX, y: e.clientY }
             }}
           >
-            {/* dot grid on its own composited layer: panning is transform-only
-            (zero paint), zooming repaints just this layer's tiny tile */}
+            {/* dot grid on its own composited layer: a pan is transform-only
+            (zero paint), and so is a zoom until the grid drifts out of its
+            band or the camera rests, when the whole layer (the size of the
+            view) is repainted (stageGrid.ts) */}
             <div
               className="pointer-events-none absolute left-0 top-0 origin-top-left will-change-transform [background-image:radial-gradient(circle,var(--dot)_1.2px,transparent_1.2px)]"
               ref={gridRef}
