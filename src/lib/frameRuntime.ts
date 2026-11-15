@@ -1292,6 +1292,14 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       }
       parent.postMessage({ type: 'doop:settle-result', reqId: d.reqId }, '*')
     }
+    /* answered once two animation frames have passed, which puts a paint
+       behind it: the editor takes a picture off a document shown again
+       (zoomPictures.ts) only when the document is there to see */
+    if (d.type === 'doop:painted') {
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () { parent.postMessage({ type: 'doop:painted-result', reqId: d.reqId }, '*') })
+      })
+    }
     if (d.type === 'doop:style' && d.styles && typeof d.styles === 'object') {
       var applied = applyStyle(d.selector, d.styles)
       parent.postMessage({ type: 'doop:style-result', reqId: d.reqId, ok: applied, info: applied ? inspect(d.selector) : null }, '*')

@@ -51,6 +51,7 @@ import { useCanvasDrawing } from './CanvasDrawing'
 import { FrameLabelLayer } from './FrameLabelLayer'
 import { chromeZoomStale, layoutZoomFor } from '../lib/layoutZoom'
 import { DOT_PERIOD, GRID_ZOOM_DRIFT, gridPaintZoom, gridStale, gridTransform } from '../lib/stageGrid'
+import { zoomPicturesActive, zoomPicturesEnabled, zoomPicturesEnd, zoomPicturesStart } from '../lib/zoomPictures'
 import { useT, type PlainMessageKey } from '../lib/i18n'
 import { NO_INSETS, fitBox, type StageInsets } from '../lib/viewFit'
 import { spaceWouldScroll } from '../lib/spaceScroll'
@@ -444,12 +445,22 @@ export function Stage({
     apply(useStore.getState().viewport, true)
     let settle = 0
     let chromeRest = 0
+    /* pictures in place of the live documents while the zoom moves, behind
+       a switch (zoomPictures.ts): from the first change of zoom, a pan alone
+       never, until the camera has settled */
+    const zoomPictures = zoomPicturesEnabled()
+    let picturesEnd = 0
     const unsub = useStore.subscribe((s, prev) => {
       /* a (re)connect needs the camera announced afresh — the server only
          knows what this socket has sent */
       if (s.connected && !prev.connected && ref.current) sendViewport(s.viewport, ref.current)
       if (s.viewOptions.pixelGrid !== prev.viewOptions.pixelGrid) apply(s.viewport)
       if (s.viewport === prev.viewport) return
+      if (zoomPictures) {
+        window.cancelAnimationFrame(picturesEnd)
+        /* before the camera moves, so the documents never raster this step */
+        if (s.viewport.zoom !== prev.viewport.zoom) zoomPicturesStart()
+      }
       apply(s.viewport)
       if (ref.current) sendViewport(s.viewport, ref.current)
       window.clearTimeout(chromeRest)
@@ -459,12 +470,18 @@ export function Stage({
       window.clearTimeout(settle)
       settle = window.setTimeout(() => {
         setLayoutZoom(layoutZoomFor(useStore.getState().viewport.zoom, MAX_ZOOM))
+        /* the documents come back a frame after the world takes its settled
+           layout zoom, so one whose density changes rasters once, under its
+           picture, rather than twice */
+        if (zoomPictures && zoomPicturesActive()) picturesEnd = window.requestAnimationFrame(zoomPicturesEnd)
       }, 250)
     })
     return () => {
       unsub()
       window.clearTimeout(settle)
       window.clearTimeout(chromeRest)
+      window.cancelAnimationFrame(picturesEnd)
+      if (zoomPictures) zoomPicturesEnd()
     }
   }, [])
 
