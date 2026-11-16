@@ -41,12 +41,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  src/components/LayersPanel.tsx      | 170 ++++++++++--------------
  src/components/PagesPanel.tsx       |  40 ++++--
  src/components/ZoomControls.tsx     |  19 ++-
+ src/lib/i18n/en/canvas.ts           |   1 +
  src/lib/i18n/en/panels.ts           |   2 -
+ src/lib/i18n/pt-BR/canvas.ts        |   1 +
  src/lib/i18n/pt-BR/panels.ts        |   2 -
- src/pages/CanvasPage.tsx            | 141 ++++++++++----------
+ src/pages/CanvasPage.tsx            | 143 +++++++++++----------
  tests/phoneReviewBrowser.test.ts    |  11 ++
  tests/reviewerLayoutBrowser.test.ts |  61 +++++----
- 10 files changed, 303 insertions(+), 346 deletions(-)
+ 12 files changed, 306 insertions(+), 347 deletions(-)
 
 diff --git a/src/components/ActivityPanel.tsx b/src/components/ActivityPanel.tsx
 index 8540f35..56934af 100644
@@ -739,6 +741,18 @@ index 77f0d7d..8e34b15 100644
      </Toolbar>
    )
  }
+diff --git a/src/lib/i18n/en/canvas.ts b/src/lib/i18n/en/canvas.ts
+index b36e719..b6c84ae 100644
+--- a/src/lib/i18n/en/canvas.ts
++++ b/src/lib/i18n/en/canvas.ts
+@@ -82,6 +82,7 @@ export const canvas = {
+   /* panels */
+   resizeLayers: 'Resize Layers panel',
+   resizeAgents: 'Resize Agents panel',
++  canvasActionsReviewDescription: 'Present, share, export, or your settings.',
+   canvasActionsDescription: 'Layers, import, export, share, Prototype mode, or your account settings.',
+   layers: 'Layers',
+   importWebsite: 'Import website',
 diff --git a/src/lib/i18n/en/panels.ts b/src/lib/i18n/en/panels.ts
 index 5e0aec8..df003e7 100644
 --- a/src/lib/i18n/en/panels.ts
@@ -752,6 +766,18 @@ index 5e0aec8..df003e7 100644
    layersExpandPanel: 'Expand panel',
    layersCollapseAll: 'Collapse all',
    layersNewFrame: 'New frame',
+diff --git a/src/lib/i18n/pt-BR/canvas.ts b/src/lib/i18n/pt-BR/canvas.ts
+index bdc946d..fd0774e 100644
+--- a/src/lib/i18n/pt-BR/canvas.ts
++++ b/src/lib/i18n/pt-BR/canvas.ts
+@@ -82,6 +82,7 @@ export const canvas: Catalog['canvas'] = {
+ 
+   resizeLayers: 'Redimensionar painel Camadas',
+   resizeAgents: 'Redimensionar painel Agentes',
++  canvasActionsReviewDescription: 'Apresentar, compartilhar, exportar ou as suas configurações.',
+   canvasActionsDescription:
+     'Camadas, importar, exportar, compartilhar, modo Protótipo ou as configurações da sua conta.',
+   layers: 'Camadas',
 diff --git a/src/lib/i18n/pt-BR/panels.ts b/src/lib/i18n/pt-BR/panels.ts
 index bb768d9..1548d8c 100644
 --- a/src/lib/i18n/pt-BR/panels.ts
@@ -766,7 +792,7 @@ index bb768d9..1548d8c 100644
    layersCollapseAll: 'Recolher tudo',
    layersNewFrame: 'Novo frame',
 diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
-index d599a6d..1dda298 100644
+index d599a6d..64e4637 100644
 --- a/src/pages/CanvasPage.tsx
 +++ b/src/pages/CanvasPage.tsx
 @@ -139,7 +139,7 @@ import { AGENTS_MIN, LAYERS_MIN, fitPanelWidths } from '../lib/panelWidths'
@@ -947,7 +973,13 @@ index d599a6d..1dda298 100644
                    inspector={
                      readOnly
                        ? null
-@@ -1313,11 +1320,25 @@ export function CanvasPage({
+@@ -1308,16 +1315,30 @@ export function CanvasPage({
+                   {reviewerLayout ? canvas?.name || t('canvas.canvasActions') : t('canvas.canvasActions')}
+                 </SheetTitle>
+                 <SheetDescription className="mt-1 text-xs text-ink-soft">
+-                  {t('canvas.canvasActionsDescription')}
++                  {t(reviewerLayout ? 'canvas.canvasActionsReviewDescription' : 'canvas.canvasActionsDescription')}
+                 </SheetDescription>
                </div>
                {/* the same glyphs as the desktop bar and islands; pages live
                    in the Layers sheet, as on desktop. In the reviewer layout
