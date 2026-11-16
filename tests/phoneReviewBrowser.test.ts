@@ -104,6 +104,8 @@ describe.skipIf(!findBrowserPath())('a phone in the reviewer layout', () => {
     expect(await shown('Zoom level')).toBe(1)
     /* the pages are a picker in the dock, not a sheet */
     expect(await page.$(`${dock} [aria-label="Page: Page 1"]`)).not.toBe(null)
+    /* nor the desktop's canvas label at the top: the name is in the actions sheet */
+    expect(await page.$('[aria-label="Canvas"][role="toolbar"]')).toBe(null)
   })
 
   it('holds the page still: no browser zoom, no double-tap zoom', async () => {

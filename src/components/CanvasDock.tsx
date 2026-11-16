@@ -41,13 +41,15 @@ import {
  * bottom of the canvas, icons only with their names on hover. The bar keeps to
  * moving around and reviewing; everything else is one menu away.
  *
- * In order: back to the canvases, the canvas's name and id; Hand and
- * Comment; the zoom (the Stage draws its own control into `zoomSlot`, keeping
+ * In order: Hand and Comment; the zoom (the Stage draws its own control into `zoomSlot`, keeping
  * its menu and handlers); the page picker (the canvas's pages, in place of a
  * Pages panel); and the faces of who is here, which open the one menu for the
  * rest: the comments panel, import, export, share, the design panel, settings
  * and your name. The page decides what each may do and passes null for what
- * this person is not offered.
+ * this person is not offered. Back to the canvases and the canvas's name and
+ * id are not in the bar: `CanvasLabel` puts them quietly at the top left,
+ * where a glance tells what this is, and the bar's room goes to the page's
+ * name.
  *
  * No tool list, no Prototype mode, no AI activity and no Connect AI: a
  * reviewer moves around and comments, and the agents work over MCP, not from
@@ -84,9 +86,6 @@ type PhoneDockProps = PanelProps & {
 }
 
 type DockProps = PanelProps & {
-  title: ReactNode
-  idMenu: ReactNode
-  onBack: (() => void) | null
   /** receives the element the zoom control is drawn into */
   zoomSlot: (el: HTMLElement | null) => void
   me: { name: string; image?: string; color: string }
@@ -149,9 +148,6 @@ function PanelButtons({
 }
 
 function DesktopDock({
-  title,
-  idMenu,
-  onBack,
   zoomSlot,
   me,
   others,
@@ -166,20 +162,11 @@ function DesktopDock({
   onShare,
 }: DockProps) {
   const t = useT()
-  const side = 'top' as const
   return (
     <Toolbar
       aria-label={t('canvas.dock')}
       className="pointer-events-auto absolute bottom-3.5 left-1/2 z-[38] max-w-[calc(100%-28px)] -translate-x-1/2 overflow-x-auto"
     >
-      {onBack && (
-        <ToolbarControl side={side} label={t('canvas.allCanvases')} onClick={onBack}>
-          <ChevronLeftIcon />
-        </ToolbarControl>
-      )}
-      <span className="flex min-w-0 max-w-[220px] items-center">{title}</span>
-      {idMenu}
-      <ToolbarDivider />
       <DockTools />
       <ToolbarDivider />
       <span ref={zoomSlot} className="flex items-center" />
@@ -203,6 +190,40 @@ function DesktopDock({
   )
 }
 
+/** The reviewer layout's top left, on a desktop: back to the canvases, the
+ *  canvas's name (its rename field where this person may edit) and its id
+ *  menu, on a pill that stays faint until the pointer comes to it. People
+ *  read it once and move on, so it takes the least room that names the
+ *  canvas: the name truncates at 240px, whole in its tooltip. */
+export function CanvasLabel({
+  title,
+  idMenu,
+  onBack,
+}: {
+  title: ReactNode
+  idMenu: ReactNode
+  onBack: (() => void) | null
+}) {
+  const t = useT()
+  const name = useStore((s) => s.canvas?.name)
+  return (
+    <Toolbar
+      aria-label={t('canvas.canvasLabel')}
+      className="pointer-events-auto absolute top-2.5 left-3.5 z-[38] h-9 gap-0.5 bg-surface/70 px-1 py-0 shadow-none backdrop-blur-sm transition-[background-color,box-shadow] duration-150 hover:bg-surface hover:shadow-ring focus-within:bg-surface focus-within:shadow-ring"
+    >
+      {onBack && (
+        <ToolbarControl side="bottom" label={t('canvas.allCanvases')} onClick={onBack}>
+          <ChevronLeftIcon />
+        </ToolbarControl>
+      )}
+      <span className="flex min-w-0 max-w-[240px] items-center" title={name}>
+        {title}
+      </span>
+      {idMenu}
+    </Toolbar>
+  )
+}
+
 /** The canvas's pages as a pick-one menu, in place of a Pages panel: the
  *  trigger names the page shown (a phone shows the icon alone). Adding,
  *  renaming and ordering pages stay with the full editor's Pages panel. */
@@ -221,7 +242,7 @@ function PagePicker({ phone = false }: { phone?: boolean }) {
           <DropdownMenuTrigger asChild>
             <ToolbarButton
               aria-label={t('canvas.pagePicker', { page: active.name })}
-              className={phone ? undefined : 'flex w-auto max-w-[200px] gap-1.5 px-2 sm:w-auto sm:px-2'}
+              className={phone ? undefined : 'flex w-auto max-w-[320px] gap-1.5 px-2 sm:w-auto sm:px-2'}
             >
               <PageIcon />
               {!phone && <span className="min-w-0 truncate">{active.name}</span>}

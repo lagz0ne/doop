@@ -108,6 +108,7 @@ export const canvas = {
   /* the reviewer dock (CanvasDock.tsx): the page picker and the one menu for the rest */
   pagePicker: 'Page: {page}',
   dockMenu: 'Comments, people, share and settings',
+  canvasLabel: 'Canvas',
   hereNow: 'Here now: {names}',
   commentsClose: 'Close comments',
   changeYourName: 'Change your name',

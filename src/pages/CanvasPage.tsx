@@ -49,7 +49,7 @@ import { ConnectModal } from '../components/ConnectModal'
 import { LimitWall, isResidentLimit } from '../components/TeamAllowance'
 import { WorkingNow } from '../components/WorkingNow'
 import { MobilePanelTabs, SideRail } from '../components/SideRail'
-import { CanvasDock } from '../components/CanvasDock'
+import { CanvasDock, CanvasLabel } from '../components/CanvasDock'
 import { LayersPanel, LayersRailToggle } from '../components/LayersPanel'
 import { IosAppPrompt } from '../components/NativeAppPromo'
 import { Onboarding } from '../components/Onboarding'
@@ -170,6 +170,8 @@ const FLOAT_GAP = 10
 const DOCKED_STAGE_MIN = 320
 /* the reviewer layout's dock: its height and the gaps above and below it */
 const DOCK_CLEAR = 66
+/* the reviewer layout's top: the canvas label and Present (36px, 10px down) and a gap */
+const LABEL_CLEAR = 52
 const AGENTS_W = 280
 const PANEL_WIDTH_KEY = 'doop:canvas-panel-widths'
 
@@ -879,7 +881,12 @@ export function CanvasPage({
         ? /* fits keep clear of the phone's dock */
           { top: 0, right: 0, bottom: DOCK_CLEAR, left: 0 }
         : reviewerLayout
-          ? { top: rulerInset, right: chrome.island, bottom: DOCK_CLEAR, left: chrome.toolRail + rulerInset }
+          ? {
+              top: LABEL_CLEAR + rulerInset,
+              right: chrome.island,
+              bottom: DOCK_CLEAR,
+              left: chrome.toolRail + rulerInset,
+            }
           : { top: BAR_H + rulerInset, right: chrome.right, bottom: 0, left: chrome.left + rulerInset }
   /* docked, the stage is the gap between the bar and the columns; ⌘. gives
      it the whole window back */
@@ -1281,9 +1288,16 @@ export function CanvasPage({
             <>
               {/* a phone's Present is in the canvas actions sheet: its dock is the one control on screen */}
               {!isMobile && (
-                <BarPill className="pointer-events-auto absolute top-2.5 right-[var(--chrome-right)] z-[38] transition-[right] duration-150">
-                  {presentButton}
-                </BarPill>
+                <>
+                  <CanvasLabel
+                    title={<CanvasName readOnly={readOnly} />}
+                    idMenu={<CanvasIdMenu canvasId={canvasId} onCopied={showToast} compact />}
+                    onBack={guest || linkGuest ? null : () => navigate('/')}
+                  />
+                  <BarPill className="pointer-events-auto absolute top-2.5 right-[var(--chrome-right)] z-[38] transition-[right] duration-150">
+                    {presentButton}
+                  </BarPill>
+                </>
               )}
               {isMobile ? (
                 <CanvasDock
@@ -1297,9 +1311,6 @@ export function CanvasPage({
                 />
               ) : (
                 <CanvasDock
-                  title={<CanvasName readOnly={readOnly} />}
-                  idMenu={<CanvasIdMenu canvasId={canvasId} onCopied={showToast} compact />}
-                  onBack={guest || linkGuest ? null : () => navigate('/')}
                   zoomSlot={setZoomSlot}
                   me={meFace}
                   others={others}
@@ -2624,7 +2635,7 @@ function CanvasIdMenu({
 }: {
   canvasId: string
   onCopied: (msg: string) => void
-  /** the dock's form: a # that shows the id on hover, the menu above it */
+  /** the reviewer layout's form: a # that shows the id on hover */
   compact?: boolean
 }) {
   const t = useT()
@@ -2655,7 +2666,7 @@ function CanvasIdMenu({
           {compact ? '#' : canvasId}
         </Pressable>
       </DropdownMenuTrigger>
-      <DropdownMenuContent side={compact ? 'top' : 'bottom'} align="start" width="sm">
+      <DropdownMenuContent side="bottom" align="start" width="sm">
         <DropdownMenuItem onSelect={() => void copy(canvasId, t('canvas.idCopied'))}>
           <CopyIcon size="rail" />
           {t('canvas.copyId')}
