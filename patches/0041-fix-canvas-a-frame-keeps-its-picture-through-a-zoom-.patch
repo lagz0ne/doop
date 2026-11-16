@@ -1,0 +1,591 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 03:10:02 +0000
+Subject: [PATCH 41/41] fix(canvas): a frame keeps its picture through a zoom's
+ settle
+
+When a zoom came to rest, frames changed how they are drawn: culled frames
+went live (a FrameView over the GPU canvas or over their shell), live ones
+went back to shells, and every preview switched to the level of the new
+zoom. Each of those started from an empty <img>, so the frame showed its
+white surface for a frame or more before the picture arrived. Seen as a white
+flash on every zoom in or out, worst on large frames.
+
+What drew the frame stays until its replacement has drawn, as a map keeps a
+tile until the new one has loaded:
+
+- GPU canvas -> FrameView: the canvas keeps drawing the frame under its
+  FrameView (gpuScene's `under`) while the view is transparent, until the
+  view shows its picture (decoded) or its document; two animation frames
+  later the store's `painted` lets the canvas drop it. 1.5 s at the most.
+- Shell -> FrameView: FrameSlot keeps the FrameShell mounted beneath the
+  new view on the same terms.
+- A preview whose URL changes (another level, a new version) keeps the
+  picture it showed beneath the new <img> until that one has decoded;
+  Chromium paints an <img> whose src changed as empty meanwhile.
+- A new preview of a frame (FrameView -> shell) starts with the frame's
+  last shown picture beneath it, and a URL this page has loaded is eager
+  and sync-decoded, so it paints in its first frame (the HTML spec's list
+  of available images) instead of waiting for the lazy-load pass.
+
+Measured with a screencast of ctrl+wheel zooms (0.15>0.8, 0.8>0.15,
+0.15>0.6, 0.6>0.2), flagging a frame whose white share jumps over the
+frames around it, two runs per renderer, software GL:
+
+  renderer                 before                     after
+  GPU + zoom pictures      62% white at the settle    0 flags in 8 zooms
+                           in 3 of 4 runs, 1-2 more
+  GPU                      1-2 flags per run          0 in 8
+  DOM + zoom pictures      1-3 per run                1 in 8 (mid-gesture,
+                                                      on a stalled run)
+  DOM                      ~80% white zooming in      0 in 8
+---
+ src/components/FrameView.tsx     | 150 +++++++++++++++++++++++++++----
+ src/components/StagePictures.tsx |  19 ++--
+ src/lib/gpuPictures.ts           |  66 ++++++++++++--
+ src/lib/zoomPictures.ts          |   6 +-
+ tests/gpuPictures.test.ts        |  50 +++++++++++
+ tests/zoomPictures.test.ts       |  25 ++++--
+ 6 files changed, 281 insertions(+), 35 deletions(-)
+
+diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
+index a15c963..8da2c77 100644
+--- a/src/components/FrameView.tsx
++++ b/src/components/FrameView.tsx
+@@ -17,7 +17,7 @@ import { sendWs } from '../lib/ws'
+ import { throttle } from '../lib/throttle'
+ import { getIdentity } from '../lib/identity'
+ import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
+-import { useGpuPicture } from '../lib/gpuPictures'
++import { useGpuPicture, useGpuPictures, useGpuUnder } from '../lib/gpuPictures'
+ import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
+ import { trackShell } from '../lib/shellCull'
+ import { keepsDocument, registerZoomPicture, zoomPicturesEnabled } from '../lib/zoomPictures'
+@@ -241,11 +241,15 @@ export const FrameView = memo(function FrameView({
+   frame,
+   stack,
+   layoutZoom,
++  overShell = false,
+ }: {
+   frame: Frame
+   /** its place in the page's paint order (the Stage's z-index), front highest */
+   stack?: number
+   layoutZoom: number
++  /** its FrameShell is still mounted beneath it (FrameSlot), showing the
++   *  frame's picture until this view shows its own */
++  overShell?: boolean
+ }) {
+   const t = useT()
+   const [menuTarget, setMenuTarget] = useState<
+@@ -1146,6 +1150,34 @@ export const FrameView = memo(function FrameView({
+   const pictureRef = useRef<HTMLDivElement>(null)
+   const prototypeMode = useStore((s) => s.prototypeMode)
+   const pictureStandby = zoomPictures && live && previews && documentShown && !stream
++
++  /* ---- the handover from what drew the frame before this view ----
++     The GPU canvas (gpuPictures.ts, gpuScene) or the frame's FrameShell
++     (FrameSlot) keeps drawing the frame under this view until the view shows
++     something of its own: its picture decoded, or its document. Until then
++     the surface is transparent, so the frame is the picture it was a moment
++     ago rather than a white box; then the view shows and, a frame later, the
++     one beneath lets it go. Maps hand tiles over the same way: the old tile
++     stays until its replacement has drawn. */
++  const handover = useGpuUnder(frame.id) || overShell
++  const [pictureShown, setPictureShown] = useState(false)
++  const [handoverTimedOut, setHandoverTimedOut] = useState(false)
++  const shown = documentShown || pictureShown || handoverTimedOut
++  useEffect(() => {
++    if (!shown) return
++    /* two animation frames: the opaque surface is on screen before the
++       canvas stops drawing beneath it */
++    let raf = requestAnimationFrame(() => {
++      raf = requestAnimationFrame(() => useGpuPictures.getState().setPainted(frame.id, true))
++    })
++    return () => cancelAnimationFrame(raf)
++  }, [shown, frame.id])
++  useEffect(() => () => useGpuPictures.getState().setPainted(frame.id, false), [frame.id])
++  useEffect(() => {
++    if (!handover || shown) return
++    const timer = window.setTimeout(() => setHandoverTimedOut(true), HANDOVER_MS)
++    return () => window.clearTimeout(timer)
++  }, [handover, shown])
+   const keepDocument = keepsDocument({
+     documentShown,
+     canvasElement: isCanvasElement(frame.html),
+@@ -1776,6 +1808,8 @@ export const FrameView = memo(function FrameView({
+                  an unselected frame's own stacking context a z-index here would
+                  cover the frame's pins and hover outlines */
+               zIndex: selected ? stack : undefined,
++              /* the GPU canvas or the shell draws the frame beneath until it has painted */
++              opacity: handover && !shown ? 0 : undefined,
+             }}
+             onPointerDown={(e) => startDrag(e, 'move', true)}
+             onDoubleClick={(e) => {
+@@ -1851,7 +1885,7 @@ export const FrameView = memo(function FrameView({
+                    (zoomPictures.ts), which shows it by writing this style */
+                 style={pictureStandby ? { visibility: 'hidden' } : undefined}
+               >
+-                <FramePreview frame={frame} />
++                <FramePreview frame={frame} onShown={() => setPictureShown(true)} />
+               </div>
+             )}
+             {!frame.html && (
+@@ -2244,14 +2278,39 @@ export const FrameView = memo(function FrameView({
+ })
+ 
+ const PREVIEW_RETRIES = 4
++/* the preview URLs this page has loaded (FramePreview), newest last; bounded,
++   since the memory cache is too */
++const shownPreviews = new Set<string>()
++const SHOWN_PREVIEWS_MAX = 2000
++/* per frame, the last picture of its current version that was on screen: a
++   new preview of it (a shell taking over from its view at the end of a zoom)
++   starts with that one beneath it, and it paints in the first frame */
++const lastShown = new Map<string, { version: Frame['updatedAt']; url: string }>()
++function rememberPreview(url: string) {
++  shownPreviews.delete(url)
++  shownPreviews.add(url)
++  if (shownPreviews.size > SHOWN_PREVIEWS_MAX) {
++    const oldest = shownPreviews.values().next().value
++    if (oldest !== undefined) shownPreviews.delete(oldest)
++  }
++}
+ /* how long a document shown again after a zoom has to say it painted before
+    its picture goes anyway (zoomPictures.ts) */
+ const ZOOM_PICTURE_PAINT_MS = 1000
++/* how long a FrameView with the GPU canvas or its shell drawing beneath may
++   take to show its picture or document before it shows anyway (the handover) */
++const HANDOVER_MS = 1500
+ 
+ /** What a frame shows without its document: the persisted preview image.
+- *  Lazy and async, so a page of hundreds fetches and decodes the ones near
+- *  the view first and never blocks a frame on a decode. */
+-function FramePreview({ frame }: { frame: Frame }) {
++ *  Lazy and async the first time, so a page of hundreds fetches and decodes
++ *  the ones near the view first and never blocks a frame on a decode. */
++function FramePreview({
++  frame,
++  onShown,
++}: {
++  frame: Frame
++  /** its picture is decoded and on screen */ onShown?: () => void
++}) {
+   const element = isCanvasElement(frame.html)
+   /* A preview that fails to load (a render that failed, an anonymous viewer
+      past the render budget) is asked for again, a few times and less often
+@@ -2260,26 +2319,65 @@ function FramePreview({ frame }: { frame: Frame }) {
+   const attempt = retry.version === frame.updatedAt ? retry.count : 0
+   const timer = useRef(0)
+   useEffect(() => () => window.clearTimeout(timer.current), [])
+-  /* The picture is fetched at the scale it is on screen (liveFrames.ts). When
+-     the level changes, or the frame does, the <img> keeps painting what it
+-     has until the new picture has loaded: a zoom sharpens the previews in
+-     place, it never blanks them. */
++  /* The picture is fetched at the scale it is on screen (liveFrames.ts), so a
++     zoom that settles at another level, or a new version of the frame, changes
++     its URL. Chromium paints an <img> whose src changed as empty until the new
++     picture arrives (a lazy one is not even fetched before the next layout), a
++     frame or more of the white surface. So the picture last shown stays
++     beneath, and the new one is drawn over it and takes its place once it is
++     decoded, the way a map keeps its tiles until their replacements have drawn:
++     a zoom sharpens the previews in place, it never blanks them. */
+   const level = usePreviewLevel(frame)
+   const src = level === null ? null : previewSrc(frame.id, frame.updatedAt, level)
++  const url = src && (attempt ? `${src}&retry=${attempt}` : src)
++  const [shownUrl, setShownUrl] = useState<string | null>(() => {
++    const last = lastShown.get(frame.id)
++    return last && last.version === frame.updatedAt ? last.url : null
++  })
++  const behind = shownUrl !== null && shownUrl !== url ? shownUrl : null
++  /* A picture this page has shown already is in its memory cache, and an
++     eager, synchronously decoded <img> of it paints in its first frame (the
++     HTML spec's list of available images). Lazy and async, the same picture
++     waits for the next layout and a decode, a frame or more of the white
++     surface: what a frame showed for an instant each time it changed between
++     shell and live view. */
++  const cached = !!url && shownPreviews.has(url)
++  const picture = !!frame.html && !element && !!url
+   return (
+     <div
+-      className={cn('block overflow-hidden', element ? 'bg-transparent' : 'bg-white')}
++      className={cn('relative block overflow-hidden', element ? 'bg-transparent' : 'bg-white')}
+       style={{ width: frame.width, height: frame.height }}
+       data-doop-frame-preview=""
+     >
+-      {frame.html && !element && src && (
++      {picture && behind && (
+         <img
+-          src={attempt ? `${src}&retry=${attempt}` : src}
++          key="behind"
++          src={behind}
+           alt=""
+           draggable={false}
+-          loading="lazy"
+-          decoding="async"
+-          className="pointer-events-none block h-full w-full select-none"
++          decoding="sync"
++          data-doop-preview-behind=""
++          className="pointer-events-none absolute inset-0 block h-full w-full select-none"
++        />
++      )}
++      {picture && (
++        <img
++          key="picture"
++          src={url}
++          alt=""
++          draggable={false}
++          loading={cached ? 'eager' : 'lazy'}
++          decoding={cached ? 'sync' : 'async'}
++          className="pointer-events-none absolute inset-0 block h-full w-full select-none"
++          onLoad={(e) => {
++            rememberPreview(url)
++            const done = () => {
++              setShownUrl(url)
++              lastShown.set(frame.id, { version: frame.updatedAt, url })
++              onShown?.()
++            }
++            e.currentTarget.decode().then(done, done)
++          }}
+           onError={() => {
+             if (attempt >= PREVIEW_RETRIES) return
+             window.clearTimeout(timer.current)
+@@ -2393,6 +2491,24 @@ export const FrameSlot = memo(function FrameSlot({
+   const engaged = useStore((s) => s.selectedIds.includes(frame.id) || !!s.streams[frame.id])
+   /* drawn on the Stage's GPU canvas (gpuPictures.ts): nothing of it in the DOM */
+   const gpu = useGpuPicture(frame.id)
+-  if (awake || engaged) return <FrameView frame={frame} stack={stack} layoutZoom={layoutZoom} />
+-  return gpu ? null : <FrameShell frame={frame} stack={stack} />
++  const mode = awake || engaged ? 'view' : gpu ? 'gpu' : 'shell'
++  /* a shell turning into a view stays beneath it until the view has shown
++     its picture or document (the handover in FrameView), so the frame never
++     blinks white between the two */
++  const [was, setWas] = useState(mode)
++  const [fromShell, setFromShell] = useState(false)
++  if (was !== mode) {
++    setWas(mode)
++    setFromShell(mode === 'view' && was === 'shell')
++  }
++  const painted = useGpuPictures((s) => s.painted.has(frame.id))
++  const overShell = mode === 'view' && fromShell && !painted
++  /* one shape for every mode (shell, then view), so neither is remounted
++     when the other comes or goes: a remounted view reloads its document */
++  return (
++    <>
++      {(mode === 'shell' || overShell) && <FrameShell frame={frame} stack={stack} />}
++      {mode === 'view' && <FrameView frame={frame} stack={stack} layoutZoom={layoutZoom} overShell={overShell} />}
++    </>
++  )
+ })
+diff --git a/src/components/StagePictures.tsx b/src/components/StagePictures.tsx
+index 6ec1d72..541a410 100644
+--- a/src/components/StagePictures.tsx
++++ b/src/components/StagePictures.tsx
+@@ -9,7 +9,7 @@ import { NameAtlas, nameFont, type NameStyle } from '../lib/gpuLabels'
+ import {
+   PictureRenderer,
+   frameAt,
+-  gpuDrawnFrames,
++  gpuScene,
+   gpuMode,
+   nameStrip,
+   pictureSrc,
+@@ -208,18 +208,23 @@ export function StagePictures({
+       renderer.setPictures(pictures)
+       lastZoom = s.viewport.zoom
+       const strip = nameStrip(style.lineHeight, lastZoom)
+-      const drawn = gpuDrawnFrames(
++      /* a frame the canvas drew (or drew under its FrameView) a moment ago
++         stays on it until its FrameView has painted (gpuScene) */
++      const gpu = useGpuPictures.getState()
++      const { drawn, under } = gpuScene(
+         all,
+         inDom,
+         (f) => renderer.hasPicture(f.id) && (!f.label || atlas.cells.has(f.label)),
+         strip,
++        (id) => !gpu.painted.has(id) && (gpu.drawn.has(id) || gpu.under.has(id)),
+       )
+       drawnList = all.filter((f) => drawn.has(f.id))
+       /* the canvas first, in this same task, then the DOM: a frame that
+-         leaves it finds itself already drawn in its place */
+-      renderer.setScene(drawnList)
++         leaves it finds itself already drawn in its place, and a frame that
++         goes live finds itself in `under` when its FrameView first renders */
++      renderer.setScene(all.flatMap((f) => (drawn.has(f.id) ? [f] : under.has(f.id) ? [{ ...f, label: '' }] : [])))
+       renderer.drawNow()
+-      useGpuPictures.getState().setDrawn(drawn)
++      gpu.setDrawn(drawn, under)
+     }
+ 
+     /* where the stage's content starts on screen: read on a press, and kept
+@@ -317,6 +322,9 @@ export function StagePictures({
+       if (s.viewport !== prev.viewport) camera(s.viewport)
+       if (s.selectedIds !== prev.selectedIds || s.streams !== prev.streams) update()
+     })
++    const unPainted = useGpuPictures.subscribe((s, prev) => {
++      if (s.painted !== prev.painted && s.under.size) update()
++    })
+     const resize = new ResizeObserver(measure)
+     resize.observe(el)
+     /* the theme flips classes and custom properties on the root */
+@@ -330,6 +338,7 @@ export function StagePictures({
+       window.clearTimeout(rest)
+       unLive()
+       unStore()
++      unPainted()
+       resize.disconnect()
+       theme.disconnect()
+       document.fonts.removeEventListener('loadingdone', restyle)
+diff --git a/src/lib/gpuPictures.ts b/src/lib/gpuPictures.ts
+index d0940c4..dd1267e 100644
+--- a/src/lib/gpuPictures.ts
++++ b/src/lib/gpuPictures.ts
+@@ -127,19 +127,49 @@ export function gpuDrawnFrames(
+   ready: (f: PictureFrame) => boolean,
+   strip: number,
+ ): Set<string> {
++  return gpuScene(frames, inDom, ready, strip).drawn
++}
++
++/**
++ * The frames the canvas draws (`drawn`, as gpuDrawnFrames), and the frames it
++ * keeps drawing under a FrameView that has nothing on screen yet (`under`).
++ *
++ * A drawn frame that goes live becomes a FrameView: a new <img> for its
++ * picture, which has to load and decode, and an iframe whose document boots
++ * after it. The picture the canvas had was never in the DOM, so until that
++ * <img> paints the frame was its white surface: every zoom that came to rest
++ * at a readable zoom flashed the frames going live white for some 100 ms
++ * (measured, a screencast of the settle). So `handing` names the frames in
++ * the DOM whose FrameView has not shown its picture or document yet and that
++ * the canvas drew a moment ago; the canvas keeps drawing them (picture only:
++ * the FrameView has its own title) while the FrameView stays transparent, as
++ * a map keeps the tiles it has until the new ones have loaded. One lower in
++ * the DOM overlapping it would cover it, so that one is left to the DOM, as
++ * any frame is.
++ */
++export function gpuScene(
++  frames: readonly PictureFrame[],
++  inDom: (id: string) => boolean,
++  ready: (f: PictureFrame) => boolean,
++  strip: number,
++  handing: (id: string) => boolean = () => false,
++): { drawn: Set<string>; under: Set<string> } {
+   const drawn = new Set<string>()
++  const under = new Set<string>()
+   const below: Box[] = []
+   for (const f of frames) {
+     const dom = inDom(f.id)
+     if (!dom && f.hidden) continue
+     const box = frameBounds(f, f.label ? strip : 0)
+-    if (!dom && f.candidate && ready(f) && !below.some((b) => overlaps(b, box))) {
++    const clear = f.candidate && ready(f) && !below.some((b) => overlaps(b, box))
++    if (!dom && clear) {
+       drawn.add(f.id)
+       continue
+     }
++    if (dom && clear && handing(f.id)) under.add(f.id)
+     below.push(box)
+   }
+-  return drawn
++  return { drawn, under }
+ }
+ 
+ /**
+@@ -194,7 +224,14 @@ export function pictureSrc(
+ interface GpuPicturesState {
+   /** the frames the canvas draws: FrameSlot renders nothing for them */
+   drawn: ReadonlySet<string>
+-  setDrawn(drawn: ReadonlySet<string>): void
++  /** the frames it draws under a FrameView that has not painted yet
++   *  (gpuScene); the FrameView stays transparent meanwhile */
++  under: ReadonlySet<string>
++  setDrawn(drawn: ReadonlySet<string>, under?: ReadonlySet<string>): void
++  /** the FrameViews that show their picture or their document: the canvas
++   *  stops drawing under them (FrameView's handover) */
++  painted: ReadonlySet<string>
++  setPainted(frameId: string, painted: boolean): void
+   /** the layer was asked for and did not start, or its context is lost:
+    *  what the renderer label says (rendererSetting.ts) */
+   failed: boolean
+@@ -209,8 +246,22 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+ 
+ export const useGpuPictures = create<GpuPicturesState>((set, get) => ({
+   drawn: new Set(),
+-  setDrawn(drawn) {
+-    if (!sameSet(get().drawn, drawn)) set({ drawn })
++  under: new Set(),
++  setDrawn(drawn, under = new Set()) {
++    const prev = get()
++    const next: Partial<GpuPicturesState> = {}
++    if (!sameSet(prev.drawn, drawn)) next.drawn = drawn
++    if (!sameSet(prev.under, under)) next.under = under
++    if (next.drawn || next.under) set(next)
++  },
++  painted: new Set(),
++  setPainted(frameId, painted) {
++    const prev = get().painted
++    if (prev.has(frameId) === painted) return
++    const next = new Set(prev)
++    if (painted) next.add(frameId)
++    else next.delete(frameId)
++    set({ painted: next })
+   },
+   failed: false,
+   setFailed(failed) {
+@@ -223,6 +274,11 @@ export function useGpuPicture(frameId: string): boolean {
+   return useGpuPictures((s) => s.drawn.has(frameId))
+ }
+ 
++/** True while the canvas draws this frame under its FrameView (gpuScene). */
++export function useGpuUnder(frameId: string): boolean {
++  return useGpuPictures((s) => s.under.has(frameId))
++}
++
+ let hitTest: ((e: PointerEvent) => string | null) | null = null
+ 
+ /** Set by the Stage's canvas while it draws frames (StagePictures). */
+diff --git a/src/lib/zoomPictures.ts b/src/lib/zoomPictures.ts
+index 8a34276..87f9bbe 100644
+--- a/src/lib/zoomPictures.ts
++++ b/src/lib/zoomPictures.ts
+@@ -89,10 +89,10 @@ const swapped = new Map<string, number>()
+ let active = false
+ let swaps = 0
+ 
+-/** True when the picture has loaded, so showing it never shows a blank. */
++/** True when the picture has loaded, so showing it never shows a blank: its
++ *  current image, or the one it keeps beneath while a sharper one loads. */
+ export function pictureReady(picture: HTMLElement | null): boolean {
+-  const img = picture?.querySelector('img')
+-  return !!img && img.complete && img.naturalWidth > 0
++  return [...(picture?.querySelectorAll('img') ?? [])].some((img) => img.complete && img.naturalWidth > 0)
+ }
+ 
+ /** The registered frames to swap: those whose picture is ready. */
+diff --git a/tests/gpuPictures.test.ts b/tests/gpuPictures.test.ts
+index 0ec2522..277f2c1 100644
+--- a/tests/gpuPictures.test.ts
++++ b/tests/gpuPictures.test.ts
+@@ -4,6 +4,7 @@ import {
+   frameAt,
+   frameBounds,
+   gpuDrawnFrames,
++  gpuScene,
+   nameStrip,
+   pictureSrc,
+   type PictureFrame,
+@@ -105,6 +106,55 @@ describe('gpuDrawnFrames', () => {
+   })
+ })
+ 
++describe('gpuScene', () => {
++  const scene = (frames: PictureFrame[], inDom: (id: string) => boolean, handing: (id: string) => boolean) => {
++    const { drawn, under } = gpuScene(frames, inDom, ready, 0, handing)
++    return { drawn: ids(drawn), under: ids(under) }
++  }
++
++  it('keeps drawing a frame that went live until its FrameView has painted', () => {
++    const frames = [frame('a', 0, 0), frame('b', 200, 0)]
++    expect(
++      scene(
++        frames,
++        (id) => id === 'b',
++        (id) => id === 'b',
++      ),
++    ).toEqual({ drawn: ['a'], under: ['b'] })
++    /* painted: the DOM has it alone */
++    expect(
++      scene(
++        frames,
++        (id) => id === 'b',
++        () => false,
++      ),
++    ).toEqual({ drawn: ['a'], under: [] })
++  })
++
++  it('draws nothing under a frame that a lower live frame overlaps', () => {
++    /* the canvas lies under the whole stack: drawn under b it would also be under a */
++    const frames = [frame('a', 0, 0), frame('b', 50, 50)]
++    expect(
++      scene(
++        frames,
++        () => true,
++        () => true,
++      ),
++    ).toEqual({ drawn: [], under: ['a'] })
++  })
++
++  it('draws nothing under a frame whose picture is not ready', () => {
++    const { under } = gpuScene(
++      [frame('a', 0, 0)],
++      () => true,
++      () => false,
++      0,
++      () => true,
++    )
++    expect(ids(under)).toEqual([])
++  })
++})
++
+ describe('frameAt', () => {
+   const L = 18
+   it('finds the topmost frame under the point, in paint order', () => {
+diff --git a/tests/zoomPictures.test.ts b/tests/zoomPictures.test.ts
+index 3787b47..994394f 100644
+--- a/tests/zoomPictures.test.ts
++++ b/tests/zoomPictures.test.ts
+@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
+ import {
+   framesToSwap,
+   keepsDocument,
++  pictureReady,
+   registerZoomPicture,
+   swappedFrames,
+   zoomPicturesActive,
+@@ -52,20 +53,27 @@ describe('keepsDocument', () => {
+ })
+ 
+ /* elements just real enough for the registry: a style to write and, for a
+-   picture, an <img> that has or has not loaded */
++   picture, its <img>s (the current one, and the one it keeps beneath while a
++   sharper one loads), each loaded or not */
++interface FakeImg {
++  complete: boolean
++  naturalWidth: number
++}
+ interface FakeEl {
+   style: { visibility: string }
+-  querySelector: (s: string) => { complete: boolean; naturalWidth: number } | null
++  querySelectorAll: (s: string) => FakeImg[]
+ }
+-const el = (img?: { complete: boolean; naturalWidth: number }): FakeEl => ({
++const el = (...imgs: FakeImg[]): FakeEl => ({
+   style: { visibility: '' },
+-  querySelector: () => img ?? null,
++  querySelectorAll: () => imgs,
+ })
++const loaded: FakeImg = { complete: true, naturalWidth: 100 }
++const loading: FakeImg = { complete: false, naturalWidth: 0 }
+ const asEl = (e: FakeEl) => e as unknown as HTMLElement
+ 
+ function fakeFrame(ready = true) {
+   const iframe = el()
+-  const picture = el(ready ? { complete: true, naturalWidth: 100 } : { complete: false, naturalWidth: 0 })
++  const picture = el(ready ? loaded : loading)
+   picture.style.visibility = 'hidden'
+   let paint: () => void = () => {}
+   const frame: ZoomPictureFrame = {
+@@ -85,6 +93,13 @@ describe('the zoom picture registry', () => {
+   })
+   const register = (id: string, f: ReturnType<typeof fakeFrame>) => unregister.push(registerZoomPicture(id, f.frame))
+ 
++  it('counts a picture as loaded while it keeps the last one beneath a sharper one', () => {
++    expect(pictureReady(asEl(el(loaded, loading)))).toBe(true)
++    expect(pictureReady(asEl(el(loading)))).toBe(false)
++    expect(pictureReady(asEl(el()))).toBe(false)
++    expect(pictureReady(null)).toBe(false)
++  })
++
+   it('swaps only frames whose picture has loaded', () => {
+     const a = fakeFrame()
+     const b = fakeFrame(false)
