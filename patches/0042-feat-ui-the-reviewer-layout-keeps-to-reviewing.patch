@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 04:59:34 +0000
-Subject: [PATCH 42/47] feat(ui): the reviewer layout keeps to reviewing
+Subject: [PATCH 42/49] feat(ui): the reviewer layout keeps to reviewing
 
 A review of the reviewer layout's controls, state by state, asked for less:
 only the Hand and Comment in the dock, nothing of the agents, no design

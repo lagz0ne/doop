@@ -41,6 +41,7 @@ outside this repo.)
 | 2026-11-16 | Reported: the getting-started card flashes on opening a canvas and goes away; asked to remove it. The role reads as edit until the canvas loads, so the checklist mounted at once and unmounted when the real role (or a phone's review cap) arrived. It is about connecting an agent, so the reviewer UI drops it with the rest of the agents; with FULL_UI on it waits for the canvas (0044) |
 | 2026-11-16 | Asked for a smaller dock: the pages in it as a pick-one instead of a panel, no renderer label, and import, export, comment threads and the people grouped behind one control, so the dock holds navigation and review and the rest is a second layer. Done in 0045: seven controls where there were fifteen, and no left panel. Page management (add, rename, order) stays in the full editor; a phone keeps its Comments button, the comments being its main way to review |
 | 2026-11-16 | Asked for the canvas's name and the back to go to the top left, subtle, since people read it once and move on, and for the room to go to the page's name with some limit. Done in 0047; the id menu went along with the name. Phones keep their dock (the name is in their actions sheet) |
+| 2026-11-16 | Reported: the first load of a canvas is slow; asked to optimise it from flame charts. A traced first load (`perf/load.mjs`, read with `perf/tasks.mjs`) of a 459-frame canvas over a shaped 4G link with a 4x CPU slowdown had the stage empty for about ten seconds: the canvas arrives as one 5.7 MB WebSocket message (every page's frames with their HTML), and the culling effect booted two live documents for the camera's pre-fit view only to tear them down at the first rest. Fixed in 0048 (nothing but the pinned documents boot before a page's camera first rests) and 0049 (permessage-deflate on the room: 5.7 MB → about 0.3 MB on the wire). Left for later: sending the page in view first and the rest after (Figma's dynamic page loading), and a lighter editor bundle |
 
 ## Patches
 
@@ -93,6 +94,8 @@ outside this repo.)
 | 0045 | feat(ui): the reviewer dock keeps to moving around and reviewing | the dock: back, name, Hand, Comment, the zoom, a page picker (`PagePicker`, a radio menu), and the faces of who is here opening one menu (`DockMenu`: comments panel with an open-threads dot, import, export, share, design panel, settings, your name); no Pages panel or rail island (`chromeLayout` `bareLeft`), 0042's pages-only faces of LayersPanel/PagesPanel removed; no renderer label or its view option in the dock's zoom control; a phone's Pages sheet becomes the picker |
 | 0046 | fix(ui): the dock menu's faces are pictures, following is a row | 0045's menu trigger held the presence stack, whose faces are buttons (follow a person, fly to an agent's frame): opening the menu also followed whoever was there. The trigger draws plain faces (yours, up to three, then +N); each person or agent is a row of the menu (follow / stop following; go where the agent works, disabled while unknown) |
 | 0047 | feat(ui): the canvas's name sits quietly at the top left, the dock gives its room to the page | back, the canvas's name (still its rename field) and id menu leave the dock for `CanvasLabel` at the top left, a pill faint until hovered or focused, the name truncated at 240px; the page picker's name may run to 320px (was 200); fits keep 52px clear at the top (`LABEL_CLEAR`); phones unchanged |
+| 0048 | perf(canvas): no live documents before a page's camera first rests | the culling effect computed the live set at once, for the view the page had before its fit (on a first load, 100% at the origin), and dropped those documents at the first rest: two sandboxed iframes made and removed per load, ~350 ms of main thread at full CPU, ~1.7 s at 4x. Until `rested`, `admit` takes the pinned documents only |
+| 0049 | perf(ws): compress the canvas room's messages with permessage-deflate | ws has it off; the `init` message carries the whole canvas (5.7 MB for 459 frames). zlib's default level and 15-bit window (312 KB for 5.1 MB of frame HTML, ~65 ms on the zlib pool; a 12-bit window still leaves 1.4 MB), no context takeover; ws skips messages under 1 KB |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -390,6 +393,16 @@ Tests for 0047 (2026-11-16): `reviewerLayoutBrowser` finds the label in the top-
 under 340px wide with the id menu, and no back or id in the dock; `phoneReviewBrowser` finds no
 label on a phone. Both files pass together (17 tests, load average 37); the phone file once failed
 in its setup under that load and passed alone.
+
+First load, 0048-0049 (2026-11-16): `perf/load.mjs` opens a canvas cold in a fresh browser behind
+a shaped TCP link (`NET=4g`: 60 ms RTT, 9 Mbit/s down, 1.5 up; Chrome's own throttling meters
+WebSocket messages after inflation, so it cannot show compression) with a 4x CPU slowdown, on a
+459-frame canvas's 45-frame page. Before: chrome at 3.0 s, frames on screen 13.4 s, everything in
+view 14.1 s, 2.4 s of long tasks, two iframes made and thrown away. After, four runs interleaved
+with the same build behind a proxy that strips the extension: frames on screen 5.4-6.2 s against
+10.0-10.8 s, everything in view 6.0-7.0 s against 10.7-11.5 s; no iframe thrown away. What is
+left of the critical path: the bundle (~2.5 s to the chrome on that link), the socket opening
+only once the editor has mounted, and parsing the 5.7 MB message (~1 s of main thread at 4x).
 
 Upgrading past v0.14.0 (found 2026-11-14): drizzle's migrator applies a migration only when it is
 newer than the last one applied (`created_at` < the journal's `when`), not by name. Upstream's

@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 07:36:08 +0000
+Subject: [PATCH 49/49] perf(ws): compress the canvas room's messages with
+ permessage-deflate
+
+ws leaves permessage-deflate off. The canvas reaches the editor as one
+init message holding every page's frames with their HTML: 5.7 MB for a
+canvas of 459 frames. On a shaped 4G link (60 ms RTT, 9 Mbit/s down)
+that took about five seconds to arrive, the stage empty all the while.
+
+Frame HTML compresses well across frames: 5.1 MB of it to 312 KB at
+zlib's default level and window, in about 65 ms on the zlib thread
+pool (not the event loop). A smaller window loses most of that (1.4 MB
+at 12 bits, about 2 MB at 10), so the window stays at 15. With no
+context takeover each message is compressed on its own and a
+connection keeps no history between messages; ws sends messages under
+1 KB (cursors, presence) uncompressed.
+
+First load of that canvas over the shaped 4G link with a 4x CPU
+slowdown, four interleaved runs each: frames on screen at 5.4-6.2 s
+compressed against 10.0-10.8 s uncompressed; everything in view shown
+at 6.0-7.0 s against 10.7-11.5 s. Browsers have negotiated the
+extension for over a decade; a client that does not offer it gets
+plain frames as before.
+---
+ server/index.ts | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/server/index.ts b/server/index.ts
+index 0f6effe..9b26aaf 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -2688,7 +2688,20 @@ if (env.isProduction) {
+ /* ------------------------------------------------- websocket */
+ 
+ const server = http.createServer(app)
+-const wss = new WebSocketServer({ server, path: '/ws' })
++/* permessage-deflate, which ws leaves off. The canvas reaches the editor as one
++   message, every page's frames with their HTML: 5.7 MB for a canvas of 459
++   frames, which a 4G connection took about five seconds to bring in, the stage
++   empty all the while. HTML compresses well across frames (to 312 KB at zlib's
++   default level and window, ~65 ms on the zlib thread pool, not the event
++   loop); a small window loses most of that (1.4 MB at 12 bits), so the window
++   stays. Without context takeover each message is compressed on its own, so a
++   connection carries no compression history between messages; ws leaves the
++   small ones (under 1 KB: cursors, presence) uncompressed. */
++const wss = new WebSocketServer({
++  server,
++  path: '/ws',
++  perMessageDeflate: { serverNoContextTakeover: true, clientNoContextTakeover: true },
++})
+ 
+ /* A signed-out visitor on a link-shared canvas watches it as a guest
+    (guestCanvasRole): view only, silent like a view-as session (no presence,
