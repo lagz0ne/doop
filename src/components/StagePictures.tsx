@@ -106,6 +106,7 @@ export function StagePictures({
     const renderer = PictureRenderer.create(canvas, mode, {
       lost(isLost) {
         lost = isLost
+        useGpuPictures.getState().setFailed(isLost)
         /* a load the render trial put the layer on stops counting for it */
         if (isLost) renderTrialGpuFailed()
         update()
@@ -113,6 +114,7 @@ export function StagePictures({
       textures: () => update(),
     })
     if (!renderer) {
+      useGpuPictures.getState().setFailed(true)
       renderTrialGpuFailed()
       return
     }

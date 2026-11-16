@@ -67,4 +67,18 @@ export const settings: Catalog['settings'] = {
   panelsDocked: 'Fixos',
   panelsFloatingNote: 'Os painéis flutuam sobre o canvas.',
   panelsDockedNote: 'Os painéis estão fixos nas bordas.',
+
+  rendererTitle: 'Renderizador do canvas',
+  rendererDescription:
+    'Como este navegador desenha um canvas. Auto deixa o teste de renderização medir o que é mais fluido aqui e mantê-lo; uma escolha o substitui. Lido quando um canvas abre pela primeira vez na página.',
+  rendererGpuRow: 'Camada GPU',
+  rendererGpuAria: 'Camada GPU',
+  rendererZoomRow: 'Imagens no zoom',
+  rendererZoomAria: 'Imagens no zoom',
+  rendererLabelRow: 'Rótulo',
+  rendererLabelNote: 'Mostra qual renderizador está desenhando, ao lado do controle de zoom.',
+  rendererGpuNote:
+    'Frames longe da vista desenhados em um canvas WebGL2. Ligado precisa de uma GPU de hardware; “Ligado, GL por software também” serve para medir sem uma.',
+  rendererZoomNote: 'Os frames mostram a imagem salva enquanto o zoom se move e voltam ao vivo quando ele para.',
+  rendererReloadNow: 'Recarregar agora',
 }

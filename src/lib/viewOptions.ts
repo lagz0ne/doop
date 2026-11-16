@@ -2,17 +2,25 @@
    menu or its shortcut, and remembered per browser:
    - pixelGrid (⇧'): the hairline grid that fades in from 300%
    - cursors (⌘⌥\ / Ctrl+Alt+\): everyone else's pointer
-   - comments (⇧C): the comment pins; the Comment tool still shows them */
+   - comments (⇧C): the comment pins; the Comment tool still shows them
+   - renderer (no shortcut, off by default): the label beside the zoom pill
+     naming what draws the canvas (RendererLabel.tsx) */
 
 export interface ViewOptions {
   pixelGrid: boolean
   cursors: boolean
   comments: boolean
+  renderer: boolean
 }
 
 export type ViewOption = keyof ViewOptions
 
-export const DEFAULT_VIEW_OPTIONS: ViewOptions = { pixelGrid: true, cursors: true, comments: true }
+export const DEFAULT_VIEW_OPTIONS: ViewOptions = {
+  pixelGrid: true,
+  cursors: true,
+  comments: true,
+  renderer: false,
+}
 
 const VIEW_OPTIONS_KEY = 'doop:view-options'
 

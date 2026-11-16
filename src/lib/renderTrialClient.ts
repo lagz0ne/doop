@@ -179,6 +179,13 @@ export function renderTrial(): TrialDecision {
   return load.decision
 }
 
+/** This page load's levels if a canvas has decided them already, else null.
+ *  For the renderer setting and its label: asking must not start a load the
+ *  trial would count. */
+export function decidedRenderTrial(): TrialDecision | null {
+  return load?.decision ?? null
+}
+
 /** The GPU layer did not start, or lost its context. A load the trial put
  *  it on stops counting for on, and repeated failures rule it out. */
 export function renderTrialGpuFailed(): void {
