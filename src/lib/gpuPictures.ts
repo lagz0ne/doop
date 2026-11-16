@@ -127,19 +127,49 @@ export function gpuDrawnFrames(
   ready: (f: PictureFrame) => boolean,
   strip: number,
 ): Set<string> {
+  return gpuScene(frames, inDom, ready, strip).drawn
+}
+
+/**
+ * The frames the canvas draws (`drawn`, as gpuDrawnFrames), and the frames it
+ * keeps drawing under a FrameView that has nothing on screen yet (`under`).
+ *
+ * A drawn frame that goes live becomes a FrameView: a new <img> for its
+ * picture, which has to load and decode, and an iframe whose document boots
+ * after it. The picture the canvas had was never in the DOM, so until that
+ * <img> paints the frame was its white surface: every zoom that came to rest
+ * at a readable zoom flashed the frames going live white for some 100 ms
+ * (measured, a screencast of the settle). So `handing` names the frames in
+ * the DOM whose FrameView has not shown its picture or document yet and that
+ * the canvas drew a moment ago; the canvas keeps drawing them (picture only:
+ * the FrameView has its own title) while the FrameView stays transparent, as
+ * a map keeps the tiles it has until the new ones have loaded. One lower in
+ * the DOM overlapping it would cover it, so that one is left to the DOM, as
+ * any frame is.
+ */
+export function gpuScene(
+  frames: readonly PictureFrame[],
+  inDom: (id: string) => boolean,
+  ready: (f: PictureFrame) => boolean,
+  strip: number,
+  handing: (id: string) => boolean = () => false,
+): { drawn: Set<string>; under: Set<string> } {
   const drawn = new Set<string>()
+  const under = new Set<string>()
   const below: Box[] = []
   for (const f of frames) {
     const dom = inDom(f.id)
     if (!dom && f.hidden) continue
     const box = frameBounds(f, f.label ? strip : 0)
-    if (!dom && f.candidate && ready(f) && !below.some((b) => overlaps(b, box))) {
+    const clear = f.candidate && ready(f) && !below.some((b) => overlaps(b, box))
+    if (!dom && clear) {
       drawn.add(f.id)
       continue
     }
+    if (dom && clear && handing(f.id)) under.add(f.id)
     below.push(box)
   }
-  return drawn
+  return { drawn, under }
 }
 
 /**
@@ -194,7 +224,14 @@ export function pictureSrc(
 interface GpuPicturesState {
   /** the frames the canvas draws: FrameSlot renders nothing for them */
   drawn: ReadonlySet<string>
-  setDrawn(drawn: ReadonlySet<string>): void
+  /** the frames it draws under a FrameView that has not painted yet
+   *  (gpuScene); the FrameView stays transparent meanwhile */
+  under: ReadonlySet<string>
+  setDrawn(drawn: ReadonlySet<string>, under?: ReadonlySet<string>): void
+  /** the FrameViews that show their picture or their document: the canvas
+   *  stops drawing under them (FrameView's handover) */
+  painted: ReadonlySet<string>
+  setPainted(frameId: string, painted: boolean): void
   /** the layer was asked for and did not start, or its context is lost:
    *  what the renderer label says (rendererSetting.ts) */
   failed: boolean
@@ -209,8 +246,22 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
 
 export const useGpuPictures = create<GpuPicturesState>((set, get) => ({
   drawn: new Set(),
-  setDrawn(drawn) {
-    if (!sameSet(get().drawn, drawn)) set({ drawn })
+  under: new Set(),
+  setDrawn(drawn, under = new Set()) {
+    const prev = get()
+    const next: Partial<GpuPicturesState> = {}
+    if (!sameSet(prev.drawn, drawn)) next.drawn = drawn
+    if (!sameSet(prev.under, under)) next.under = under
+    if (next.drawn || next.under) set(next)
+  },
+  painted: new Set(),
+  setPainted(frameId, painted) {
+    const prev = get().painted
+    if (prev.has(frameId) === painted) return
+    const next = new Set(prev)
+    if (painted) next.add(frameId)
+    else next.delete(frameId)
+    set({ painted: next })
   },
   failed: false,
   setFailed(failed) {
@@ -221,6 +272,11 @@ export const useGpuPictures = create<GpuPicturesState>((set, get) => ({
 /** True when the canvas draws this frame: it has no element of its own. */
 export function useGpuPicture(frameId: string): boolean {
   return useGpuPictures((s) => s.drawn.has(frameId))
+}
+
+/** True while the canvas draws this frame under its FrameView (gpuScene). */
+export function useGpuUnder(frameId: string): boolean {
+  return useGpuPictures((s) => s.under.has(frameId))
 }
 
 let hitTest: ((e: PointerEvent) => string | null) | null = null

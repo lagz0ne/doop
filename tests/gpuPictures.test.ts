@@ -4,6 +4,7 @@ import {
   frameAt,
   frameBounds,
   gpuDrawnFrames,
+  gpuScene,
   nameStrip,
   pictureSrc,
   type PictureFrame,
@@ -102,6 +103,55 @@ describe('gpuDrawnFrames', () => {
     /* a 200×20 bar turned 90° reaches down to y = 190 around x = 100 */
     const bar = frame('bar', 0, 90, { width: 200, height: 20, rotation: 90 })
     expect(draw([bar, frame('b', 95, 170, { width: 10, height: 10 })], (id) => id === 'bar')).toEqual([])
+  })
+})
+
+describe('gpuScene', () => {
+  const scene = (frames: PictureFrame[], inDom: (id: string) => boolean, handing: (id: string) => boolean) => {
+    const { drawn, under } = gpuScene(frames, inDom, ready, 0, handing)
+    return { drawn: ids(drawn), under: ids(under) }
+  }
+
+  it('keeps drawing a frame that went live until its FrameView has painted', () => {
+    const frames = [frame('a', 0, 0), frame('b', 200, 0)]
+    expect(
+      scene(
+        frames,
+        (id) => id === 'b',
+        (id) => id === 'b',
+      ),
+    ).toEqual({ drawn: ['a'], under: ['b'] })
+    /* painted: the DOM has it alone */
+    expect(
+      scene(
+        frames,
+        (id) => id === 'b',
+        () => false,
+      ),
+    ).toEqual({ drawn: ['a'], under: [] })
+  })
+
+  it('draws nothing under a frame that a lower live frame overlaps', () => {
+    /* the canvas lies under the whole stack: drawn under b it would also be under a */
+    const frames = [frame('a', 0, 0), frame('b', 50, 50)]
+    expect(
+      scene(
+        frames,
+        () => true,
+        () => true,
+      ),
+    ).toEqual({ drawn: [], under: ['a'] })
+  })
+
+  it('draws nothing under a frame whose picture is not ready', () => {
+    const { under } = gpuScene(
+      [frame('a', 0, 0)],
+      () => true,
+      () => false,
+      0,
+      () => true,
+    )
+    expect(ids(under)).toEqual([])
   })
 })
 

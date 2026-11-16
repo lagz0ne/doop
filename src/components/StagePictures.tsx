@@ -9,7 +9,7 @@ import { NameAtlas, nameFont, type NameStyle } from '../lib/gpuLabels'
 import {
   PictureRenderer,
   frameAt,
-  gpuDrawnFrames,
+  gpuScene,
   gpuMode,
   nameStrip,
   pictureSrc,
@@ -208,18 +208,23 @@ export function StagePictures({
       renderer.setPictures(pictures)
       lastZoom = s.viewport.zoom
       const strip = nameStrip(style.lineHeight, lastZoom)
-      const drawn = gpuDrawnFrames(
+      /* a frame the canvas drew (or drew under its FrameView) a moment ago
+         stays on it until its FrameView has painted (gpuScene) */
+      const gpu = useGpuPictures.getState()
+      const { drawn, under } = gpuScene(
         all,
         inDom,
         (f) => renderer.hasPicture(f.id) && (!f.label || atlas.cells.has(f.label)),
         strip,
+        (id) => !gpu.painted.has(id) && (gpu.drawn.has(id) || gpu.under.has(id)),
       )
       drawnList = all.filter((f) => drawn.has(f.id))
       /* the canvas first, in this same task, then the DOM: a frame that
-         leaves it finds itself already drawn in its place */
-      renderer.setScene(drawnList)
+         leaves it finds itself already drawn in its place, and a frame that
+         goes live finds itself in `under` when its FrameView first renders */
+      renderer.setScene(all.flatMap((f) => (drawn.has(f.id) ? [f] : under.has(f.id) ? [{ ...f, label: '' }] : [])))
       renderer.drawNow()
-      useGpuPictures.getState().setDrawn(drawn)
+      gpu.setDrawn(drawn, under)
     }
 
     /* where the stage's content starts on screen: read on a press, and kept
@@ -317,6 +322,9 @@ export function StagePictures({
       if (s.viewport !== prev.viewport) camera(s.viewport)
       if (s.selectedIds !== prev.selectedIds || s.streams !== prev.streams) update()
     })
+    const unPainted = useGpuPictures.subscribe((s, prev) => {
+      if (s.painted !== prev.painted && s.under.size) update()
+    })
     const resize = new ResizeObserver(measure)
     resize.observe(el)
     /* the theme flips classes and custom properties on the root */
@@ -330,6 +338,7 @@ export function StagePictures({
       window.clearTimeout(rest)
       unLive()
       unStore()
+      unPainted()
       resize.disconnect()
       theme.disconnect()
       document.fonts.removeEventListener('loadingdone', restyle)

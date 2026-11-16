@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   framesToSwap,
   keepsDocument,
+  pictureReady,
   registerZoomPicture,
   swappedFrames,
   zoomPicturesActive,
@@ -52,20 +53,27 @@ describe('keepsDocument', () => {
 })
 
 /* elements just real enough for the registry: a style to write and, for a
-   picture, an <img> that has or has not loaded */
+   picture, its <img>s (the current one, and the one it keeps beneath while a
+   sharper one loads), each loaded or not */
+interface FakeImg {
+  complete: boolean
+  naturalWidth: number
+}
 interface FakeEl {
   style: { visibility: string }
-  querySelector: (s: string) => { complete: boolean; naturalWidth: number } | null
+  querySelectorAll: (s: string) => FakeImg[]
 }
-const el = (img?: { complete: boolean; naturalWidth: number }): FakeEl => ({
+const el = (...imgs: FakeImg[]): FakeEl => ({
   style: { visibility: '' },
-  querySelector: () => img ?? null,
+  querySelectorAll: () => imgs,
 })
+const loaded: FakeImg = { complete: true, naturalWidth: 100 }
+const loading: FakeImg = { complete: false, naturalWidth: 0 }
 const asEl = (e: FakeEl) => e as unknown as HTMLElement
 
 function fakeFrame(ready = true) {
   const iframe = el()
-  const picture = el(ready ? { complete: true, naturalWidth: 100 } : { complete: false, naturalWidth: 0 })
+  const picture = el(ready ? loaded : loading)
   picture.style.visibility = 'hidden'
   let paint: () => void = () => {}
   const frame: ZoomPictureFrame = {
@@ -84,6 +92,13 @@ describe('the zoom picture registry', () => {
     unregister.splice(0).forEach((u) => u())
   })
   const register = (id: string, f: ReturnType<typeof fakeFrame>) => unregister.push(registerZoomPicture(id, f.frame))
+
+  it('counts a picture as loaded while it keeps the last one beneath a sharper one', () => {
+    expect(pictureReady(asEl(el(loaded, loading)))).toBe(true)
+    expect(pictureReady(asEl(el(loading)))).toBe(false)
+    expect(pictureReady(asEl(el()))).toBe(false)
+    expect(pictureReady(null)).toBe(false)
+  })
 
   it('swaps only frames whose picture has loaded', () => {
     const a = fakeFrame()

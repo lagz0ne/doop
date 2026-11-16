@@ -89,10 +89,10 @@ const swapped = new Map<string, number>()
 let active = false
 let swaps = 0
 
-/** True when the picture has loaded, so showing it never shows a blank. */
+/** True when the picture has loaded, so showing it never shows a blank: its
+ *  current image, or the one it keeps beneath while a sharper one loads. */
 export function pictureReady(picture: HTMLElement | null): boolean {
-  const img = picture?.querySelector('img')
-  return !!img && img.complete && img.naturalWidth > 0
+  return [...(picture?.querySelectorAll('img') ?? [])].some((img) => img.complete && img.naturalWidth > 0)
 }
 
 /** The registered frames to swap: those whose picture is ready. */
