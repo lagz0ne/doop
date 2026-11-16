@@ -575,7 +575,14 @@ export function Stage({
       const live = useLiveFrames.getState()
       const stage = measuredStage(el)
       if (rested) live.setPreviews(s.viewport.zoom * window.devicePixelRatio, sharpPreviews(frames, s.viewport, stage))
-      admit(computeLiveFrames(frames, s.viewport, stage, pinned, live.ids ?? new Set()), pinned)
+      const wanted = computeLiveFrames(frames, s.viewport, stage, pinned, live.ids ?? new Set())
+      /* Until a new page's camera first rests it is about to be fitted or put
+         back where it was, and the view it has is the last page's (on a first
+         load, 100% at the origin). Documents booted for that view are torn
+         down at the rest: each is a sandboxed iframe whose creation blocks the
+         main thread (a large canvas's first load made two, ~350 ms, in the
+         task that took the canvas in). So until then only the pinned boot. */
+      admit(rested ? wanted : new Set([...wanted].filter((id) => pinned.has(id))), pinned)
     }
     function atRest() {
       rested = true
