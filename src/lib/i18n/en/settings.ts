@@ -85,4 +85,18 @@ export const settings = {
   panelsDocked: 'Docked',
   panelsFloatingNote: 'Panels float over the canvas.',
   panelsDockedNote: 'Panels are docked to the edges.',
+
+  rendererTitle: 'Canvas renderer',
+  rendererDescription:
+    'How this browser draws a canvas. Auto lets the render trial measure what is smoother here and keep it; a pick overrides it. Read when a canvas first opens in a page load.',
+  rendererGpuRow: 'GPU layer',
+  rendererGpuAria: 'GPU layer',
+  rendererZoomRow: 'Zoom pictures',
+  rendererZoomAria: 'Zoom pictures',
+  rendererLabelRow: 'Label',
+  rendererLabelNote: 'Show which renderer is drawing, beside the zoom pill.',
+  rendererGpuNote:
+    'Frames away from the view drawn on one WebGL2 canvas. On needs a hardware GPU; “On, software GL too” is for measuring without one.',
+  rendererZoomNote: 'Frames show their saved picture while the zoom moves, and go live again when it settles.',
+  rendererReloadNow: 'Reload now',
 } as const

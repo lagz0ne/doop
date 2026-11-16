@@ -4,10 +4,11 @@ import { ThemePicker } from './ThemePicker'
 import { PanelLayoutPicker } from './PanelLayoutPicker'
 import { usePanelLayout } from '../lib/panelLayout'
 import { Note } from './ui/note'
+import { RendererSettings } from './RendererSettings'
 import { CardDescription, CardHeader, CardRow, CardTitle, SettingsCard } from './ui/card'
 
-/** The "Appearance" pane of /settings. The theme and the canvas panel
- *  layout are properties of this browser rather than the
+/** The "Appearance" pane of /settings. The theme, the canvas panel
+ *  layout and the canvas renderer are properties of this browser rather than the
  *  account — how the device looks and reads, like zoom — so nothing here
  *  touches the server. */
 export function AppearanceSettings() {
@@ -42,6 +43,7 @@ export function AppearanceSettings() {
           <Note>{t(panelLayout === 'docked' ? 'settings.panelsDockedNote' : 'settings.panelsFloatingNote')}</Note>
         </CardRow>
       </SettingsCard>
+      <RendererSettings />
     </>
   )
 }

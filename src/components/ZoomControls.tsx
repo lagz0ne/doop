@@ -17,11 +17,12 @@ import { Toolbar, ToolbarButton } from './ui/toolbar'
 import { Input } from './ui/input'
 import { MinusIcon, PlusIcon } from './ui/icons'
 import { useT } from '../lib/i18n'
+import { RendererLabel } from './RendererLabel'
 
 /* The zoom pill at the bottom right of the open canvas: step out, the current
    level, step in. The level doubles as the trigger of a menu with the preset
    zooms, a field to type one, the fits and what the canvas draws over the
-   frames. The Stage writes the percentage into `labelRef` straight
+   frames, the renderer label (RendererLabel.tsx) among them. The Stage writes the percentage into `labelRef` straight
    from its viewport subscription, so pan/zoom never re-renders this. */
 export function ZoomControls({
   labelRef,
@@ -84,6 +85,7 @@ export function ZoomControls({
         hidden && 'hidden',
       )}
     >
+      {viewOptions.renderer && <RendererLabel />}
       <ToolbarButton aria-label={t('canvas.zoomOut')} className={stepBtn} onClick={onZoomOut}>
         <MinusIcon />
       </ToolbarButton>
@@ -160,6 +162,9 @@ export function ZoomControls({
           <DropdownMenuItem onSelect={() => toggleViewOption('comments')}>
             {viewOptions.comments ? t('canvas.hideComments') : t('canvas.showComments')}
             {hint('⇧C')}
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => toggleViewOption('renderer')}>
+            {viewOptions.renderer ? t('canvas.hideRenderer') : t('canvas.showRenderer')}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

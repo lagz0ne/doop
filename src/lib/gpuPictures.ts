@@ -195,6 +195,10 @@ interface GpuPicturesState {
   /** the frames the canvas draws: FrameSlot renders nothing for them */
   drawn: ReadonlySet<string>
   setDrawn(drawn: ReadonlySet<string>): void
+  /** the layer was asked for and did not start, or its context is lost:
+   *  what the renderer label says (rendererSetting.ts) */
+  failed: boolean
+  setFailed(failed: boolean): void
 }
 
 function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
@@ -207,6 +211,10 @@ export const useGpuPictures = create<GpuPicturesState>((set, get) => ({
   drawn: new Set(),
   setDrawn(drawn) {
     if (!sameSet(get().drawn, drawn)) set({ drawn })
+  },
+  failed: false,
+  setFailed(failed) {
+    if (get().failed !== failed) set({ failed })
   },
 }))
 

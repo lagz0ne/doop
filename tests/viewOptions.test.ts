@@ -11,18 +11,19 @@ import { DEFAULT_VIEW_OPTIONS, parseZoomPercent, readViewOptions, writeViewOptio
 describe('readViewOptions / writeViewOptions', () => {
   afterEach(() => localStorage.clear())
 
-  it('starts with everything shown', () => {
+  it('starts with everything shown but the renderer label', () => {
     expect(readViewOptions()).toEqual(DEFAULT_VIEW_OPTIONS)
+    expect(DEFAULT_VIEW_OPTIONS.renderer).toBe(false)
   })
 
   it('round-trips a choice', () => {
-    writeViewOptions({ pixelGrid: false, cursors: true, comments: false })
-    expect(readViewOptions()).toEqual({ pixelGrid: false, cursors: true, comments: false })
+    writeViewOptions({ pixelGrid: false, cursors: true, comments: false, renderer: true })
+    expect(readViewOptions()).toEqual({ pixelGrid: false, cursors: true, comments: false, renderer: true })
   })
 
   it('falls back field by field on a damaged value', () => {
     localStorage.setItem('doop:view-options', '{"cursors":false,"comments":"no"}')
-    expect(readViewOptions()).toEqual({ pixelGrid: true, cursors: false, comments: true })
+    expect(readViewOptions()).toEqual({ pixelGrid: true, cursors: false, comments: true, renderer: false })
     localStorage.setItem('doop:view-options', 'not json')
     expect(readViewOptions()).toEqual(DEFAULT_VIEW_OPTIONS)
   })

@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { ZoomControls } from '../src/components/ZoomControls'
 import { useStore } from '../src/lib/store'
+import { TooltipProvider } from '../src/components/ui/tooltip'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 /* The zoom pill's menu: a field to type a level, and the switches for what
@@ -20,15 +21,17 @@ beforeEach(async () => {
   root = createRoot(host)
   await act(async () => {
     root.render(
-      <ZoomControls
-        labelRef={createRef<HTMLSpanElement>()}
-        hidden={false}
-        onZoomIn={vi.fn()}
-        onZoomOut={vi.fn()}
-        onZoomTo={onZoomTo}
-        onFit={vi.fn()}
-        onFitSelection={vi.fn()}
-      />,
+      <TooltipProvider>
+        <ZoomControls
+          labelRef={createRef<HTMLSpanElement>()}
+          hidden={false}
+          onZoomIn={vi.fn()}
+          onZoomOut={vi.fn()}
+          onZoomTo={onZoomTo}
+          onFit={vi.fn()}
+          onFitSelection={vi.fn()}
+        />
+      </TooltipProvider>,
     )
   })
 })
@@ -89,4 +92,21 @@ it('switches the comment pins and remembers it', async () => {
   expect(useStore.getState().viewOptions.comments).toBe(false)
   expect(JSON.parse(localStorage.getItem('doop:view-options')!)).toMatchObject({ comments: false })
   useStore.getState().toggleViewOption('comments')
+})
+
+it('shows the renderer label from the menu, naming what draws this load', async () => {
+  expect(document.querySelector('button[aria-label="Canvas renderer"]')).toBeNull()
+  await open()
+  const item = [...document.querySelectorAll('[role="menuitem"]')].find((el) =>
+    el.textContent?.startsWith('Show renderer'),
+  )!
+  await act(async () => {
+    ;(item as HTMLElement).click()
+  })
+  expect(useStore.getState().viewOptions.renderer).toBe(true)
+  const label = document.querySelector<HTMLElement>('button[aria-label="Canvas renderer"]')!
+  /* no WebGL2 here, so the GPU layer cannot be on: culled frames are DOM pictures */
+  expect(label.dataset.renderer).toBe('dom')
+  expect(label.textContent).toMatch(/^DOM/)
+  useStore.getState().toggleViewOption('renderer')
 })
