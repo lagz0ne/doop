@@ -161,9 +161,13 @@ transform still applies, then `bin/doop check --test` and commit (`vendor/doop` 
   and the password, at a door). An MCP agent's account owns what it creates; hand a canvas to its
   person with `doopctl share owner`, or let them share it as a member.
   With FULL_UI off the editor also uses a reviewer layout (patch 0013, `CanvasDock.tsx`): one
-  dock along the bottom instead of the top bar, tool rail and side rail, the Hand first, Layers
-  folded; the review panel at `/embed` uses the same layout (0014), and so do phones (0021: back,
-  Hand, Comment, Comments, Layers and ••• in one thumb-sized dock). A phone only reviews (0028:
+  dock along the bottom instead of the top bar, tool rail and side rail. It keeps to reviewing
+  (0042): the dock's tools are the Hand and Comment (a key-picked tool or Prototype mode shows as a
+  pressed way back while on), nothing of the agents (no AI activity, Connect AI, Tasks, Activity or
+  Memory; the side panel is the comments alone), and the left panel is the pages at full height (no
+  layer tree, no Tokens). The review panel at `/embed` uses the same layout (0014), and so do phones
+  (0021, 0042: back, Hand, Comment, the zoom %, Comments, Pages and ••• in one thumb-sized dock,
+  Present inside •••). The docked panel layout shows the full editor. A phone only reviews (0028:
   `store.reviewOnly` caps the role at review on the client, no tool list or Prototype mode, a finger
   pans in Hand and Comment, the page itself does not zoom, a context menu needs a 1600 ms hold,
   `TOUCH_HOLD_MS` in `src/lib/touchHold.ts`).
