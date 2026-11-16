@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jim Keeney <jim.keeney@ttalks.show>
 Date: Sun, 15 Nov 2026 05:53:04 +0000
-Subject: [PATCH 29/46] fix(frames): refuse doop:edited saves for frames with
+Subject: [PATCH 29/47] fix(frames): refuse doop:edited saves for frames with
  executable content
 
 A script inside a frame can post the same message the editing runtime posts,

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 15:07:00 +0000
-Subject: [PATCH 38/46] feat(telemetry): render trial reports, forwarded to an
+Subject: [PATCH 38/47] feat(telemetry): render trial reports, forwarded to an
  OpenTelemetry collector
 
 The canvas has two render experiments behind switches (the GPU picture

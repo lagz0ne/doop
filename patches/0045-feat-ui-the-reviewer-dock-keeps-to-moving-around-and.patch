@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 06:26:52 +0000
-Subject: [PATCH 45/46] feat(ui): the reviewer dock keeps to moving around and
+Subject: [PATCH 45/47] feat(ui): the reviewer dock keeps to moving around and
  reviewing
 
 The reviewer layout's dock had grown to fifteen controls, and the pages

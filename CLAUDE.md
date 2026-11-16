@@ -165,7 +165,8 @@ transform still applies, then `bin/doop check --test` and commit (`vendor/doop` 
   (0042): the dock's tools are the Hand and Comment (a key-picked tool or Prototype mode shows as a
   pressed way back while on), nothing of the agents (no AI activity, Connect AI, Tasks, Activity or
   Memory; the side panel is the comments alone), and no left panel. The dock holds navigation and
-  review (0045): back, name, Hand, Comment, the zoom, a page picker (a pick-one menu; adding and
+  review (0045, 0047: back and the canvas's name are a faint label at the top left instead): Hand,
+  Comment, the zoom, a page picker (a pick-one menu; adding and
   renaming pages is the full editor's), and the faces of who is here, which open one menu for the
   rest (follow a person or go to an agent's frame, 0046: the faces themselves are pictures; then
   comments panel, import, export, share, design panel, settings, your name); no renderer label.

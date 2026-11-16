@@ -40,6 +40,7 @@ outside this repo.)
 | 2026-11-16 | A review of the reviewer layout's controls, state by state (each control on a canvas, the owner commenting on it), asked for less: only the Hand and Comment in the dock, nothing of the agents (AI activity, Agents, Connect AI), no design tokens ("maybe for agents only"), the pages to the full height instead of sharing it with Layers ("layers we don't really use"), and one bar on a phone. Done in 0042; it supersedes 0013's Pages/Layers fold and More tools menu. Agents keep everything over MCP; the docked layout or `doop:full-ui` brings the full editor back. The same review found the renderer label striking DOM, not GPU, when the GPU layer failed (0043) |
 | 2026-11-16 | Reported: the getting-started card flashes on opening a canvas and goes away; asked to remove it. The role reads as edit until the canvas loads, so the checklist mounted at once and unmounted when the real role (or a phone's review cap) arrived. It is about connecting an agent, so the reviewer UI drops it with the rest of the agents; with FULL_UI on it waits for the canvas (0044) |
 | 2026-11-16 | Asked for a smaller dock: the pages in it as a pick-one instead of a panel, no renderer label, and import, export, comment threads and the people grouped behind one control, so the dock holds navigation and review and the rest is a second layer. Done in 0045: seven controls where there were fifteen, and no left panel. Page management (add, rename, order) stays in the full editor; a phone keeps its Comments button, the comments being its main way to review |
+| 2026-11-16 | Asked for the canvas's name and the back to go to the top left, subtle, since people read it once and move on, and for the room to go to the page's name with some limit. Done in 0047; the id menu went along with the name. Phones keep their dock (the name is in their actions sheet) |
 
 ## Patches
 
@@ -91,6 +92,7 @@ outside this repo.)
 | 0044 | fix(ui): no getting-started checklist in the reviewer UI, or before the canvas loads | `Onboarding` mounts only with FULL_UI and a loaded canvas: `grantedRole` falls back to edit before load, so it showed for a moment and vanished for a reviewer |
 | 0045 | feat(ui): the reviewer dock keeps to moving around and reviewing | the dock: back, name, Hand, Comment, the zoom, a page picker (`PagePicker`, a radio menu), and the faces of who is here opening one menu (`DockMenu`: comments panel with an open-threads dot, import, export, share, design panel, settings, your name); no Pages panel or rail island (`chromeLayout` `bareLeft`), 0042's pages-only faces of LayersPanel/PagesPanel removed; no renderer label or its view option in the dock's zoom control; a phone's Pages sheet becomes the picker |
 | 0046 | fix(ui): the dock menu's faces are pictures, following is a row | 0045's menu trigger held the presence stack, whose faces are buttons (follow a person, fly to an agent's frame): opening the menu also followed whoever was there. The trigger draws plain faces (yours, up to three, then +N); each person or agent is a row of the menu (follow / stop following; go where the agent works, disabled while unknown) |
+| 0047 | feat(ui): the canvas's name sits quietly at the top left, the dock gives its room to the page | back, the canvas's name (still its rename field) and id menu leave the dock for `CanvasLabel` at the top left, a pill faint until hovered or focused, the name truncated at 240px; the page picker's name may run to 320px (was 200); fits keep 52px clear at the top (`LABEL_CLEAR`); phones unchanged |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -383,6 +385,11 @@ twice.
 Tests for 0046 (2026-11-16): `reviewerLayoutBrowser` puts a peer in the room, finds no button
 inside the menu's trigger (0045's held the stack's buttons), opens the menu with nobody followed and
 follows the peer from their row; that file and `phoneReviewBrowser` pass, and so does the typecheck.
+
+Tests for 0047 (2026-11-16): `reviewerLayoutBrowser` finds the label in the top-left corner,
+under 340px wide with the id menu, and no back or id in the dock; `phoneReviewBrowser` finds no
+label on a phone. Both files pass together (17 tests, load average 37); the phone file once failed
+in its setup under that load and passed alone.
 
 Upgrading past v0.14.0 (found 2026-11-14): drizzle's migrator applies a migration only when it is
 newer than the last one applied (`created_at` < the journal's `when`), not by name. Upstream's
