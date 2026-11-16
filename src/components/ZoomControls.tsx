@@ -88,7 +88,9 @@ export function ZoomControls({
         hidden && 'hidden',
       )}
     >
-      {viewOptions.renderer && <RendererLabel />}
+      {/* the reviewer dock keeps to moving around and reviewing: no renderer
+          label there (Settings → Appearance still picks the renderer) */}
+      {viewOptions.renderer && !inline && <RendererLabel />}
       {steps && (
         <ToolbarButton aria-label={t('canvas.zoomOut')} className={stepBtn} onClick={onZoomOut}>
           <MinusIcon />
@@ -168,9 +170,11 @@ export function ZoomControls({
             {viewOptions.comments ? t('canvas.hideComments') : t('canvas.showComments')}
             {hint('⇧C')}
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => toggleViewOption('renderer')}>
-            {viewOptions.renderer ? t('canvas.hideRenderer') : t('canvas.showRenderer')}
-          </DropdownMenuItem>
+          {!inline && (
+            <DropdownMenuItem onSelect={() => toggleViewOption('renderer')}>
+              {viewOptions.renderer ? t('canvas.hideRenderer') : t('canvas.showRenderer')}
+            </DropdownMenuItem>
+          )}
         </DropdownMenuContent>
       </DropdownMenu>
       {steps && (

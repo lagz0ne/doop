@@ -1,13 +1,25 @@
 import type { ReactNode } from 'react'
+import { canvasPages } from '../../shared/pages'
 import { roleOf, toolAllowed, useStore, type PanelTab } from '../lib/store'
 import { TOOLS, type Tool } from '../lib/tools'
 import { useOpenThreadCount } from '../lib/comments'
 import { useT } from '../lib/i18n'
 import { TOOL_ICONS } from './Stage'
 import { PeerAvatars, PresenceFace } from './PeerAvatars'
-import { Toolbar, ToolbarControl, ToolbarDivider, ToolbarDot } from './ui/toolbar'
+import { Toolbar, ToolbarButton, ToolbarControl, ToolbarDivider, ToolbarDot } from './ui/toolbar'
+import {
+  DropdownMenu,
+  DropdownMenuCaption,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from './ui/dropdown-menu'
 import { Tooltip } from './ui/tooltip'
 import {
+  ChevronDownIcon,
   ChevronLeftIcon,
   CommentIcon,
   ExportIcon,
@@ -23,17 +35,16 @@ import {
 /**
  * The reviewer layout's one bar (FULL_UI off, floating panels): what
  * the top bar, the tool rail, the zoom pill and the side rail held, along the
- * bottom of the canvas, icons only with their names on hover. Someone who
- * reviews needs the canvas, the Hand to move around it, Comment, and the
- * conversation with the agents; everything else is one click away, not in
- * view.
+ * bottom of the canvas, icons only with their names on hover. The bar keeps to
+ * moving around and reviewing; everything else is one menu away.
  *
  * In order: back to the canvases, the canvas's name and id; Hand and
  * Comment; the zoom (the Stage draws its own control into `zoomSlot`, keeping
- * its menu and handlers); who is here; Import, Export and Share; Comments (the
- * right-hand panel, which holds the comments alone here); the design panel,
- * settings and you. The page decides what each may do and passes null for
- * what this person is not offered.
+ * its menu and handlers); the page picker (the canvas's pages, in place of a
+ * Pages panel); and the faces of who is here, which open the one menu for the
+ * rest: the comments panel, import, export, share, the design panel, settings
+ * and your name. The page decides what each may do and passes null for what
+ * this person is not offered.
  *
  * No tool list, no Prototype mode, no AI activity and no Connect AI: a
  * reviewer moves around and comments, and the agents work over MCP, not from
@@ -44,9 +55,9 @@ import {
  * On a phone (`phone`) the canvas is review-only (State.reviewOnly) and the
  * same dock is the one control on screen, within a thumb's reach at the 40px
  * touch size: back, Hand, Comment, the zoom level (its menu has the steps
- * and fits; pinching zooms), the Comments sheet, Pages, and ••• for the rest
- * (the canvas actions sheet: its name, Present, share, export, your name,
- * settings).
+ * and fits; pinching zooms), the Comments sheet, the page picker, and ••• for
+ * the rest (the canvas actions sheet: its name, Present, share, export, your
+ * name, settings).
  */
 export function CanvasDock(props: DockProps & { phone?: false }): ReactNode
 export function CanvasDock(props: PhoneDockProps & { phone: true }): ReactNode
@@ -65,8 +76,6 @@ type PhoneDockProps = PanelProps & {
   onBack: (() => void) | null
   /** receives the element the zoom control is drawn into */
   zoomSlot: (el: HTMLElement | null) => void
-  /** the Pages and layers sheet */
-  onLayers: () => void
   /** the canvas actions sheet */
   onMore: () => void
 }
@@ -88,7 +97,7 @@ type DockProps = PanelProps & {
   onShare: (() => void) | null
 }
 
-function PhoneDock({ onBack, zoomSlot, panelTab, panelOpen, onPanel, onLayers, onMore }: PhoneDockProps) {
+function PhoneDock({ onBack, zoomSlot, panelTab, panelOpen, onPanel, onMore }: PhoneDockProps) {
   const t = useT()
   return (
     <Toolbar
@@ -105,9 +114,7 @@ function PhoneDock({ onBack, zoomSlot, panelTab, panelOpen, onPanel, onLayers, o
       <span ref={zoomSlot} className="flex items-center" />
       <ToolbarDivider />
       {onPanel && <PanelButtons panelTab={panelTab} panelOpen={panelOpen} onPanel={onPanel} />}
-      <ToolbarControl side="top" label={t('panels.pagesTitle')} onClick={onLayers}>
-        <PageIcon />
-      </ToolbarControl>
+      <PagePicker phone />
       <ToolbarControl side="top" label={t('canvas.canvasActions')} onClick={onMore}>
         <MoreHorizontalIcon />
       </ToolbarControl>
@@ -157,7 +164,6 @@ function DesktopDock({
 }: DockProps) {
   const t = useT()
   const side = 'top' as const
-
   return (
     <Toolbar
       aria-label={t('canvas.dock')}
@@ -175,55 +181,178 @@ function DesktopDock({
       <ToolbarDivider />
       <span ref={zoomSlot} className="flex items-center" />
       <ToolbarDivider />
-      <Tooltip label={others.map((p) => p.name).join(', ') || t('canvas.justYou')} side={side}>
-        <span className="flex items-center px-1">
-          <PresenceFace name={me.name} image={me.image} color={me.color} kind="user" />
-          <span className="-ml-[7px] flex items-center">
-            <PeerAvatars others={others} />
-          </span>
+      <PagePicker />
+      <ToolbarDivider />
+      <DockMenu
+        me={me}
+        others={others}
+        onRenameSelf={onRenameSelf}
+        onImport={onImport}
+        onExport={onExport}
+        onShare={onShare}
+        panelTab={panelTab}
+        panelOpen={panelOpen}
+        onPanel={onPanel}
+        inspector={inspector}
+        onSettings={onSettings}
+      />
+    </Toolbar>
+  )
+}
+
+/** The canvas's pages as a pick-one menu, in place of a Pages panel: the
+ *  trigger names the page shown (a phone shows the icon alone). Adding,
+ *  renaming and ordering pages stay with the full editor's Pages panel. */
+function PagePicker({ phone = false }: { phone?: boolean }) {
+  const t = useT()
+  const canvas = useStore((s) => s.canvas)
+  const activePageId = useStore((s) => s.activePageId)
+  if (!canvas) return null
+  const pages = canvasPages(canvas)
+  const active = pages.find((page) => page.id === activePageId) ?? pages[0]
+  if (!active) return null
+  return (
+    <DropdownMenu>
+      <Tooltip label={t('panels.pagesTitle')} side="top">
+        <span className="inline-flex">
+          <DropdownMenuTrigger asChild>
+            <ToolbarButton
+              aria-label={t('canvas.pagePicker', { page: active.name })}
+              className={phone ? undefined : 'flex w-auto max-w-[200px] gap-1.5 px-2 sm:w-auto sm:px-2'}
+            >
+              <PageIcon />
+              {!phone && <span className="min-w-0 truncate">{active.name}</span>}
+              {!phone && <ChevronDownIcon className="flex-none text-ink-faint" />}
+            </ToolbarButton>
+          </DropdownMenuTrigger>
         </span>
       </Tooltip>
-      {(onImport || onExport || onShare) && <ToolbarDivider />}
-      {onImport && (
-        <ToolbarControl side={side} label={t('canvas.import')} onClick={onImport}>
-          <ImportIcon />
-        </ToolbarControl>
-      )}
-      {onExport && (
-        <ToolbarControl side={side} label={t('canvas.export')} onClick={onExport}>
-          <ExportIcon />
-        </ToolbarControl>
-      )}
-      {onShare && (
-        <ToolbarControl side={side} label={t('canvas.share')} onClick={onShare}>
-          <ShareUpIcon />
-        </ToolbarControl>
-      )}
-      {onPanel && <ToolbarDivider />}
-      {onPanel && <PanelButtons panelTab={panelTab} panelOpen={panelOpen} onPanel={onPanel} />}
-      <ToolbarDivider />
-      {inspector && (
-        <ToolbarControl
-          side={side}
-          label={inspector.label}
-          aria-pressed={inspector.open}
-          className="aria-pressed:bg-paper-deep aria-pressed:text-ink"
-          onClick={inspector.onToggle}
-        >
-          <SlidersIcon />
-        </ToolbarControl>
-      )}
-      {onSettings && (
-        <ToolbarControl side={side} label={t('shell.settings')} onClick={onSettings}>
-          <GearIcon />
-        </ToolbarControl>
-      )}
-      {onRenameSelf && (
-        <ToolbarControl side={side} label={t('canvas.youAre', { name: me.name })} onClick={onRenameSelf}>
-          <PresenceFace name={me.name} image={me.image} color={me.color} kind="user" size={22} />
-        </ToolbarControl>
-      )}
-    </Toolbar>
+      <DropdownMenuContent side="top" align="center" width="md">
+        <DropdownMenuCaption>{t('panels.pagesTitle')}</DropdownMenuCaption>
+        <DropdownMenuRadioGroup value={active.id} onValueChange={(id) => useStore.getState().setActivePage(id)}>
+          {pages.map((page) => (
+            <DropdownMenuRadioItem key={page.id} value={page.id}>
+              <span className="truncate">{page.name}</span>
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+/** Who is here, as the trigger of the one menu for what a reviewer reaches
+ *  for now and then: the comments panel (the trigger wears a dot while threads
+ *  are open), import, export, share, the design panel, settings and your
+ *  name. */
+function DockMenu({
+  me,
+  others,
+  onRenameSelf,
+  onImport,
+  onExport,
+  onShare,
+  panelTab,
+  panelOpen,
+  onPanel,
+  inspector,
+  onSettings,
+}: Pick<
+  DockProps,
+  | 'me'
+  | 'others'
+  | 'onRenameSelf'
+  | 'onImport'
+  | 'onExport'
+  | 'onShare'
+  | 'panelTab'
+  | 'panelOpen'
+  | 'onPanel'
+  | 'inspector'
+  | 'onSettings'
+>) {
+  const t = useT()
+  const openThreads = useOpenThreadCount()
+  const here = others.map((p) => p.name).join(', ')
+  const commentsShown = panelOpen && panelTab === 'comments'
+  const files = onImport || onExport || onShare
+  const yours = inspector || onSettings || onRenameSelf
+  return (
+    <DropdownMenu>
+      <Tooltip label={here ? t('canvas.hereNow', { names: here }) : t('canvas.justYou')} side="top">
+        <span className="inline-flex">
+          <DropdownMenuTrigger asChild>
+            <ToolbarButton
+              aria-label={t('canvas.dockMenu')}
+              className="relative flex w-auto gap-1 px-1 sm:w-auto sm:px-1"
+            >
+              <PresenceFace name={me.name} image={me.image} color={me.color} kind="user" />
+              {others.length > 0 && (
+                <span className="-ml-[7px] flex items-center">
+                  <PeerAvatars others={others} />
+                </span>
+              )}
+              <ChevronDownIcon className="flex-none text-ink-faint" />
+              {openThreads > 0 && <ToolbarDot className="bg-brand" />}
+            </ToolbarButton>
+          </DropdownMenuTrigger>
+        </span>
+      </Tooltip>
+      <DropdownMenuContent side="top" align="end" width="lg">
+        <DropdownMenuCaption>{here ? t('canvas.hereNow', { names: here }) : t('canvas.justYou')}</DropdownMenuCaption>
+        {onPanel && (
+          <DropdownMenuItem onSelect={() => onPanel('comments')}>
+            <CommentIcon />
+            {commentsShown
+              ? t('canvas.commentsClose')
+              : openThreads > 0
+                ? t('canvas.commentsOpen', { open: openThreads })
+                : t('canvas.comments')}
+          </DropdownMenuItem>
+        )}
+        {files && <DropdownMenuSeparator />}
+        {onImport && (
+          <DropdownMenuItem onSelect={onImport}>
+            <ImportIcon />
+            {t('canvas.import')}
+          </DropdownMenuItem>
+        )}
+        {onExport && (
+          <DropdownMenuItem onSelect={onExport}>
+            <ExportIcon />
+            {t('canvas.export')}
+          </DropdownMenuItem>
+        )}
+        {onShare && (
+          <DropdownMenuItem onSelect={onShare}>
+            <ShareUpIcon />
+            {t('canvas.share')}
+          </DropdownMenuItem>
+        )}
+        {yours && <DropdownMenuSeparator />}
+        {inspector && (
+          <DropdownMenuItem onSelect={inspector.onToggle}>
+            <SlidersIcon />
+            {inspector.label}
+          </DropdownMenuItem>
+        )}
+        {onSettings && (
+          <DropdownMenuItem onSelect={onSettings}>
+            <GearIcon />
+            {t('shell.settings')}
+          </DropdownMenuItem>
+        )}
+        {onRenameSelf && (
+          <DropdownMenuItem onSelect={onRenameSelf}>
+            <PresenceFace name={me.name} image={me.image} color={me.color} kind="user" size={22} />
+            <span className="flex min-w-0 flex-col">
+              <span className="truncate">{me.name}</span>
+              <span className="text-caption text-ink-faint">{t('canvas.changeYourName')}</span>
+            </span>
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 

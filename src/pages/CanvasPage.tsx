@@ -205,6 +205,7 @@ function chromeLayout({
   layersWidth,
   agentsWidth,
   docked,
+  bareLeft = false,
 }: {
   layersOpen: boolean
   propertiesShown: boolean
@@ -212,6 +213,8 @@ function chromeLayout({
   layersWidth: number
   agentsWidth: number
   docked: boolean
+  /** the reviewer layout: no panel, island or tool rail on the left (its pages are in the dock) */
+  bareLeft?: boolean
 }) {
   if (docked) {
     const toolRail = layersOpen ? layersWidth : RAIL_W
@@ -219,10 +222,11 @@ function chromeLayout({
     const island = propertiesShown ? properties + INSPECTOR_W : properties
     return { toolRail, properties, island, left: toolRail + RAIL_W, right: island + RAIL_W }
   }
-  const toolRail = layersOpen ? EDGE + layersWidth + 12 : EDGE + RAIL_W + 10
+  const toolRail = bareLeft ? EDGE : layersOpen ? EDGE + layersWidth + 12 : EDGE + RAIL_W + 10
   const properties = agentsOpen ? EDGE + agentsWidth + 8 : EDGE
   const island = propertiesShown ? properties + INSPECTOR_W + 10 : agentsOpen ? EDGE + agentsWidth + 10 : EDGE
-  return { toolRail, properties, island, left: toolRail + RAIL_W + 16, right: island + RAIL_W + 10 }
+  const left = bareLeft ? EDGE : toolRail + RAIL_W + 16
+  return { toolRail, properties, island, left, right: island + RAIL_W + 10 }
 }
 
 const STARTER_HTML = `<!doctype html>
@@ -742,9 +746,10 @@ export function CanvasPage({
   const docked = usePanelLayout() === 'docked' && !isMobile
   const panelSurface = docked ? 'docked' : 'floating'
   /* The reviewer layout (FULL_UI off, floating panels): no top bar, no tool
-     rail, no side rail; one dock along the bottom holds what reviewing needs
-     (CanvasDock.tsx), the left panel is the pages alone, the right panel the
-     comments alone and starts closed, and the Hand is the first tool. The
+     rail, no side rail and no left panel; one dock along the bottom holds
+     what reviewing needs, the pages as a picker in it (CanvasDock.tsx), the
+     right panel is the comments alone and starts closed, and the Hand is the
+     first tool. The
      agents' chrome (AI activity, Connect AI, memory, the composer) stays in
      the full layout: agents work over MCP. Present stays at the top right. A
      phone gets the same with its dock as the one control on screen, the zoom
@@ -786,8 +791,11 @@ export function CanvasPage({
   const rulerInset = rulersShown && !docked ? RULER_PX : 0
   const hasSelection = useStore((s) => s.selectedIds.length > 0)
 
+  /* the reviewer layout has no Layers panel: its pages are in the dock */
+  const leftPanel = layersOpen && !reviewerLayout
   const fixedChrome = chromeLayout({
-    layersOpen,
+    layersOpen: leftPanel,
+    bareLeft: deskReview,
     propertiesShown,
     agentsOpen: showActivity,
     layersWidth: 0,
@@ -799,13 +807,14 @@ export function CanvasPage({
     viewport: viewportWidth,
     /* docked, the panels squeeze the stage itself, so it keeps a usable width */
     reserved: fixedChrome.left + fixedChrome.right + rulerInset + (docked ? DOCKED_STAGE_MIN : 0),
-    layersOpen,
+    layersOpen: leftPanel,
     agentsOpen: showActivity,
   })
   const layersWidth = panels.layers
   const agentsWidth = panels.agents
   const chrome = chromeLayout({
-    layersOpen,
+    layersOpen: leftPanel,
+    bareLeft: deskReview,
     propertiesShown,
     agentsOpen: showActivity,
     layersWidth,
@@ -1172,11 +1181,11 @@ export function CanvasPage({
           {FULL_UI && canvas && !readOnly && <Onboarding canvasId={canvasId} />}
           <AccessBanner guest={guest} onSignUp={onSignUp} onSignIn={onSignIn} />
           {!isMobile &&
+            !reviewerLayout &&
             (layersOpen ? (
               <LayersPanel
                 onAddFrame={addFrame}
                 surface={panelSurface}
-                pagesOnly={reviewerLayout}
                 resize={{
                   label: t('canvas.resizeLayers'),
                   edge: 'right',
@@ -1190,7 +1199,7 @@ export function CanvasPage({
                 }}
               />
             ) : (
-              <LayersRailToggle docked={docked} pagesOnly={reviewerLayout} />
+              <LayersRailToggle docked={docked} />
             ))}
           {isMobile && !reviewerLayout && !showActivity && !guest && (
             <MobilePanelTabs
@@ -1270,7 +1279,6 @@ export function CanvasPage({
                   panelTab={panelTab}
                   panelOpen={showActivity}
                   onPanel={guest ? null : openPanel}
-                  onLayers={() => setShowMobileLayers(true)}
                   onMore={() => setShowMobileActions(true)}
                 />
               ) : (
@@ -1443,12 +1451,7 @@ export function CanvasPage({
               className="max-h-[calc(100svh-56px)] gap-0 rounded-t-2xl border-line bg-surface p-0 shadow-pop data-[side=bottom]:h-[min(78svh,680px)]"
             >
               <SheetTitle className="sr-only">{t('canvas.layers')}</SheetTitle>
-              <LayersPanel
-                onAddFrame={addFrame}
-                surface="inline"
-                pagesOnly={reviewerLayout}
-                onClose={() => setShowMobileLayers(false)}
-              />
+              <LayersPanel onAddFrame={addFrame} surface="inline" onClose={() => setShowMobileLayers(false)} />
             </SheetContent>
           </Sheet>
           {/* ⌘. closes both sheets (and their backdrops) for the moment only:
