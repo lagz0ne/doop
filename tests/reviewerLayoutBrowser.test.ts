@@ -5,9 +5,11 @@ import { findBrowserPath } from '../server/screenshot'
 import { fixtureUrl, openBrowser, type TestBrowser } from './browser'
 
 /* The reviewer layout (FULL_UI off, a desktop, floating panels): one dock
-   along the bottom instead of the top bar, the tool rail and the side rail;
-   the Hand first; Layers folded under the pages; the right-hand panel opened
-   from the dock. The editor page itself, mounted by the clipboard fixture. */
+   along the bottom instead of the top bar, the tool rail and the side rail,
+   with Hand and Comment as its tools and nothing of the agents'; the Hand
+   first; the left panel the pages alone; the right-hand panel the comments
+   alone, opened from the dock. The editor page itself, mounted by the
+   clipboard fixture. */
 
 /* the harness's own type is declared in canvasClipboardBrowser.test.ts */
 type Harness = { canvasClipboardHarness: { seed: (frames: Frame[]) => void } }
@@ -42,10 +44,7 @@ async function open(page: Page, fullUi: 'on' | 'off') {
   await page.waitForFunction(
     () => !!(window as unknown as Harness).canvasClipboardHarness && !!document.querySelector('.stage'),
   )
-  await page.evaluate((frame) => {
-    localStorage.removeItem('doop:layers-section')
-    ;(window as unknown as Harness).canvasClipboardHarness.seed([frame])
-  }, FRAME)
+  await page.evaluate((frame) => (window as unknown as Harness).canvasClipboardHarness.seed([frame]), FRAME)
   /* the harness hides the chrome and closes Layers; this test is about them */
   await store(page, `(useStore.setState({ uiHidden: false }), s.setLayersOpen(true), true)`)
 }
@@ -71,26 +70,36 @@ describe.skipIf(!findBrowserPath())('the reviewer layout', () => {
     expect(await page.$eval(dock, (el) => !!el.querySelector('[aria-label="Zoom out"]'))).toBe(true)
   })
 
-  it('folds Layers under the pages, and remembers when it is opened', async () => {
-    await page.waitForSelector('button[aria-expanded="false"]')
-    expect(await page.$('[data-slot="frame-section-heading"]')).toBe(null)
-    await page.evaluate(() =>
-      [...document.querySelectorAll<HTMLButtonElement>('button[aria-expanded="false"]')]
-        .find((b) => b.textContent?.trim() === 'Layers')!
-        .click(),
-    )
-    await page.waitForSelector('[data-slot="frame-section-heading"]')
-    expect(await page.evaluate(() => localStorage.getItem('doop:layers-section'))).toBe('1')
+  it('offers Hand and Comment alone, and nothing of the agents', async () => {
+    const labels = await page.$$eval(`${dock} [aria-label]`, (els) => els.map((el) => el.getAttribute('aria-label')))
+    expect(labels).toEqual(expect.arrayContaining(['Hand (H)', 'Comment (C)']))
+    for (const gone of ['More tools', 'Prototype', 'AI activity', 'Connect AI'])
+      expect(labels.some((label) => label?.startsWith(gone))).toBe(false)
   })
 
-  it('lists every tool upwards and shows the one picked in the dock', async () => {
-    await page.click('[aria-label="More tools"]')
-    await page.waitForSelector('[role="menuitem"]')
-    const select = (await page.$$('[role="menuitem"]')).at(0)!
-    expect(await select.evaluate((el) => el.textContent)).toContain('Select')
-    await select.click()
-    expect(await store(page, 's.tool')).toBe('select')
-    expect(await page.$eval(dock, (el) => !!el.querySelector('[aria-label^="Select"][aria-pressed="true"]'))).toBe(true)
+  it('shows a tool picked by its key while it is the current one, and goes back to the Hand', async () => {
+    await store(page, `(s.setTool('select'), true)`)
+    const picked = `${dock} [aria-label^="Select"][aria-pressed="true"]`
+    await page.waitForSelector(picked)
+    await page.click(picked)
+    expect(await store(page, 's.tool')).toBe('hand')
+    expect(await page.$(picked)).toBe(null)
+  })
+
+  it('shows Prototype mode only while it is on, as the way out', async () => {
+    await store(page, `(s.setPrototypeMode(true), true)`)
+    const mode = `${dock} [aria-label^="Prototype mode"]`
+    await page.waitForSelector(mode)
+    await page.click(mode)
+    expect(await store(page, 's.prototypeMode')).toBe(false)
+    expect(await page.$(mode)).toBe(null)
+  })
+
+  it('gives the left panel to the pages alone: no layer tree, no tokens', async () => {
+    await page.waitForSelector('[data-slot="page-section-heading"]')
+    expect(await page.$('[data-slot="frame-section-heading"]')).toBe(null)
+    expect(await page.$('[role="tree"]')).toBe(null)
+    expect(await page.$('[role="tab"][id$="-trigger-tokens"]')).toBe(null)
   })
 
   it('opens the comments from the dock and closes them again', async () => {
@@ -103,6 +112,8 @@ describe.skipIf(!findBrowserPath())('the reviewer layout', () => {
       comments,
     )
     expect(await store(page, 's.panelTab')).toBe('comments')
+    /* the comments alone: no Agents, activity or memory tabs */
+    expect(await page.$$eval('[aria-label="Agents panel"] [role="tab"]', (tabs) => tabs.length)).toBe(1)
     await page.click(comments)
     await page.waitForFunction(
       (sel) => document.querySelector(sel)?.getAttribute('aria-pressed') === 'false',

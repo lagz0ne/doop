@@ -58,9 +58,13 @@ export function ActivityPanel({
   className,
   style,
   resize,
+  commentsOnly = false,
 }: {
   canvasId: string
   onClose: () => void
+  /** the reviewer layout: the comments alone, as a viewer or commenter sees
+   *  them; the agents' tasks, activity and memory are for the full layout */
+  commentsOnly?: boolean
   /* 'inline' when the panel is filling a mobile Sheet rather than floating */
   surface?: PanelSurface
   className?: string
@@ -71,7 +75,8 @@ export function ActivityPanel({
   const setTab = useStore((s) => s.setPanelTab)
   const canEdit = useStore(canEditOpenCanvas)
   /* someone who cannot edit sees the comments only (PanelTabButtons) */
-  const tab = useStore((s) => (canEdit ? s.panelTab : 'comments'))
+  const agentTabs = canEdit && !commentsOnly
+  const tab = useStore((s) => (agentTabs ? s.panelTab : 'comments'))
   const [, tick] = useState(0)
   const openThreads = useOpenThreadCount()
   const working = useStore((s) => s.tasks.filter((t) => t.agentName && !t.endedAt && !t.failedAt).length)
@@ -97,7 +102,7 @@ export function ActivityPanel({
       <PanelTabsRoot value={tab} onValueChange={(next) => setTab(next as typeof tab)}>
         <PanelHeader className="pl-2">
           <PanelTabs aria-label={t('panels.activityPanelAria')}>
-            {canEdit && (
+            {agentTabs && (
               <PanelIconTab value="tasks" icon={<SparkIcon />} title={t('panels.activityAgents')}>
                 {t('panels.activityAgents')}
                 {working > 0 && (
@@ -124,7 +129,7 @@ export function ActivityPanel({
             >
               {t('panels.activityComments')}
             </PanelIconTab>
-            {canEdit && (
+            {agentTabs && (
               <>
                 <PanelIconTab value="activity" icon={<PulseIcon />} title={t('panels.activityActivity')}>
                   {t('panels.activityActivity')}

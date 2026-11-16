@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { nanoid } from 'nanoid'
 import { canvasPages } from '../../shared/pages'
 import type { CanvasPageInfo } from '../../shared/types'
@@ -18,7 +18,15 @@ import { useT } from '@/lib/i18n'
 export const sectionHeading = 'text-[11px] font-normal text-ink-faint'
 const sectionBtn = 'size-5 rounded-[5px] text-ink-faint hover:bg-paper-deep hover:text-ink'
 
-export function PagesPanel({ fill = false }: { fill?: boolean }) {
+export function PagesPanel({
+  fill = false,
+  headerEnd,
+}: {
+  fill?: boolean
+  /** the pages are the whole panel (the reviewer layout): their heading is
+   *  the panel's header, ending in this (its collapse or close control) */
+  headerEnd?: ReactNode
+}) {
   const canvas = useStore((s) => s.canvas)
   const activePageId = useStore((s) => s.activePageId)
   const selectedIds = useStore((s) => s.selectedIds)
@@ -260,13 +268,29 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
 
   return (
     <div className={cn('flex flex-none flex-col', fill && 'min-h-0 flex-1')}>
-      <div className={cn('mt-1.5 flex h-6 flex-none items-center justify-between pr-2.5 pl-3.5', sectionHeading)}>
-        <span data-slot="page-section-heading" className={sectionHeading}>
-          {t('panels.pagesTitle')}
-        </span>
-        {!readOnly && addPage}
+      {headerEnd ? (
+        <div className="flex h-10 flex-none items-center gap-1 border-b border-line-soft pr-2 pl-3.5">
+          <span
+            data-slot="page-section-heading"
+            className="flex flex-1 items-center gap-[7px] text-[12px] font-medium text-ink"
+          >
+            <PageIcon className="size-3.5 text-ink-faint" />
+            {t('panels.pagesTitle')}
+          </span>
+          {!readOnly && addPage}
+          {headerEnd}
+        </div>
+      ) : (
+        <div className={cn('mt-1.5 flex h-6 flex-none items-center justify-between pr-2.5 pl-3.5', sectionHeading)}>
+          <span data-slot="page-section-heading" className={sectionHeading}>
+            {t('panels.pagesTitle')}
+          </span>
+          {!readOnly && addPage}
+        </div>
+      )}
+      <div className={cn('overflow-y-auto px-2 pb-1', headerEnd && 'pt-1.5', fill ? 'min-h-0 flex-1' : 'max-h-[30vh]')}>
+        {list}
       </div>
-      <div className={cn('overflow-y-auto px-2 pb-1', fill ? 'min-h-0 flex-1' : 'max-h-[30vh]')}>{list}</div>
       {!readOnly && selectedIds.length > 0 && pages.length > 1 && (
         /* the canvas shortcuts listen on window: ⌫ would delete the frames
            being moved and typed letters would switch tools, so the picker's

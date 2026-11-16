@@ -1,36 +1,23 @@
 import type { ReactNode } from 'react'
-import { canEditOpenCanvas, roleOf, toolAllowed, useStore, type PanelTab } from '../lib/store'
+import { roleOf, toolAllowed, useStore, type PanelTab } from '../lib/store'
 import { TOOLS, type Tool } from '../lib/tools'
 import { useOpenThreadCount } from '../lib/comments'
 import { useT } from '../lib/i18n'
-import { cn } from '@/lib/utils'
 import { TOOL_ICONS } from './Stage'
 import { PeerAvatars, PresenceFace } from './PeerAvatars'
-import { Toolbar, ToolbarButton, ToolbarControl, ToolbarDivider, ToolbarDot } from './ui/toolbar'
-import { MenuHint } from './ui/menu'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from './ui/dropdown-menu'
+import { Toolbar, ToolbarControl, ToolbarDivider, ToolbarDot } from './ui/toolbar'
 import { Tooltip } from './ui/tooltip'
 import {
-  CheckIcon,
-  ChevronDownIcon,
   ChevronLeftIcon,
   CommentIcon,
   ExportIcon,
   GearIcon,
   ImportIcon,
-  LayersIcon,
   MoreHorizontalIcon,
-  PlusIcon,
+  PageIcon,
   PrototypeModeIcon,
   ShareUpIcon,
   SlidersIcon,
-  SparkIcon,
 } from './ui/icons'
 
 /**
@@ -41,20 +28,25 @@ import {
  * conversation with the agents; everything else is one click away, not in
  * view.
  *
- * In order: back to the canvases, the canvas's name and id; Hand, Comment,
- * Prototype mode and the rest of the tools in a list that opens upwards; the
- * zoom (the Stage draws its own control into `zoomSlot`, keeping its menu and
- * handlers); who is here; Import and Export; Comments and AI activity (the
- * right-hand panel on that tab) and Connect AI; the design panel, settings
- * and you. The page decides what each may do and passes null for what this
- * person is not offered.
+ * In order: back to the canvases, the canvas's name and id; Hand and
+ * Comment; the zoom (the Stage draws its own control into `zoomSlot`, keeping
+ * its menu and handlers); who is here; Import, Export and Share; Comments (the
+ * right-hand panel, which holds the comments alone here); the design panel,
+ * settings and you. The page decides what each may do and passes null for
+ * what this person is not offered.
+ *
+ * No tool list, no Prototype mode, no AI activity and no Connect AI: a
+ * reviewer moves around and comments, and the agents work over MCP, not from
+ * this bar. A tool picked by its key (V, F, R…) still shows in the dock while
+ * it is the current one, and so does Prototype mode while it is on, so the
+ * mode the canvas is in is always in view and one click from leaving.
  *
  * On a phone (`phone`) the canvas is review-only (State.reviewOnly) and the
- * same dock holds what reviewing needs within a thumb's reach, at the 40px
- * touch size: back, Hand, Comment, the Comments sheet (whose tabs hold AI
- * activity), Pages and layers, and ••• for the rest (the canvas actions
- * sheet: its name, export, share, settings). No tool list: every other tool
- * edits. Pinching zooms; the zoom pill floats above it.
+ * same dock is the one control on screen, within a thumb's reach at the 40px
+ * touch size: back, Hand, Comment, the zoom level (its menu has the steps
+ * and fits; pinching zooms), the Comments sheet, Pages, and ••• for the rest
+ * (the canvas actions sheet: its name, Present, share, export, your name,
+ * settings).
  */
 export function CanvasDock(props: DockProps & { phone?: false }): ReactNode
 export function CanvasDock(props: PhoneDockProps & { phone: true }): ReactNode
@@ -71,6 +63,8 @@ type PanelProps = {
 
 type PhoneDockProps = PanelProps & {
   onBack: (() => void) | null
+  /** receives the element the zoom control is drawn into */
+  zoomSlot: (el: HTMLElement | null) => void
   /** the Pages and layers sheet */
   onLayers: () => void
   /** the canvas actions sheet */
@@ -88,14 +82,13 @@ type DockProps = PanelProps & {
   onRenameSelf: (() => void) | null
   onImport: (() => void) | null
   onExport: (() => void) | null
-  onConnect: (() => void) | null
   inspector: { open: boolean; label: string; onToggle: () => void } | null
   onSettings: (() => void) | null
   /** the owner's Share dialog (link level and password) */
   onShare: (() => void) | null
 }
 
-function PhoneDock({ onBack, panelTab, panelOpen, onPanel, onLayers, onMore }: PhoneDockProps) {
+function PhoneDock({ onBack, zoomSlot, panelTab, panelOpen, onPanel, onLayers, onMore }: PhoneDockProps) {
   const t = useT()
   return (
     <Toolbar
@@ -109,9 +102,11 @@ function PhoneDock({ onBack, panelTab, panelOpen, onPanel, onLayers, onMore }: P
       )}
       <DockTools phone />
       <ToolbarDivider />
-      {onPanel && <PanelButtons panelTab={panelTab} panelOpen={panelOpen} onPanel={onPanel} aiActivity={false} />}
-      <ToolbarControl side="top" label={t('canvas.layers')} onClick={onLayers}>
-        <LayersIcon />
+      <span ref={zoomSlot} className="flex items-center" />
+      <ToolbarDivider />
+      {onPanel && <PanelButtons panelTab={panelTab} panelOpen={panelOpen} onPanel={onPanel} />}
+      <ToolbarControl side="top" label={t('panels.pagesTitle')} onClick={onLayers}>
+        <PageIcon />
       </ToolbarControl>
       <ToolbarControl side="top" label={t('canvas.canvasActions')} onClick={onMore}>
         <MoreHorizontalIcon />
@@ -120,49 +115,26 @@ function PhoneDock({ onBack, panelTab, panelOpen, onPanel, onLayers, onMore }: P
   )
 }
 
-/** Comments, and AI activity for an editor: each opens the right-hand panel
- *  (a sheet on a phone) on its tab, with a dot for what is waiting. */
+/** Comments: the right-hand panel (a sheet on a phone), with a dot while
+ *  threads are open. */
 function PanelButtons({
   panelTab,
   panelOpen,
   onPanel,
-  aiActivity = true,
-}: Omit<PanelProps, 'onPanel'> & {
-  onPanel: (tab: PanelTab) => void
-  /** off on a phone, where the panel's sheet has its own AI activity tab */
-  aiActivity?: boolean
-}) {
+}: Omit<PanelProps, 'onPanel'> & { onPanel: (tab: PanelTab) => void }) {
   const t = useT()
   const openThreads = useOpenThreadCount()
-  const working = useStore((s) => s.tasks.filter((x) => x.agentName && !x.endedAt && !x.failedAt).length)
-  /* a viewer or commenter's panel is Comments alone (ActivityPanel) */
-  const canEdit = useStore(canEditOpenCanvas)
-  const showing = (tab: PanelTab) => panelOpen && panelTab === tab
   return (
-    <>
-      <ToolbarControl
-        side="top"
-        label={openThreads ? t('canvas.commentsOpen', { open: openThreads }) : t('canvas.comments')}
-        aria-pressed={showing('comments')}
-        className="aria-pressed:bg-paper-deep aria-pressed:text-ink"
-        onClick={() => onPanel('comments')}
-      >
-        <CommentIcon />
-        {openThreads > 0 && <ToolbarDot className="bg-brand" />}
-      </ToolbarControl>
-      {aiActivity && canEdit && (
-        <ToolbarControl
-          side="top"
-          label={working ? t('canvas.agentsWorking', { working }) : t('canvas.aiActivity')}
-          aria-pressed={showing('tasks')}
-          className="aria-pressed:bg-paper-deep aria-pressed:text-ink"
-          onClick={() => onPanel('tasks')}
-        >
-          <SparkIcon />
-          {working > 0 && <ToolbarDot className="bg-success" />}
-        </ToolbarControl>
-      )}
-    </>
+    <ToolbarControl
+      side="top"
+      label={openThreads ? t('canvas.commentsOpen', { open: openThreads }) : t('canvas.comments')}
+      aria-pressed={panelOpen && panelTab === 'comments'}
+      className="aria-pressed:bg-paper-deep aria-pressed:text-ink"
+      onClick={() => onPanel('comments')}
+    >
+      <CommentIcon />
+      {openThreads > 0 && <ToolbarDot className="bg-brand" />}
+    </ToolbarControl>
   )
 }
 
@@ -179,7 +151,6 @@ function DesktopDock({
   panelTab,
   panelOpen,
   onPanel,
-  onConnect,
   inspector,
   onSettings,
   onShare,
@@ -228,18 +199,8 @@ function DesktopDock({
           <ShareUpIcon />
         </ToolbarControl>
       )}
-      {(onPanel || onConnect) && <ToolbarDivider />}
+      {onPanel && <ToolbarDivider />}
       {onPanel && <PanelButtons panelTab={panelTab} panelOpen={panelOpen} onPanel={onPanel} />}
-      {onConnect && (
-        <ToolbarControl
-          side={side}
-          label={t('canvas.connectAi')}
-          className="bg-ink text-paper hover:bg-ink hover:text-paper"
-          onClick={onConnect}
-        >
-          <PlusIcon />
-        </ToolbarControl>
-      )}
       <ToolbarDivider />
       {inspector && (
         <ToolbarControl
@@ -266,9 +227,10 @@ function DesktopDock({
   )
 }
 
-/** Hand, Comment and Prototype mode, as the rail's foot had them, and every
- *  other tool in a list that opens upwards. A phone reviews, so it gets the
- *  Hand and Comment alone. */
+/** Hand and Comment. A tool picked by its key shows beside them while it is
+ *  the current one, and Prototype mode while it is on, each pressed, so the
+ *  canvas's mode is always in view; a click on either goes back to the Hand
+ *  (or out of Prototype mode). A phone reviews: Hand and Comment alone. */
 function DockTools({ phone = false }: { phone?: boolean }) {
   const t = useT()
   const tool = useStore((s) => s.tool)
@@ -280,7 +242,6 @@ function DockTools({ phone = false }: { phone?: boolean }) {
     return t('stage.toolTooltip', { label: t(entry.label), key: entry.key })
   }
   const pressed = 'aria-pressed:bg-paper-deep aria-pressed:text-ink'
-  const listed = TOOLS.filter((e) => e.id !== 'zoom' && toolAllowed(e.id, role))
   const picked = tool !== 'hand' && tool !== 'comment' && tool !== 'zoom'
   return (
     <>
@@ -304,52 +265,21 @@ function DockTools({ phone = false }: { phone?: boolean }) {
           {TOOL_ICONS.comment}
         </ToolbarControl>
       )}
-      {/* a phone stops here: the rest is for editing */}
-      {!phone && (
-        <>
-          <ToolbarControl
-            side="top"
-            label={t('stage.modePrototype')}
-            aria-pressed={prototypeMode}
-            className={pressed}
-            onClick={() => useStore.getState().setPrototypeMode(!prototypeMode)}
-          >
-            <PrototypeModeIcon />
-          </ToolbarControl>
-          {/* a tool picked from the list shows here, so the current one is always in view */}
-          {picked && (
-            <ToolbarControl side="top" label={label(tool)} aria-pressed className={pressed}>
-              {TOOL_ICONS[tool]}
-            </ToolbarControl>
-          )}
-          <DropdownMenu>
-            <Tooltip label={t('stage.moreTools')} side="top">
-              <DropdownMenuTrigger asChild>
-                <ToolbarButton
-                  aria-label={t('stage.moreTools')}
-                  className={cn('data-[state=open]:bg-paper-deep', pressed)}
-                >
-                  <ChevronDownIcon className={cn('rotate-180')} />
-                </ToolbarButton>
-              </DropdownMenuTrigger>
-            </Tooltip>
-            <DropdownMenuContent side="top" align="start" width="sm">
-              {listed.map((entry) => (
-                <DropdownMenuItem key={entry.id} onSelect={() => setTool(entry.id)}>
-                  {TOOL_ICONS[entry.id]}
-                  {t(entry.label)}
-                  {tool === entry.id ? <CheckIcon size="rail" className="ml-auto" /> : <MenuHint>{entry.key}</MenuHint>}
-                </DropdownMenuItem>
-              ))}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => useStore.getState().setPrototypeMode(!prototypeMode)}>
-                <PrototypeModeIcon size="rail" />
-                {t('stage.modePrototypeShort')}
-                {prototypeMode && <CheckIcon size="rail" className="ml-auto" />}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </>
+      {!phone && picked && (
+        <ToolbarControl side="top" label={label(tool)} aria-pressed className={pressed} onClick={() => setTool('hand')}>
+          {TOOL_ICONS[tool]}
+        </ToolbarControl>
+      )}
+      {!phone && prototypeMode && (
+        <ToolbarControl
+          side="top"
+          label={t('stage.modePrototype')}
+          aria-pressed
+          className={pressed}
+          onClick={() => useStore.getState().setPrototypeMode(false)}
+        >
+          <PrototypeModeIcon />
+        </ToolbarControl>
       )}
     </>
   )

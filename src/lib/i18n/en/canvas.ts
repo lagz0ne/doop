@@ -82,6 +82,7 @@ export const canvas = {
   /* panels */
   resizeLayers: 'Resize Layers panel',
   resizeAgents: 'Resize Agents panel',
+  canvasActionsReviewDescription: 'Present, share, export, or your settings.',
   canvasActionsDescription: 'Layers, import, export, share, Prototype mode, or your account settings.',
   layers: 'Layers',
   importWebsite: 'Import website',

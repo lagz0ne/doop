@@ -82,6 +82,7 @@ export const canvas: Catalog['canvas'] = {
 
   resizeLayers: 'Redimensionar painel Camadas',
   resizeAgents: 'Redimensionar painel Agentes',
+  canvasActionsReviewDescription: 'Apresentar, compartilhar, exportar ou as suas configurações.',
   canvasActionsDescription:
     'Camadas, importar, exportar, compartilhar, modo Protótipo ou as configurações da sua conta.',
   layers: 'Camadas',
