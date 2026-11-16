@@ -5,7 +5,10 @@ import { TOOLS, type Tool } from '../lib/tools'
 import { useOpenThreadCount } from '../lib/comments'
 import { useT } from '../lib/i18n'
 import { TOOL_ICONS } from './Stage'
-import { PeerAvatars, PresenceFace } from './PeerAvatars'
+import type { Presence } from '../../shared/types'
+import { locatePresence } from '../lib/locate'
+import { flyToPresence, PeerAvatars, PresenceFace, presenceLabel } from './PeerAvatars'
+import { Avatar } from './ui/avatar'
 import { Toolbar, ToolbarButton, ToolbarControl, ToolbarDivider, ToolbarDot } from './ui/toolbar'
 import {
   DropdownMenu,
@@ -242,9 +245,12 @@ function PagePicker({ phone = false }: { phone?: boolean }) {
 }
 
 /** Who is here, as the trigger of the one menu for what a reviewer reaches
- *  for now and then: the comments panel (the trigger wears a dot while threads
- *  are open), import, export, share, the design panel, settings and your
- *  name. */
+ *  for now and then: the people and agents here (follow a person, go to where
+ *  an agent works, as a click on their face does in the full layout), the
+ *  comments panel (the trigger wears a dot while threads are open), import,
+ *  export, share, the design panel, settings and your name. The trigger's
+ *  faces are pictures only: a face that followed on click inside the menu's
+ *  button would do both at once. */
 function DockMenu({
   me,
   others,
@@ -286,12 +292,29 @@ function DockMenu({
               aria-label={t('canvas.dockMenu')}
               className="relative flex w-auto gap-1 px-1 sm:w-auto sm:px-1"
             >
-              <PresenceFace name={me.name} image={me.image} color={me.color} kind="user" />
-              {others.length > 0 && (
-                <span className="-ml-[7px] flex items-center">
-                  <PeerAvatars others={others} />
-                </span>
-              )}
+              <span className="flex items-center">
+                <PresenceFace name={me.name} image={me.image} color={me.color} kind="user" />
+                {others.slice(0, FACES - 1).map((p) => (
+                  <PresenceFace
+                    key={p.clientId}
+                    name={p.name}
+                    image={p.image}
+                    color={p.color}
+                    kind={p.kind}
+                    className="-ml-[7px]"
+                  />
+                ))}
+                {others.length > FACES - 1 && (
+                  <Avatar
+                    size={24}
+                    className="-ml-[7px]"
+                    name={`+${others.length - FACES + 1}`}
+                    color="var(--ink-faint)"
+                  >
+                    +{others.length - FACES + 1}
+                  </Avatar>
+                )}
+              </span>
               <ChevronDownIcon className="flex-none text-ink-faint" />
               {openThreads > 0 && <ToolbarDot className="bg-brand" />}
             </ToolbarButton>
@@ -300,6 +323,10 @@ function DockMenu({
       </Tooltip>
       <DropdownMenuContent side="top" align="end" width="lg">
         <DropdownMenuCaption>{here ? t('canvas.hereNow', { names: here }) : t('canvas.justYou')}</DropdownMenuCaption>
+        {others.map((p) => (
+          <PresenceItem key={p.clientId} presence={p} />
+        ))}
+        {others.length > 0 && <DropdownMenuSeparator />}
         {onPanel && (
           <DropdownMenuItem onSelect={() => onPanel('comments')}>
             <CommentIcon />
@@ -353,6 +380,34 @@ function DockMenu({
         )}
       </DropdownMenuContent>
     </DropdownMenu>
+  )
+}
+
+/** How many faces the menu's trigger shows, yours first; a "+N" disc
+ *  counts the rest. */
+const FACES = 3
+
+/** Someone here, in the dock's menu: a person to follow around the canvas
+ *  (and stop following), an agent to go to where it is working. */
+function PresenceItem({ presence: p }: { presence: Presence }) {
+  const t = useT()
+  const followed = useStore((s) => s.following === p.clientId)
+  const locatable = useStore((s) => p.kind === 'agent' && locatePresence(p, s) !== undefined)
+  const face = <PresenceFace name={p.name} image={p.image} color={p.color} kind={p.kind} size={22} />
+  if (p.kind === 'user')
+    return (
+      <DropdownMenuItem onSelect={() => useStore.getState().setFollowing(followed ? null : p.clientId)}>
+        {face}
+        <span className="truncate">
+          {followed ? t('canvas.stopFollowing', { name: p.name }) : t('canvas.followAround', { name: p.name })}
+        </span>
+      </DropdownMenuItem>
+    )
+  return (
+    <DropdownMenuItem disabled={!locatable} onSelect={() => flyToPresence(p)}>
+      {face}
+      <span className="truncate">{presenceLabel(p, t)}</span>
+    </DropdownMenuItem>
   )
 }
 
