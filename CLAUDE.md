@@ -155,7 +155,7 @@ transform still applies, then `bin/doop check --test` and commit (`vendor/doop` 
   each browser's verdicts).
 - The UI hides the team/product chrome (Share, Owned/Shared scopes, Community, Automations,
   Integrations, Webhooks, plan line, Help, and on Home the Agents rail section and the "Ask me what
-  to design" hero) behind `FULL_UI` (`src/lib/fullUi.ts`, our `feat(ui)` patch). Workspaces stay.
+  to design" hero, and on a canvas the getting-started checklist, 0044) behind `FULL_UI` (`src/lib/fullUi.ts`, our `feat(ui)` patch). Workspaces stay.
   Only the entry points are hidden, not the routes. Share comes back for a canvas's own people,
   owner and members (0020, 0032: the link's level and an optional password; visitors give a name,
   and the password, at a door). An MCP agent's account owns what it creates; hand a canvas to its

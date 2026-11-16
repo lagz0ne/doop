@@ -38,6 +38,7 @@ outside this repo.)
 | 2026-11-16 | Asked for a way to change the renderer without the console, and to see which one is drawing. The switches became a pick per browser (0040): Settings → Appearance → Canvas renderer (GPU layer and zoom pictures, each Auto, the trial's default, or a fixed level) and an optional label in the zoom pill naming what draws this load and why, whose menu is the same pick. The levels stay fixed per page load, as the trial needs, so a later pick offers a reload (Chrome's graphics-acceleration switch works the same way, applying on relaunch) |
 | 2026-11-16 | Reported: zooming in or out, frames go white for a moment instead of keeping what they showed through the transition. Measured with a screencast of the zoom (`perf/zoomflash.mjs`): when a zoom settles, frames change how they are drawn (GPU canvas or shell to a live view and back) and previews change level, and each change started from an empty `<img>`. Fixed by handing over the way map tiles do, the old picture kept until the new one has drawn (0041) |
 | 2026-11-16 | A review of the reviewer layout's controls, state by state (each control on a canvas, the owner commenting on it), asked for less: only the Hand and Comment in the dock, nothing of the agents (AI activity, Agents, Connect AI), no design tokens ("maybe for agents only"), the pages to the full height instead of sharing it with Layers ("layers we don't really use"), and one bar on a phone. Done in 0042; it supersedes 0013's Pages/Layers fold and More tools menu. Agents keep everything over MCP; the docked layout or `doop:full-ui` brings the full editor back. The same review found the renderer label striking DOM, not GPU, when the GPU layer failed (0043) |
+| 2026-11-16 | Reported: the getting-started card flashes on opening a canvas and goes away; asked to remove it. The role reads as edit until the canvas loads, so the checklist mounted at once and unmounted when the real role (or a phone's review cap) arrived. It is about connecting an agent, so the reviewer UI drops it with the rest of the agents; with FULL_UI on it waits for the canvas (0044) |
 
 ## Patches
 
@@ -86,6 +87,7 @@ outside this repo.)
 | 0041 | fix(canvas): a frame keeps its picture through a zoom's settle | what drew a frame stays until its replacement has painted: the GPU canvas keeps drawing a frame under its new FrameView (`gpuScene`'s `under`) and FrameSlot keeps the shell beneath one, the view transparent until its picture is decoded or its document shown (1.5 s at most, then the store's `painted`); a preview whose URL changes keeps the last picture beneath the new one until it decodes; a new preview starts with the frame's last shown picture beneath, and an already loaded URL is eager and sync-decoded. Zoom screencasts, two runs per renderer on a software GL: GPU + zoom pictures from 62% white at the settle in 3 of 4 runs to no flag in 8 zooms, DOM from ~80% zooming in to none; 1 flag left in 32 zooms (DOM + pictures, mid-gesture on a stalled run) |
 | 0042 | feat(ui): the reviewer layout keeps to reviewing | with FULL_UI off and floating panels: the dock's tools are the Hand and Comment (no More tools; a key-picked tool or Prototype mode shows as a pressed way back while on); no AI activity or Connect AI; the side panel is the comments alone (no Tasks / Activity / Memory tabs, memory pill, decision toast, working-now line or ⌘K composer); the left panel is the pages at full height (`LayersPanel pagesOnly`, no layer tree, no Tokens tab or rail buttons; 0013's fold removed); a phone has one bar (back, Hand, Comment, the zoom %, Comments, Pages, •••) with Present in the canvas actions and no floating zoom pill |
 | 0043 | fix(canvas): the renderer label names a failed GPU layer GPU, struck through | `rendererName()`: the name was picked from `gpu`, false once the layer failed, so the strike fell on DOM |
+| 0044 | fix(ui): no getting-started checklist in the reviewer UI, or before the canvas loads | `Onboarding` mounts only with FULL_UI and a loaded canvas: `grantedRole` falls back to edit before load, so it showed for a moment and vanished for a reviewer |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -364,6 +366,9 @@ fail: the 10 `elementPanelBrowser` failures pristine v0.14.0 has here, and `oidc
 `elementIdBackfill`, `drawingBrowser`, `fitSelectionBrowser`, `interactionsPanelBrowser` and
 `elementContextMenuBrowser`, each passing when run alone (`drawingBrowser` failing different
 tests on each run under load).
+
+Tests for 0044 (2026-11-16): `reviewerLayoutBrowser` checks there is no Getting started card
+(it fails without the patch); that file and `phoneReviewBrowser` pass, and so does the typecheck.
 
 Upgrading past v0.14.0 (found 2026-11-14): drizzle's migrator applies a migration only when it is
 newer than the last one applied (`created_at` < the journal's `when`), not by name. Upstream's
