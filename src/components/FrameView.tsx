@@ -17,7 +17,7 @@ import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
 import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
-import { useGpuPicture } from '../lib/gpuPictures'
+import { useGpuPicture, useGpuPictures, useGpuUnder } from '../lib/gpuPictures'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
 import { trackShell } from '../lib/shellCull'
 import { keepsDocument, registerZoomPicture, zoomPicturesEnabled } from '../lib/zoomPictures'
@@ -241,11 +241,15 @@ export const FrameView = memo(function FrameView({
   frame,
   stack,
   layoutZoom,
+  overShell = false,
 }: {
   frame: Frame
   /** its place in the page's paint order (the Stage's z-index), front highest */
   stack?: number
   layoutZoom: number
+  /** its FrameShell is still mounted beneath it (FrameSlot), showing the
+   *  frame's picture until this view shows its own */
+  overShell?: boolean
 }) {
   const t = useT()
   const [menuTarget, setMenuTarget] = useState<
@@ -1146,6 +1150,34 @@ export const FrameView = memo(function FrameView({
   const pictureRef = useRef<HTMLDivElement>(null)
   const prototypeMode = useStore((s) => s.prototypeMode)
   const pictureStandby = zoomPictures && live && previews && documentShown && !stream
+
+  /* ---- the handover from what drew the frame before this view ----
+     The GPU canvas (gpuPictures.ts, gpuScene) or the frame's FrameShell
+     (FrameSlot) keeps drawing the frame under this view until the view shows
+     something of its own: its picture decoded, or its document. Until then
+     the surface is transparent, so the frame is the picture it was a moment
+     ago rather than a white box; then the view shows and, a frame later, the
+     one beneath lets it go. Maps hand tiles over the same way: the old tile
+     stays until its replacement has drawn. */
+  const handover = useGpuUnder(frame.id) || overShell
+  const [pictureShown, setPictureShown] = useState(false)
+  const [handoverTimedOut, setHandoverTimedOut] = useState(false)
+  const shown = documentShown || pictureShown || handoverTimedOut
+  useEffect(() => {
+    if (!shown) return
+    /* two animation frames: the opaque surface is on screen before the
+       canvas stops drawing beneath it */
+    let raf = requestAnimationFrame(() => {
+      raf = requestAnimationFrame(() => useGpuPictures.getState().setPainted(frame.id, true))
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [shown, frame.id])
+  useEffect(() => () => useGpuPictures.getState().setPainted(frame.id, false), [frame.id])
+  useEffect(() => {
+    if (!handover || shown) return
+    const timer = window.setTimeout(() => setHandoverTimedOut(true), HANDOVER_MS)
+    return () => window.clearTimeout(timer)
+  }, [handover, shown])
   const keepDocument = keepsDocument({
     documentShown,
     canvasElement: isCanvasElement(frame.html),
@@ -1776,6 +1808,8 @@ export const FrameView = memo(function FrameView({
                  an unselected frame's own stacking context a z-index here would
                  cover the frame's pins and hover outlines */
               zIndex: selected ? stack : undefined,
+              /* the GPU canvas or the shell draws the frame beneath until it has painted */
+              opacity: handover && !shown ? 0 : undefined,
             }}
             onPointerDown={(e) => startDrag(e, 'move', true)}
             onDoubleClick={(e) => {
@@ -1851,7 +1885,7 @@ export const FrameView = memo(function FrameView({
                    (zoomPictures.ts), which shows it by writing this style */
                 style={pictureStandby ? { visibility: 'hidden' } : undefined}
               >
-                <FramePreview frame={frame} />
+                <FramePreview frame={frame} onShown={() => setPictureShown(true)} />
               </div>
             )}
             {!frame.html && (
@@ -2244,14 +2278,39 @@ export const FrameView = memo(function FrameView({
 })
 
 const PREVIEW_RETRIES = 4
+/* the preview URLs this page has loaded (FramePreview), newest last; bounded,
+   since the memory cache is too */
+const shownPreviews = new Set<string>()
+const SHOWN_PREVIEWS_MAX = 2000
+/* per frame, the last picture of its current version that was on screen: a
+   new preview of it (a shell taking over from its view at the end of a zoom)
+   starts with that one beneath it, and it paints in the first frame */
+const lastShown = new Map<string, { version: Frame['updatedAt']; url: string }>()
+function rememberPreview(url: string) {
+  shownPreviews.delete(url)
+  shownPreviews.add(url)
+  if (shownPreviews.size > SHOWN_PREVIEWS_MAX) {
+    const oldest = shownPreviews.values().next().value
+    if (oldest !== undefined) shownPreviews.delete(oldest)
+  }
+}
 /* how long a document shown again after a zoom has to say it painted before
    its picture goes anyway (zoomPictures.ts) */
 const ZOOM_PICTURE_PAINT_MS = 1000
+/* how long a FrameView with the GPU canvas or its shell drawing beneath may
+   take to show its picture or document before it shows anyway (the handover) */
+const HANDOVER_MS = 1500
 
 /** What a frame shows without its document: the persisted preview image.
- *  Lazy and async, so a page of hundreds fetches and decodes the ones near
- *  the view first and never blocks a frame on a decode. */
-function FramePreview({ frame }: { frame: Frame }) {
+ *  Lazy and async the first time, so a page of hundreds fetches and decodes
+ *  the ones near the view first and never blocks a frame on a decode. */
+function FramePreview({
+  frame,
+  onShown,
+}: {
+  frame: Frame
+  /** its picture is decoded and on screen */ onShown?: () => void
+}) {
   const element = isCanvasElement(frame.html)
   /* A preview that fails to load (a render that failed, an anonymous viewer
      past the render budget) is asked for again, a few times and less often
@@ -2260,26 +2319,65 @@ function FramePreview({ frame }: { frame: Frame }) {
   const attempt = retry.version === frame.updatedAt ? retry.count : 0
   const timer = useRef(0)
   useEffect(() => () => window.clearTimeout(timer.current), [])
-  /* The picture is fetched at the scale it is on screen (liveFrames.ts). When
-     the level changes, or the frame does, the <img> keeps painting what it
-     has until the new picture has loaded: a zoom sharpens the previews in
-     place, it never blanks them. */
+  /* The picture is fetched at the scale it is on screen (liveFrames.ts), so a
+     zoom that settles at another level, or a new version of the frame, changes
+     its URL. Chromium paints an <img> whose src changed as empty until the new
+     picture arrives (a lazy one is not even fetched before the next layout), a
+     frame or more of the white surface. So the picture last shown stays
+     beneath, and the new one is drawn over it and takes its place once it is
+     decoded, the way a map keeps its tiles until their replacements have drawn:
+     a zoom sharpens the previews in place, it never blanks them. */
   const level = usePreviewLevel(frame)
   const src = level === null ? null : previewSrc(frame.id, frame.updatedAt, level)
+  const url = src && (attempt ? `${src}&retry=${attempt}` : src)
+  const [shownUrl, setShownUrl] = useState<string | null>(() => {
+    const last = lastShown.get(frame.id)
+    return last && last.version === frame.updatedAt ? last.url : null
+  })
+  const behind = shownUrl !== null && shownUrl !== url ? shownUrl : null
+  /* A picture this page has shown already is in its memory cache, and an
+     eager, synchronously decoded <img> of it paints in its first frame (the
+     HTML spec's list of available images). Lazy and async, the same picture
+     waits for the next layout and a decode, a frame or more of the white
+     surface: what a frame showed for an instant each time it changed between
+     shell and live view. */
+  const cached = !!url && shownPreviews.has(url)
+  const picture = !!frame.html && !element && !!url
   return (
     <div
-      className={cn('block overflow-hidden', element ? 'bg-transparent' : 'bg-white')}
+      className={cn('relative block overflow-hidden', element ? 'bg-transparent' : 'bg-white')}
       style={{ width: frame.width, height: frame.height }}
       data-doop-frame-preview=""
     >
-      {frame.html && !element && src && (
+      {picture && behind && (
         <img
-          src={attempt ? `${src}&retry=${attempt}` : src}
+          key="behind"
+          src={behind}
           alt=""
           draggable={false}
-          loading="lazy"
-          decoding="async"
-          className="pointer-events-none block h-full w-full select-none"
+          decoding="sync"
+          data-doop-preview-behind=""
+          className="pointer-events-none absolute inset-0 block h-full w-full select-none"
+        />
+      )}
+      {picture && (
+        <img
+          key="picture"
+          src={url}
+          alt=""
+          draggable={false}
+          loading={cached ? 'eager' : 'lazy'}
+          decoding={cached ? 'sync' : 'async'}
+          className="pointer-events-none absolute inset-0 block h-full w-full select-none"
+          onLoad={(e) => {
+            rememberPreview(url)
+            const done = () => {
+              setShownUrl(url)
+              lastShown.set(frame.id, { version: frame.updatedAt, url })
+              onShown?.()
+            }
+            e.currentTarget.decode().then(done, done)
+          }}
           onError={() => {
             if (attempt >= PREVIEW_RETRIES) return
             window.clearTimeout(timer.current)
@@ -2393,6 +2491,24 @@ export const FrameSlot = memo(function FrameSlot({
   const engaged = useStore((s) => s.selectedIds.includes(frame.id) || !!s.streams[frame.id])
   /* drawn on the Stage's GPU canvas (gpuPictures.ts): nothing of it in the DOM */
   const gpu = useGpuPicture(frame.id)
-  if (awake || engaged) return <FrameView frame={frame} stack={stack} layoutZoom={layoutZoom} />
-  return gpu ? null : <FrameShell frame={frame} stack={stack} />
+  const mode = awake || engaged ? 'view' : gpu ? 'gpu' : 'shell'
+  /* a shell turning into a view stays beneath it until the view has shown
+     its picture or document (the handover in FrameView), so the frame never
+     blinks white between the two */
+  const [was, setWas] = useState(mode)
+  const [fromShell, setFromShell] = useState(false)
+  if (was !== mode) {
+    setWas(mode)
+    setFromShell(mode === 'view' && was === 'shell')
+  }
+  const painted = useGpuPictures((s) => s.painted.has(frame.id))
+  const overShell = mode === 'view' && fromShell && !painted
+  /* one shape for every mode (shell, then view), so neither is remounted
+     when the other comes or goes: a remounted view reloads its document */
+  return (
+    <>
+      {(mode === 'shell' || overShell) && <FrameShell frame={frame} stack={stack} />}
+      {mode === 'view' && <FrameView frame={frame} stack={stack} layoutZoom={layoutZoom} overShell={overShell} />}
+    </>
+  )
 })
