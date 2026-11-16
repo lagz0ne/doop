@@ -110,6 +110,21 @@ describe.skipIf(!findBrowserPath())('the reviewer layout', () => {
     expect(await page.$(`${dock} [data-renderer]`)).toBe(null)
   })
 
+  it('names the canvas quietly at the top left, out of the dock', async () => {
+    const label = '[aria-label="Canvas"][role="toolbar"]'
+    await page.waitForSelector(label)
+    const box = await page.$eval(label, (el) => {
+      const r = el.getBoundingClientRect()
+      return { left: r.left, top: r.top, width: r.width }
+    })
+    expect(box.left).toBeLessThan(30)
+    expect(box.top).toBeLessThan(30)
+    expect(box.width).toBeLessThanOrEqual(340)
+    expect(await page.$(`${label} [aria-label="Canvas id"]`)).not.toBe(null)
+    expect(await page.$(`${dock} [aria-label="Canvas id"]`)).toBe(null)
+    expect(await page.$(`${dock} [aria-label="All canvases"]`)).toBe(null)
+  })
+
   it('has no left panel: no pages, layer tree or tokens beside the canvas', async () => {
     expect(await page.$('[data-slot="page-section-heading"]')).toBe(null)
     expect(await page.$('[role="tree"]')).toBe(null)

@@ -107,6 +107,7 @@ export const canvas: Catalog['canvas'] = {
   commentsOpen: 'Comentários · {open} abertos',
   pagePicker: 'Página: {page}',
   dockMenu: 'Comentários, pessoas, compartilhar e configurações',
+  canvasLabel: 'Canvas',
   hereNow: 'Aqui agora: {names}',
   commentsClose: 'Fechar comentários',
   changeYourName: 'Mudar seu nome',
