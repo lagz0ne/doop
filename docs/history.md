@@ -39,6 +39,7 @@ outside this repo.)
 | 2026-11-16 | Reported: zooming in or out, frames go white for a moment instead of keeping what they showed through the transition. Measured with a screencast of the zoom (`perf/zoomflash.mjs`): when a zoom settles, frames change how they are drawn (GPU canvas or shell to a live view and back) and previews change level, and each change started from an empty `<img>`. Fixed by handing over the way map tiles do, the old picture kept until the new one has drawn (0041) |
 | 2026-11-16 | A review of the reviewer layout's controls, state by state (each control on a canvas, the owner commenting on it), asked for less: only the Hand and Comment in the dock, nothing of the agents (AI activity, Agents, Connect AI), no design tokens ("maybe for agents only"), the pages to the full height instead of sharing it with Layers ("layers we don't really use"), and one bar on a phone. Done in 0042; it supersedes 0013's Pages/Layers fold and More tools menu. Agents keep everything over MCP; the docked layout or `doop:full-ui` brings the full editor back. The same review found the renderer label striking DOM, not GPU, when the GPU layer failed (0043) |
 | 2026-11-16 | Reported: the getting-started card flashes on opening a canvas and goes away; asked to remove it. The role reads as edit until the canvas loads, so the checklist mounted at once and unmounted when the real role (or a phone's review cap) arrived. It is about connecting an agent, so the reviewer UI drops it with the rest of the agents; with FULL_UI on it waits for the canvas (0044) |
+| 2026-11-16 | Asked for a smaller dock: the pages in it as a pick-one instead of a panel, no renderer label, and import, export, comment threads and the people grouped behind one control, so the dock holds navigation and review and the rest is a second layer. Done in 0045: seven controls where there were fifteen, and no left panel. Page management (add, rename, order) stays in the full editor; a phone keeps its Comments button, the comments being its main way to review |
 
 ## Patches
 
@@ -88,6 +89,7 @@ outside this repo.)
 | 0042 | feat(ui): the reviewer layout keeps to reviewing | with FULL_UI off and floating panels: the dock's tools are the Hand and Comment (no More tools; a key-picked tool or Prototype mode shows as a pressed way back while on); no AI activity or Connect AI; the side panel is the comments alone (no Tasks / Activity / Memory tabs, memory pill, decision toast, working-now line or ⌘K composer); the left panel is the pages at full height (`LayersPanel pagesOnly`, no layer tree, no Tokens tab or rail buttons; 0013's fold removed); a phone has one bar (back, Hand, Comment, the zoom %, Comments, Pages, •••) with Present in the canvas actions and no floating zoom pill |
 | 0043 | fix(canvas): the renderer label names a failed GPU layer GPU, struck through | `rendererName()`: the name was picked from `gpu`, false once the layer failed, so the strike fell on DOM |
 | 0044 | fix(ui): no getting-started checklist in the reviewer UI, or before the canvas loads | `Onboarding` mounts only with FULL_UI and a loaded canvas: `grantedRole` falls back to edit before load, so it showed for a moment and vanished for a reviewer |
+| 0045 | feat(ui): the reviewer dock keeps to moving around and reviewing | the dock: back, name, Hand, Comment, the zoom, a page picker (`PagePicker`, a radio menu), and the faces of who is here opening one menu (`DockMenu`: comments panel with an open-threads dot, import, export, share, design panel, settings, your name); no Pages panel or rail island (`chromeLayout` `bareLeft`), 0042's pages-only faces of LayersPanel/PagesPanel removed; no renderer label or its view option in the dock's zoom control; a phone's Pages sheet becomes the picker |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -369,6 +371,13 @@ tests on each run under load).
 
 Tests for 0044 (2026-11-16): `reviewerLayoutBrowser` checks there is no Getting started card
 (it fails without the patch); that file and `phoneReviewBrowser` pass, and so does the typecheck.
+
+Tests for 0045 (2026-11-16): `reviewerLayoutBrowser` (what the dock leaves out, the renderer label
+kept out with its option on, no left panel, picking a page from the dock, the menu's items and the
+comments opened and closed from it) and `phoneReviewBrowser` (the picker in the phone's dock). The
+17 test files touching the pages, layers, zoom pill and renderer: 249 of 250 pass under load 40;
+the one failure (`reviewerLayoutBrowser`'s full-UI case, a page load timing out) passes alone,
+twice.
 
 Upgrading past v0.14.0 (found 2026-11-14): drizzle's migrator applies a migration only when it is
 newer than the last one applied (`created_at` < the journal's `when`), not by name. Upstream's

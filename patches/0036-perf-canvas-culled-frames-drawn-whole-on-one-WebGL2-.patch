@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 08:11:44 +0000
-Subject: [PATCH 36/44] perf(canvas): culled frames drawn whole on one WebGL2
+Subject: [PATCH 36/45] perf(canvas): culled frames drawn whole on one WebGL2
  canvas, no DOM for them (experiment, doop:gpu)
 
 Every FrameShell is its own compositor layer, and Layerize and Commit run per

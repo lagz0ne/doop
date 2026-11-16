@@ -164,9 +164,12 @@ transform still applies, then `bin/doop check --test` and commit (`vendor/doop` 
   dock along the bottom instead of the top bar, tool rail and side rail. It keeps to reviewing
   (0042): the dock's tools are the Hand and Comment (a key-picked tool or Prototype mode shows as a
   pressed way back while on), nothing of the agents (no AI activity, Connect AI, Tasks, Activity or
-  Memory; the side panel is the comments alone), and the left panel is the pages at full height (no
-  layer tree, no Tokens). The review panel at `/embed` uses the same layout (0014), and so do phones
-  (0021, 0042: back, Hand, Comment, the zoom %, Comments, Pages and ••• in one thumb-sized dock,
+  Memory; the side panel is the comments alone), and no left panel. The dock holds navigation and
+  review (0045): back, name, Hand, Comment, the zoom, a page picker (a pick-one menu; adding and
+  renaming pages is the full editor's), and the faces of who is here, which open one menu for the
+  rest (comments panel, import, export, share, design panel, settings, your name); no renderer
+  label. The review panel at `/embed` uses the same layout (0014), and so do phones (0021, 0042,
+  0045: back, Hand, Comment, the zoom %, Comments, the page picker and ••• in one thumb-sized dock,
   Present inside •••). The docked panel layout shows the full editor. A phone only reviews (0028:
   `store.reviewOnly` caps the role at review on the client, no tool list or Prototype mode, a finger
   pans in Hand and Comment, the page itself does not zoom, a context menu needs a 1600 ms hold,
