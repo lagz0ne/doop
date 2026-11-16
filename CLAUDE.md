@@ -167,8 +167,9 @@ transform still applies, then `bin/doop check --test` and commit (`vendor/doop` 
   Memory; the side panel is the comments alone), and no left panel. The dock holds navigation and
   review (0045): back, name, Hand, Comment, the zoom, a page picker (a pick-one menu; adding and
   renaming pages is the full editor's), and the faces of who is here, which open one menu for the
-  rest (comments panel, import, export, share, design panel, settings, your name); no renderer
-  label. The review panel at `/embed` uses the same layout (0014), and so do phones (0021, 0042,
+  rest (follow a person or go to an agent's frame, 0046: the faces themselves are pictures; then
+  comments panel, import, export, share, design panel, settings, your name); no renderer label.
+  The review panel at `/embed` uses the same layout (0014), and so do phones (0021, 0042,
   0045: back, Hand, Comment, the zoom %, Comments, the page picker and ••• in one thumb-sized dock,
   Present inside •••). The docked panel layout shows the full editor. A phone only reviews (0028:
   `store.reviewOnly` caps the role at review on the client, no tool list or Prototype mode, a finger

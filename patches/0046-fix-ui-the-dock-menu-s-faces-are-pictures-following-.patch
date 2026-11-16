@@ -1,0 +1,222 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 06:42:39 +0000
+Subject: [PATCH 46/46] fix(ui): the dock menu's faces are pictures, following
+ is a row
+
+The reviewer dock's menu trigger drew the presence stack (PeerAvatars),
+whose faces are buttons of their own: a person's face follows them, an
+agent's flies the camera to its frame. Inside the trigger, a click on a
+face did both, so opening the menu started following whoever was there.
+
+The trigger now draws plain faces (yours first, up to three, then a "+N"
+disc) and nothing inside it is a button. What a face did moves into the
+menu, one row per person or agent under "Here now": a person's row
+follows them (and stops), an agent's goes to where it works, disabled
+while doop cannot tell where that is. PeerAvatars exports presenceLabel
+and flyToPresence for it; the full layout's stack is unchanged.
+
+Test: reviewerLayoutBrowser has a peer in the room, finds no button
+inside the trigger, opens the menu with nobody followed, and follows the
+peer from their row.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/components/CanvasDock.tsx       | 75 +++++++++++++++++++++++++----
+ src/components/PeerAvatars.tsx      | 19 +++++---
+ tests/reviewerLayoutBrowser.test.ts | 22 ++++++++-
+ 3 files changed, 97 insertions(+), 19 deletions(-)
+
+diff --git a/src/components/CanvasDock.tsx b/src/components/CanvasDock.tsx
+index 2dc5212..55e32a6 100644
+--- a/src/components/CanvasDock.tsx
++++ b/src/components/CanvasDock.tsx
+@@ -5,7 +5,10 @@ import { TOOLS, type Tool } from '../lib/tools'
+ import { useOpenThreadCount } from '../lib/comments'
+ import { useT } from '../lib/i18n'
+ import { TOOL_ICONS } from './Stage'
+-import { PeerAvatars, PresenceFace } from './PeerAvatars'
++import type { Presence } from '../../shared/types'
++import { locatePresence } from '../lib/locate'
++import { flyToPresence, PeerAvatars, PresenceFace, presenceLabel } from './PeerAvatars'
++import { Avatar } from './ui/avatar'
+ import { Toolbar, ToolbarButton, ToolbarControl, ToolbarDivider, ToolbarDot } from './ui/toolbar'
+ import {
+   DropdownMenu,
+@@ -242,9 +245,12 @@ function PagePicker({ phone = false }: { phone?: boolean }) {
+ }
+ 
+ /** Who is here, as the trigger of the one menu for what a reviewer reaches
+- *  for now and then: the comments panel (the trigger wears a dot while threads
+- *  are open), import, export, share, the design panel, settings and your
+- *  name. */
++ *  for now and then: the people and agents here (follow a person, go to where
++ *  an agent works, as a click on their face does in the full layout), the
++ *  comments panel (the trigger wears a dot while threads are open), import,
++ *  export, share, the design panel, settings and your name. The trigger's
++ *  faces are pictures only: a face that followed on click inside the menu's
++ *  button would do both at once. */
+ function DockMenu({
+   me,
+   others,
+@@ -286,12 +292,29 @@ function DockMenu({
+               aria-label={t('canvas.dockMenu')}
+               className="relative flex w-auto gap-1 px-1 sm:w-auto sm:px-1"
+             >
+-              <PresenceFace name={me.name} image={me.image} color={me.color} kind="user" />
+-              {others.length > 0 && (
+-                <span className="-ml-[7px] flex items-center">
+-                  <PeerAvatars others={others} />
+-                </span>
+-              )}
++              <span className="flex items-center">
++                <PresenceFace name={me.name} image={me.image} color={me.color} kind="user" />
++                {others.slice(0, FACES - 1).map((p) => (
++                  <PresenceFace
++                    key={p.clientId}
++                    name={p.name}
++                    image={p.image}
++                    color={p.color}
++                    kind={p.kind}
++                    className="-ml-[7px]"
++                  />
++                ))}
++                {others.length > FACES - 1 && (
++                  <Avatar
++                    size={24}
++                    className="-ml-[7px]"
++                    name={`+${others.length - FACES + 1}`}
++                    color="var(--ink-faint)"
++                  >
++                    +{others.length - FACES + 1}
++                  </Avatar>
++                )}
++              </span>
+               <ChevronDownIcon className="flex-none text-ink-faint" />
+               {openThreads > 0 && <ToolbarDot className="bg-brand" />}
+             </ToolbarButton>
+@@ -300,6 +323,10 @@ function DockMenu({
+       </Tooltip>
+       <DropdownMenuContent side="top" align="end" width="lg">
+         <DropdownMenuCaption>{here ? t('canvas.hereNow', { names: here }) : t('canvas.justYou')}</DropdownMenuCaption>
++        {others.map((p) => (
++          <PresenceItem key={p.clientId} presence={p} />
++        ))}
++        {others.length > 0 && <DropdownMenuSeparator />}
+         {onPanel && (
+           <DropdownMenuItem onSelect={() => onPanel('comments')}>
+             <CommentIcon />
+@@ -356,6 +383,34 @@ function DockMenu({
+   )
+ }
+ 
++/** How many faces the menu's trigger shows, yours first; a "+N" disc
++ *  counts the rest. */
++const FACES = 3
++
++/** Someone here, in the dock's menu: a person to follow around the canvas
++ *  (and stop following), an agent to go to where it is working. */
++function PresenceItem({ presence: p }: { presence: Presence }) {
++  const t = useT()
++  const followed = useStore((s) => s.following === p.clientId)
++  const locatable = useStore((s) => p.kind === 'agent' && locatePresence(p, s) !== undefined)
++  const face = <PresenceFace name={p.name} image={p.image} color={p.color} kind={p.kind} size={22} />
++  if (p.kind === 'user')
++    return (
++      <DropdownMenuItem onSelect={() => useStore.getState().setFollowing(followed ? null : p.clientId)}>
++        {face}
++        <span className="truncate">
++          {followed ? t('canvas.stopFollowing', { name: p.name }) : t('canvas.followAround', { name: p.name })}
++        </span>
++      </DropdownMenuItem>
++    )
++  return (
++    <DropdownMenuItem disabled={!locatable} onSelect={() => flyToPresence(p)}>
++      {face}
++      <span className="truncate">{presenceLabel(p, t)}</span>
++    </DropdownMenuItem>
++  )
++}
++
+ /** Hand and Comment. A tool picked by its key shows beside them while it is
+  *  the current one, and Prototype mode while it is on, each pressed, so the
+  *  canvas's mode is always in view; a click on either goes back to the Hand
+diff --git a/src/components/PeerAvatars.tsx b/src/components/PeerAvatars.tsx
+index df19761..8d7ebbf 100644
+--- a/src/components/PeerAvatars.tsx
++++ b/src/components/PeerAvatars.tsx
+@@ -57,7 +57,7 @@ const stacked = 'relative z-[1] -ml-[7px] rounded-full first:ml-0'
+ const clickable =
+   'transition-transform hover:z-10 hover:-translate-y-px focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-faint'
+ 
+-function presenceLabel(p: Presence, t: Translate) {
++export function presenceLabel(p: Presence, t: Translate) {
+   const agent = p.owner ? t('canvas.agentOf', { owner: p.owner }) : t('canvas.agent')
+   return `${p.name}${p.kind === 'agent' ? ` (${agent})` : ''}${p.status ? ` — ${p.status}` : ''}`
+ }
+@@ -104,15 +104,18 @@ function JumpAvatar({ presence: p, glazeDelay }: { presence: Presence; glazeDela
+       type="button"
+       className={cn(stacked, clickable, 'relative', active && 'z-[2]')}
+       title={t('canvas.goWhereWorking', { label: presenceLabel(p, t) })}
+-      onClick={() => {
+-        const s = useStore.getState()
+-        const at = locatePresence(p, s)
+-        if (!at) return
+-        if ('frameId' in at) s.requestFlyTo(at.frameId)
+-        else s.requestFlyToPoint(at.point.x, at.point.y)
+-      }}
++      onClick={() => flyToPresence(p)}
+     >
+       {face}
+     </button>
+   )
+ }
++
++/** Moves the camera to where an agent is working, if it can be found. */
++export function flyToPresence(p: Presence) {
++  const s = useStore.getState()
++  const at = locatePresence(p, s)
++  if (!at) return
++  if ('frameId' in at) s.requestFlyTo(at.frameId)
++  else s.requestFlyToPoint(at.point.x, at.point.y)
++}
+diff --git a/tests/reviewerLayoutBrowser.test.ts b/tests/reviewerLayoutBrowser.test.ts
+index 9b75ea7..8cf4c4e 100644
+--- a/tests/reviewerLayoutBrowser.test.ts
++++ b/tests/reviewerLayoutBrowser.test.ts
+@@ -9,7 +9,8 @@ import { fixtureUrl, openBrowser, type TestBrowser } from './browser'
+    with Hand and Comment as its tools and nothing of the agents'; the Hand
+    first; no left panel, the pages a picker in the dock; the rest (comments,
+    import, export, settings, your name) in one menu behind the faces of who is
+-   here; the right-hand panel the comments alone. The editor page itself,
++   here (pictures only: following someone is a row of that menu); the
++   right-hand panel the comments alone. The editor page itself,
+    mounted by the clipboard fixture. */
+ 
+ /* the harness's own type is declared in canvasClipboardBrowser.test.ts */
+@@ -156,6 +157,25 @@ describe.skipIf(!findBrowserPath())('the reviewer layout', () => {
+     await page.waitForFunction(() => !document.querySelector('[aria-label="Agents panel"]'))
+   })
+ 
++  it('opens the menu without following anyone, and follows a person from their row', async () => {
++    await store(
++      page,
++      `(useStore.setState({ presences: { ...s.presences, peer: { clientId: 'peer', name: 'Ada', color: '#c33', kind: 'user' } } }), true)`,
++    )
++    const menu = `${dock} [aria-label="Comments, people, share and settings"]`
++    await page.waitForFunction((sel) => document.querySelector(sel)?.textContent?.includes('A'), {}, menu)
++    /* the faces on the trigger are pictures, not buttons of their own */
++    expect(await page.$$eval(`${menu} button`, (els) => els.length)).toBe(0)
++    await page.click(menu)
++    await page.waitForSelector('[role="menu"]')
++    expect(await store(page, 's.following')).toBe(null)
++    const follow = await page.waitForSelector('xpath/.//*[@role="menuitem"][contains(., "Follow Ada")]')
++    await follow!.click()
++    await page.waitForFunction(() => !document.querySelector('[role="menu"]'))
++    expect(await store(page, 's.following')).toBe('peer')
++    await store(page, `(s.setFollowing(null), s.removePresence('peer'), true)`)
++  })
++
+   it('keeps the full layout when doop:full-ui is on', async () => {
+     const full = await browser.newPage()
+     await full.setViewport({ width: 1440, height: 900 })

@@ -90,6 +90,7 @@ outside this repo.)
 | 0043 | fix(canvas): the renderer label names a failed GPU layer GPU, struck through | `rendererName()`: the name was picked from `gpu`, false once the layer failed, so the strike fell on DOM |
 | 0044 | fix(ui): no getting-started checklist in the reviewer UI, or before the canvas loads | `Onboarding` mounts only with FULL_UI and a loaded canvas: `grantedRole` falls back to edit before load, so it showed for a moment and vanished for a reviewer |
 | 0045 | feat(ui): the reviewer dock keeps to moving around and reviewing | the dock: back, name, Hand, Comment, the zoom, a page picker (`PagePicker`, a radio menu), and the faces of who is here opening one menu (`DockMenu`: comments panel with an open-threads dot, import, export, share, design panel, settings, your name); no Pages panel or rail island (`chromeLayout` `bareLeft`), 0042's pages-only faces of LayersPanel/PagesPanel removed; no renderer label or its view option in the dock's zoom control; a phone's Pages sheet becomes the picker |
+| 0046 | fix(ui): the dock menu's faces are pictures, following is a row | 0045's menu trigger held the presence stack, whose faces are buttons (follow a person, fly to an agent's frame): opening the menu also followed whoever was there. The trigger draws plain faces (yours, up to three, then +N); each person or agent is a row of the menu (follow / stop following; go where the agent works, disabled while unknown) |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -378,6 +379,10 @@ comments opened and closed from it) and `phoneReviewBrowser` (the picker in the 
 17 test files touching the pages, layers, zoom pill and renderer: 249 of 250 pass under load 40;
 the one failure (`reviewerLayoutBrowser`'s full-UI case, a page load timing out) passes alone,
 twice.
+
+Tests for 0046 (2026-11-16): `reviewerLayoutBrowser` puts a peer in the room, finds no button
+inside the menu's trigger (0045's held the stack's buttons), opens the menu with nobody followed and
+follows the peer from their row; that file and `phoneReviewBrowser` pass, and so does the typecheck.
 
 Upgrading past v0.14.0 (found 2026-11-14): drizzle's migrator applies a migration only when it is
 newer than the last one applied (`created_at` < the journal's `when`), not by name. Upstream's
