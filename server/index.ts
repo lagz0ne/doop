@@ -2688,7 +2688,20 @@ if (env.isProduction) {
 /* ------------------------------------------------- websocket */
 
 const server = http.createServer(app)
-const wss = new WebSocketServer({ server, path: '/ws' })
+/* permessage-deflate, which ws leaves off. The canvas reaches the editor as one
+   message, every page's frames with their HTML: 5.7 MB for a canvas of 459
+   frames, which a 4G connection took about five seconds to bring in, the stage
+   empty all the while. HTML compresses well across frames (to 312 KB at zlib's
+   default level and window, ~65 ms on the zlib thread pool, not the event
+   loop); a small window loses most of that (1.4 MB at 12 bits), so the window
+   stays. Without context takeover each message is compressed on its own, so a
+   connection carries no compression history between messages; ws leaves the
+   small ones (under 1 KB: cursors, presence) uncompressed. */
+const wss = new WebSocketServer({
+  server,
+  path: '/ws',
+  perMessageDeflate: { serverNoContextTakeover: true, clientNoContextTakeover: true },
+})
 
 /* A signed-out visitor on a link-shared canvas watches it as a guest
    (guestCanvasRole): view only, silent like a view-as session (no presence,
