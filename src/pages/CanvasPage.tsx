@@ -1165,7 +1165,11 @@ export function CanvasPage({
           {/* the presence pill in the bar already carries each agent's status
               line; this per-agent stack is only for windows too narrow for it */}
           {!reviewerLayout && <WorkingNow style={{ left: chrome.left }} className="min-[1180px]:hidden" />}
-          {!readOnly && <Onboarding canvasId={canvasId} />}
+          {/* the getting-started checklist is about connecting an agent: not part
+              of the reviewer UI, and only once the canvas (and so the role) has
+              loaded, since the role reads as edit until then and the card would
+              show for a moment and vanish for a reviewer */}
+          {FULL_UI && canvas && !readOnly && <Onboarding canvasId={canvasId} />}
           <AccessBanner guest={guest} onSignUp={onSignUp} onSignIn={onSignIn} />
           {!isMobile &&
             (layersOpen ? (

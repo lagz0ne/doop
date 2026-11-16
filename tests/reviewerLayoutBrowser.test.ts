@@ -75,6 +75,9 @@ describe.skipIf(!findBrowserPath())('the reviewer layout', () => {
     expect(labels).toEqual(expect.arrayContaining(['Hand (H)', 'Comment (C)']))
     for (const gone of ['More tools', 'Prototype', 'AI activity', 'Connect AI'])
       expect(labels.some((label) => label?.startsWith(gone))).toBe(false)
+    /* nor the getting-started checklist, which is about connecting one */
+    const texts = await page.$$eval('header span', (els) => els.map((el) => el.textContent?.trim()))
+    expect(texts).not.toContain('Getting started')
   })
 
   it('shows a tool picked by its key while it is the current one, and goes back to the Hand', async () => {
