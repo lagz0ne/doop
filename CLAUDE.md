@@ -143,7 +143,10 @@ transform still applies, then `bin/doop check --test` and commit (`vendor/doop` 
   are counted in real pans and zooms, and the browser keeps what is smoother there (the GPU layer
   only ever on hardware WebGL2). `doop:render-trial='off'` turns the trial off (an unset switch is
   then off, and nothing is measured or sent), `'force'` lets a software GL in; its state is
-  `doop:render-trial-data`. `docs/history.md` has what each measured and what is not verified.
+  `doop:render-trial-data`. The two switches are also a pick per browser in Settings → Appearance →
+  Canvas renderer (0040: Auto removes the key), and the zoom pill can show a renderer label (a view
+  option, off by default, from the zoom menu or that card): GPU, DOM or Live, `· pictures`, and
+  auto / set / reload, with each level's reason in its tooltip and the pick in its menu. `docs/history.md` has what each measured and what is not verified.
 - Render reports: each browser in the trial posts its counts to `/api/telemetry/render` (0038: a
   closed schema, nothing about the canvas or the account). The server forwards them as OTLP/HTTP
   JSON logs when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (with `OTEL_SERVICE_NAME` and

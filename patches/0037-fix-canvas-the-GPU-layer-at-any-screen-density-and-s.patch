@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 15:44:07 +0000
-Subject: [PATCH 37/39] fix(canvas): the GPU layer at any screen density, and
+Subject: [PATCH 37/40] fix(canvas): the GPU layer at any screen density, and
  shells where the GPU falls short
 
 For the GPU picture layer (doop:gpu): it fixes what that commit left
