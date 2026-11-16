@@ -7,9 +7,10 @@ import { fixtureUrl, openBrowser, type TestBrowser } from './browser'
 /* The reviewer layout (FULL_UI off, a desktop, floating panels): one dock
    along the bottom instead of the top bar, the tool rail and the side rail,
    with Hand and Comment as its tools and nothing of the agents'; the Hand
-   first; the left panel the pages alone; the right-hand panel the comments
-   alone, opened from the dock. The editor page itself, mounted by the
-   clipboard fixture. */
+   first; no left panel, the pages a picker in the dock; the rest (comments,
+   import, export, settings, your name) in one menu behind the faces of who is
+   here; the right-hand panel the comments alone. The editor page itself,
+   mounted by the clipboard fixture. */
 
 /* the harness's own type is declared in canvasClipboardBrowser.test.ts */
 type Harness = { canvasClipboardHarness: { seed: (frames: Frame[]) => void } }
@@ -45,7 +46,8 @@ async function open(page: Page, fullUi: 'on' | 'off') {
     () => !!(window as unknown as Harness).canvasClipboardHarness && !!document.querySelector('.stage'),
   )
   await page.evaluate((frame) => (window as unknown as Harness).canvasClipboardHarness.seed([frame]), FRAME)
-  /* the harness hides the chrome and closes Layers; this test is about them */
+  /* the harness hides the chrome and closes Layers; this test is about them
+     (and a Layers panel left open must not show in the reviewer layout) */
   await store(page, `(useStore.setState({ uiHidden: false }), s.setLayersOpen(true), true)`)
 }
 
@@ -98,31 +100,60 @@ describe.skipIf(!findBrowserPath())('the reviewer layout', () => {
     expect(await page.$(mode)).toBe(null)
   })
 
-  it('gives the left panel to the pages alone: no layer tree, no tokens', async () => {
-    await page.waitForSelector('[data-slot="page-section-heading"]')
-    expect(await page.$('[data-slot="frame-section-heading"]')).toBe(null)
-    expect(await page.$('[role="tree"]')).toBe(null)
-    expect(await page.$('[role="tab"][id$="-trigger-tokens"]')).toBe(null)
+  it('keeps the dock to moving around and reviewing', async () => {
+    const labels = await page.$$eval(`${dock} [aria-label]`, (els) => els.map((el) => el.getAttribute('aria-label')))
+    for (const gone of ['Import', 'Export', 'Share', 'Settings', 'Comments', 'Hide renderer', 'Show renderer'])
+      expect(labels).not.toContain(gone)
+    /* the renderer label stays out even when its view option is on */
+    await store(page, `(s.viewOptions.renderer || s.toggleViewOption('renderer'), true)`)
+    expect(await page.$(`${dock} [data-renderer]`)).toBe(null)
   })
 
-  it('opens the comments from the dock and closes them again', async () => {
-    const comments = `${dock} [aria-label^="Comments"]`
-    expect(await page.$eval(comments, (el) => el.getAttribute('aria-pressed'))).toBe('false')
-    await page.click(comments)
-    await page.waitForFunction(
-      (sel) => document.querySelector(sel)?.getAttribute('aria-pressed') === 'true',
-      {},
-      comments,
+  it('has no left panel: no pages, layer tree or tokens beside the canvas', async () => {
+    expect(await page.$('[data-slot="page-section-heading"]')).toBe(null)
+    expect(await page.$('[role="tree"]')).toBe(null)
+    expect(await page.$('[aria-label="Layers panel"]')).toBe(null)
+  })
+
+  it('picks the page from the dock', async () => {
+    await store(
+      page,
+      `(useStore.setState({ canvas: { ...s.canvas, pages: [{ id: 'p1', name: 'Page 1' }, { id: 'p2', name: 'Flows' }] } }), true)`,
     )
+    const picker = `${dock} [aria-label^="Page: "]`
+    await page.waitForSelector(`${dock} [aria-label="Page: Page 1"]`)
+    await page.click(picker)
+    const flows = '[role="menuitemradio"]:last-of-type'
+    await page.waitForSelector(flows)
+    expect(await page.$$eval('[role="menuitemradio"]', (items) => items.map((el) => el.textContent))).toEqual([
+      'Page 1',
+      'Flows',
+    ])
+    await page.click(flows)
+    await page.waitForSelector(`${dock} [aria-label="Page: Flows"]`)
+    expect(await store(page, 's.activePageId')).toBe('p2')
+  })
+
+  it('holds the comments, import, export, settings and your name in one menu', async () => {
+    const menu = `${dock} [aria-label="Comments, people, share and settings"]`
+    const items = async () => {
+      await page.click(menu)
+      await page.waitForSelector('[role="menu"]')
+      return page.$$eval('[role="menu"] [role="menuitem"]', (els) => els.map((el) => el.textContent?.trim() ?? ''))
+    }
+    const listed = await items()
+    for (const item of ['Comments', 'Import', 'Export', 'Settings']) expect(listed).toContain(item)
+    expect(listed.some((text) => text.endsWith('Change your name'))).toBe(true)
+    /* the comments open from it, and close from it again */
+    await page.click('[role="menu"] [role="menuitem"]')
+    await page.waitForFunction(() => !document.querySelector('[role="menu"]'))
     expect(await store(page, 's.panelTab')).toBe('comments')
     /* the comments alone: no Agents, activity or memory tabs */
+    await page.waitForSelector('[aria-label="Agents panel"]')
     expect(await page.$$eval('[aria-label="Agents panel"] [role="tab"]', (tabs) => tabs.length)).toBe(1)
-    await page.click(comments)
-    await page.waitForFunction(
-      (sel) => document.querySelector(sel)?.getAttribute('aria-pressed') === 'false',
-      {},
-      comments,
-    )
+    expect(await items()).toContain('Close comments')
+    await page.click('[role="menu"] [role="menuitem"]')
+    await page.waitForFunction(() => !document.querySelector('[aria-label="Agents panel"]'))
   })
 
   it('keeps the full layout when doop:full-ui is on', async () => {
