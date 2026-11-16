@@ -9,7 +9,8 @@ import { fixtureUrl, openBrowser, type TestBrowser } from './browser'
    with Hand and Comment as its tools and nothing of the agents'; the Hand
    first; no left panel, the pages a picker in the dock; the rest (comments,
    import, export, settings, your name) in one menu behind the faces of who is
-   here; the right-hand panel the comments alone. The editor page itself,
+   here (pictures only: following someone is a row of that menu); the
+   right-hand panel the comments alone. The editor page itself,
    mounted by the clipboard fixture. */
 
 /* the harness's own type is declared in canvasClipboardBrowser.test.ts */
@@ -154,6 +155,25 @@ describe.skipIf(!findBrowserPath())('the reviewer layout', () => {
     expect(await items()).toContain('Close comments')
     await page.click('[role="menu"] [role="menuitem"]')
     await page.waitForFunction(() => !document.querySelector('[aria-label="Agents panel"]'))
+  })
+
+  it('opens the menu without following anyone, and follows a person from their row', async () => {
+    await store(
+      page,
+      `(useStore.setState({ presences: { ...s.presences, peer: { clientId: 'peer', name: 'Ada', color: '#c33', kind: 'user' } } }), true)`,
+    )
+    const menu = `${dock} [aria-label="Comments, people, share and settings"]`
+    await page.waitForFunction((sel) => document.querySelector(sel)?.textContent?.includes('A'), {}, menu)
+    /* the faces on the trigger are pictures, not buttons of their own */
+    expect(await page.$$eval(`${menu} button`, (els) => els.length)).toBe(0)
+    await page.click(menu)
+    await page.waitForSelector('[role="menu"]')
+    expect(await store(page, 's.following')).toBe(null)
+    const follow = await page.waitForSelector('xpath/.//*[@role="menuitem"][contains(., "Follow Ada")]')
+    await follow!.click()
+    await page.waitForFunction(() => !document.querySelector('[role="menu"]'))
+    expect(await store(page, 's.following')).toBe('peer')
+    await store(page, `(s.setFollowing(null), s.removePresence('peer'), true)`)
   })
 
   it('keeps the full layout when doop:full-ui is on', async () => {

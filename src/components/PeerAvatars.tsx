@@ -57,7 +57,7 @@ const stacked = 'relative z-[1] -ml-[7px] rounded-full first:ml-0'
 const clickable =
   'transition-transform hover:z-10 hover:-translate-y-px focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-faint'
 
-function presenceLabel(p: Presence, t: Translate) {
+export function presenceLabel(p: Presence, t: Translate) {
   const agent = p.owner ? t('canvas.agentOf', { owner: p.owner }) : t('canvas.agent')
   return `${p.name}${p.kind === 'agent' ? ` (${agent})` : ''}${p.status ? ` — ${p.status}` : ''}`
 }
@@ -104,15 +104,18 @@ function JumpAvatar({ presence: p, glazeDelay }: { presence: Presence; glazeDela
       type="button"
       className={cn(stacked, clickable, 'relative', active && 'z-[2]')}
       title={t('canvas.goWhereWorking', { label: presenceLabel(p, t) })}
-      onClick={() => {
-        const s = useStore.getState()
-        const at = locatePresence(p, s)
-        if (!at) return
-        if ('frameId' in at) s.requestFlyTo(at.frameId)
-        else s.requestFlyToPoint(at.point.x, at.point.y)
-      }}
+      onClick={() => flyToPresence(p)}
     >
       {face}
     </button>
   )
+}
+
+/** Moves the camera to where an agent is working, if it can be found. */
+export function flyToPresence(p: Presence) {
+  const s = useStore.getState()
+  const at = locatePresence(p, s)
+  if (!at) return
+  if ('frameId' in at) s.requestFlyTo(at.frameId)
+  else s.requestFlyToPoint(at.point.x, at.point.y)
 }
