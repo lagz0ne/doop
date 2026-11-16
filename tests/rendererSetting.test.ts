@@ -4,6 +4,7 @@ import {
   GPU_KEY,
   ZOOM_PICTURES_KEY,
   readRendererSetting,
+  rendererName,
   rendererState,
   settingApplied,
   writeRendererSetting,
@@ -104,5 +105,20 @@ describe('rendererState', () => {
       zoomSource: 'fixed',
       auto: false,
     })
+  })
+})
+
+describe('rendererName', () => {
+  const on = trial({ gpu: { level: 'on', reason: 'override', mode: 'on' } })
+  const off = trial({ gpu: { level: 'off', reason: 'override', mode: 'off' } })
+
+  it('names a failed GPU layer GPU (struck through), not DOM', () => {
+    expect(rendererName(rendererState(on, { culling: true, gpuFailed: true }))).toBe('gpu')
+  })
+
+  it('names what draws otherwise', () => {
+    expect(rendererName(rendererState(on, { culling: true, gpuFailed: false }))).toBe('gpu')
+    expect(rendererName(rendererState(off, { culling: true, gpuFailed: false }))).toBe('dom')
+    expect(rendererName(rendererState(on, { culling: false, gpuFailed: false }))).toBe('live')
   })
 })

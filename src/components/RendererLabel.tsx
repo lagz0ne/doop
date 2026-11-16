@@ -7,6 +7,7 @@ import {
   isGpuSetting,
   isZoomPicturesSetting,
   readRendererSetting,
+  rendererName,
   rendererState,
   settingApplied,
   writeRendererSetting,
@@ -28,6 +29,12 @@ import {
 } from './ui/dropdown-menu'
 import { ToolbarButton } from './ui/toolbar'
 import { Tooltip } from './ui/tooltip'
+
+const NAME = {
+  live: 'canvas.rendererLive',
+  gpu: 'canvas.rendererGpu',
+  dom: 'canvas.rendererDom',
+} as const satisfies Record<ReturnType<typeof rendererName>, PlainMessageKey>
 
 const SOURCE: Record<RendererSource, PlainMessageKey> = {
   trial: 'canvas.rendererSourceTrial',
@@ -64,7 +71,8 @@ export function RendererLabel() {
     if (writeRendererSetting(next)) setSetting(next)
   }
 
-  const name = t(state.allLive ? 'canvas.rendererLive' : state.gpu ? 'canvas.rendererGpu' : 'canvas.rendererDom')
+  const renderer = rendererName(state)
+  const name = t(NAME[renderer])
   const tag = pending
     ? t('canvas.rendererTagReload')
     : state.auto
@@ -92,7 +100,7 @@ export function RendererLabel() {
         <DropdownMenuTrigger asChild>
           <ToolbarButton
             aria-label={t('canvas.rendererAria')}
-            data-renderer={state.allLive ? 'live' : state.gpu ? 'gpu' : 'dom'}
+            data-renderer={renderer}
             data-zoom-pictures={state.zoomPictures ? 'on' : 'off'}
             className="w-auto min-w-0 gap-1 whitespace-nowrap px-1.5 font-mono text-caption sm:w-auto sm:px-1.5"
           >

@@ -131,3 +131,11 @@ export function rendererState(
     auto: gpuSource === 'trial' || zoomSource === 'trial',
   }
 }
+
+/** The renderer the label names. A GPU layer that was asked for and failed
+ *  is still named GPU (the label strikes it through), not DOM: the shells
+ *  that stand in for it are the fallback, not what this browser runs with. */
+export function rendererName(s: RendererState): 'live' | 'gpu' | 'dom' {
+  if (s.allLive) return 'live'
+  return s.gpu || s.gpuFailed ? 'gpu' : 'dom'
+}
