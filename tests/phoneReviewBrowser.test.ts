@@ -93,6 +93,17 @@ describe.skipIf(!findBrowserPath())('a phone in the reviewer layout', () => {
     expect(await page.$('[role="status"]')).toBe(null)
   })
 
+  it('is one bar: the zoom level in the dock, Present in the canvas actions', async () => {
+    expect(await page.$eval(dock, (el) => !!el.querySelector('[aria-label="Zoom level"]'))).toBe(true)
+    /* what is on screen: the top bar stays mounted, hidden */
+    const shown = (label: string) =>
+      page.$$eval(`[aria-label="${label}"]`, (els) => els.filter((el) => el.getClientRects().length > 0).length)
+    expect(await shown('Zoom out')).toBe(0)
+    expect(await shown('Zoom in')).toBe(0)
+    expect(await shown('Present prototype')).toBe(0)
+    expect(await shown('Zoom level')).toBe(1)
+  })
+
   it('holds the page still: no browser zoom, no double-tap zoom', async () => {
     const meta = await page.$eval('meta[name="viewport"]', (el) => (el as HTMLMetaElement).content)
     expect(meta).toContain('user-scalable=no')

@@ -137,7 +137,7 @@ import { AGENTS_MIN, LAYERS_MIN, fitPanelWidths } from '../lib/panelWidths'
 import { loadCanvasFonts } from '../lib/customFonts'
 import { t as translate, useT } from '../lib/i18n'
 import { NO_INSETS, type StageInsets } from '../lib/viewFit'
-import { usePanelLayout } from '../lib/panelLayout'
+import { getPanelLayout, usePanelLayout } from '../lib/panelLayout'
 
 /* The floating chrome's geometry, in px from the canvas area's edges. The
    panels sit 14px in from the edge; on the right the resizable Agents panel
@@ -616,6 +616,8 @@ export function CanvasPage({
     const state = useStore.getState()
     /* the composer is an editor's: readers (and guests) have none */
     if (guest || !state.canvas || !canEditOpenCanvas(state)) return
+    /* the reviewer layout's panel is the comments alone (CanvasDock.tsx) */
+    if (!FULL_UI && getPanelLayout() !== 'docked') return
     setShowActivity(true)
     if (state.uiHidden) state.toggleUiHidden()
     state.setPanelTab('tasks')
@@ -753,11 +755,14 @@ export function CanvasPage({
   const docked = usePanelLayout() === 'docked' && !isMobile
   const panelSurface = docked ? 'docked' : 'floating'
   /* The reviewer layout (FULL_UI off, floating panels): no top bar, no tool
-     rail, no side rail; one dock along the bottom holds them (CanvasDock.tsx),
-     the Layers section folds under the pages, the right panel starts closed
-     and the Hand is the first tool. Present stays at the top right. A phone
-     gets the same, its dock trimmed to reviewing with the rest in the canvas
-     actions sheet, its panels still sheets. The docked layout keeps its own. */
+     rail, no side rail; one dock along the bottom holds what reviewing needs
+     (CanvasDock.tsx), the left panel is the pages alone, the right panel the
+     comments alone and starts closed, and the Hand is the first tool. The
+     agents' chrome (AI activity, Connect AI, memory, the composer) stays in
+     the full layout: agents work over MCP. Present stays at the top right. A
+     phone gets the same with its dock as the one control on screen, the zoom
+     level in it and Present in the canvas actions sheet, its panels still
+     sheets. The docked layout keeps its own. */
   const reviewerLayout = !FULL_UI && !docked
   const deskReview = reviewerLayout && !isMobile
   const [zoomSlot, setZoomSlot] = useState<HTMLElement | null>(null)
@@ -1112,8 +1117,8 @@ export function CanvasPage({
           bounds={stageBounds}
           docked={docked}
           toolsElsewhere={reviewerLayout}
-          /* a phone pinches; its zoom pill floats above the dock */
-          zoomSlot={deskReview ? zoomSlot : null}
+          /* in the reviewer layout the zoom is drawn into the dock, a phone's too */
+          zoomSlot={reviewerLayout ? zoomSlot : null}
         />
         <div
           className={cn(
@@ -1125,31 +1130,34 @@ export function CanvasPage({
           style={rulerInset || docked || reviewerLayout ? { top: 'var(--chrome-top)', left: rulerInset } : undefined}
         >
           <div className="pointer-events-none absolute top-3.5 right-[var(--chrome-right)] z-30 flex flex-col items-end gap-2 transition-[right] duration-150 [&>*]:pointer-events-auto max-md:top-[56px] max-md:right-2 max-md:left-2">
-            {pendingProposal && mutedProposal !== pendingProposal.id && !(showActivity && panelTab === 'memory') && (
-              <div className="flex items-center rounded-[10px] bg-surface shadow-ring">
-                <Button
-                  variant="bare"
-                  className="h-8 pr-1 pl-3 text-[12px] font-medium text-ink hover:bg-transparent hover:text-ink"
-                  onClick={() => {
-                    useStore.getState().setPanelTab('memory')
-                    setShowActivity(true)
-                  }}
-                >
-                  <DoopMark size={12} /> {t('canvas.memorySuggestionReview')}
-                </Button>
-                <Button
-                  variant="bare"
-                  size="icon-sm"
-                  className="mr-1 size-6 rounded-[6px] text-ink-faint"
-                  title={t('canvas.hideForNow')}
-                  aria-label={t('canvas.hideForNow')}
-                  onClick={() => setMutedProposal(pendingProposal.id)}
-                >
-                  <XIcon className="size-3" />
-                </Button>
-              </div>
-            )}
-            {decisionToast && (
+            {!reviewerLayout &&
+              pendingProposal &&
+              mutedProposal !== pendingProposal.id &&
+              !(showActivity && panelTab === 'memory') && (
+                <div className="flex items-center rounded-[10px] bg-surface shadow-ring">
+                  <Button
+                    variant="bare"
+                    className="h-8 pr-1 pl-3 text-[12px] font-medium text-ink hover:bg-transparent hover:text-ink"
+                    onClick={() => {
+                      useStore.getState().setPanelTab('memory')
+                      setShowActivity(true)
+                    }}
+                  >
+                    <DoopMark size={12} /> {t('canvas.memorySuggestionReview')}
+                  </Button>
+                  <Button
+                    variant="bare"
+                    size="icon-sm"
+                    className="mr-1 size-6 rounded-[6px] text-ink-faint"
+                    title={t('canvas.hideForNow')}
+                    aria-label={t('canvas.hideForNow')}
+                    onClick={() => setMutedProposal(pendingProposal.id)}
+                  >
+                    <XIcon className="size-3" />
+                  </Button>
+                </div>
+              )}
+            {!reviewerLayout && decisionToast && (
               <Button
                 variant="bare"
                 className="max-w-full items-center gap-2.5 whitespace-normal rounded-[12px] bg-surface px-3.5 py-2.5 text-left font-normal shadow-pop transition-shadow hover:bg-surface hover:shadow-ring-hover sm:max-w-[320px] [&_svg]:text-ink-soft"
@@ -1170,7 +1178,7 @@ export function CanvasPage({
           </div>
           {/* the presence pill in the bar already carries each agent's status
               line; this per-agent stack is only for windows too narrow for it */}
-          <WorkingNow style={{ left: chrome.left }} className="min-[1180px]:hidden" />
+          {!reviewerLayout && <WorkingNow style={{ left: chrome.left }} className="min-[1180px]:hidden" />}
           {!readOnly && <Onboarding canvasId={canvasId} />}
           <IosAppPrompt />
           <AccessBanner guest={guest} onSignUp={onSignUp} onSignIn={onSignIn} />
@@ -1179,7 +1187,7 @@ export function CanvasPage({
               <LayersPanel
                 onAddFrame={addFrame}
                 surface={panelSurface}
-                foldLayers={reviewerLayout}
+                pagesOnly={reviewerLayout}
                 resize={{
                   label: t('canvas.resizeLayers'),
                   edge: 'right',
@@ -1193,7 +1201,7 @@ export function CanvasPage({
                 }}
               />
             ) : (
-              <LayersRailToggle docked={docked} />
+              <LayersRailToggle docked={docked} pagesOnly={reviewerLayout} />
             ))}
           {isMobile && !reviewerLayout && !showActivity && !guest && (
             <MobilePanelTabs
@@ -1227,6 +1235,7 @@ export function CanvasPage({
             <ActivityPanel
               canvasId={canvasId}
               onClose={() => setShowActivity(false)}
+              commentsOnly={reviewerLayout}
               surface={panelSurface}
               style={{ right: docked ? 0 : EDGE, ...belowDock }}
               resize={{
@@ -1257,18 +1266,17 @@ export function CanvasPage({
           )}
           {reviewerLayout && (
             <>
-              <BarPill
-                className={cn(
-                  'pointer-events-auto absolute top-2.5 z-[38] transition-[right] duration-150',
-                  isMobile ? 'right-2.5' : 'right-[var(--chrome-right)]',
-                )}
-              >
-                {presentButton}
-              </BarPill>
+              {/* a phone's Present is in the canvas actions sheet: its dock is the one control on screen */}
+              {!isMobile && (
+                <BarPill className="pointer-events-auto absolute top-2.5 right-[var(--chrome-right)] z-[38] transition-[right] duration-150">
+                  {presentButton}
+                </BarPill>
+              )}
               {isMobile ? (
                 <CanvasDock
                   phone
                   onBack={guest || linkGuest ? null : () => navigate('/')}
+                  zoomSlot={setZoomSlot}
                   panelTab={panelTab}
                   panelOpen={showActivity}
                   onPanel={guest ? null : openPanel}
@@ -1289,7 +1297,6 @@ export function CanvasPage({
                   panelTab={panelTab}
                   panelOpen={showActivity}
                   onPanel={guest ? null : openPanel}
-                  onConnect={readOnly || linkGuest ? null : openConnect}
                   inspector={
                     readOnly
                       ? null
@@ -1322,16 +1329,30 @@ export function CanvasPage({
                   {reviewerLayout ? canvas?.name || t('canvas.canvasActions') : t('canvas.canvasActions')}
                 </SheetTitle>
                 <SheetDescription className="mt-1 text-xs text-ink-soft">
-                  {t('canvas.canvasActionsDescription')}
+                  {t(reviewerLayout ? 'canvas.canvasActionsReviewDescription' : 'canvas.canvasActionsDescription')}
                 </SheetDescription>
               </div>
               {/* the same glyphs as the desktop bar and islands; pages live
                   in the Layers sheet, as on desktop. In the reviewer layout
-                  the dock has Layers, and this sheet takes what the desktop
-                  dock holds beyond it that reviewing uses: share, export, your
-                  name and settings (a phone is review-only, so no import,
-                  Connect AI or Prototype mode) */}
+                  the dock has Pages, and this sheet takes what the desktop
+                  dock and the top right hold beyond it that reviewing uses:
+                  Present, share, export, your name and settings (a phone is
+                  review-only, so no import or Prototype mode, and the
+                  reviewer layout has no Connect AI) */}
               <div className="grid gap-2 p-4 [&_svg]:size-3.5 [&_svg]:text-ink-soft">
+                {reviewerLayout && (
+                  <Button
+                    variant="ghost"
+                    className="h-11 justify-start gap-2.5 border-line bg-surface px-4"
+                    disabled={!playFrom}
+                    onClick={() => {
+                      setShowMobileActions(false)
+                      setPresenting(playFrom)
+                    }}
+                  >
+                    <PlayIcon /> {playFrom ? t('canvas.presentPrototype') : t('canvas.addFrameToPresent')}
+                  </Button>
+                )}
                 {!reviewerLayout && (
                   <Button
                     variant="ghost"
@@ -1378,19 +1399,6 @@ export function CanvasPage({
                     }}
                   >
                     <ExportIcon /> {t('canvas.export')}
-                  </Button>
-                )}
-                {/* the top bar's Connect AI, which this layout does not show */}
-                {reviewerLayout && !readOnly && !linkGuest && (
-                  <Button
-                    variant="ghost"
-                    className="h-11 justify-start gap-2.5 border-line bg-surface px-4"
-                    onClick={() => {
-                      setShowMobileActions(false)
-                      openConnect()
-                    }}
-                  >
-                    <PlusIcon /> {t('canvas.connectAi')}
                   </Button>
                 )}
                 {/* the phone's tool strip has no room for the Edit / Prototype
@@ -1448,7 +1456,7 @@ export function CanvasPage({
               <LayersPanel
                 onAddFrame={addFrame}
                 surface="inline"
-                foldLayers={reviewerLayout}
+                pagesOnly={reviewerLayout}
                 onClose={() => setShowMobileLayers(false)}
               />
             </SheetContent>
@@ -1478,7 +1486,12 @@ export function CanvasPage({
               className="max-h-[calc(100svh-56px)] gap-0 rounded-t-2xl border-line bg-surface p-0 shadow-pop data-[side=bottom]:h-[min(78svh,680px)]"
             >
               <SheetTitle className="sr-only">{t('canvas.canvasActivity')}</SheetTitle>
-              <ActivityPanel canvasId={canvasId} onClose={() => setShowActivity(false)} surface="inline" />
+              <ActivityPanel
+                canvasId={canvasId}
+                onClose={() => setShowActivity(false)}
+                commentsOnly={reviewerLayout}
+                surface="inline"
+              />
             </SheetContent>
           </Sheet>
         </>

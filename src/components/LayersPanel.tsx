@@ -222,23 +222,12 @@ function visibleRows(frames: Frame[], query: string, expanded: Set<string>): Vis
 /** The Layers rail: every frame on the canvas, opening into the element tree
  *  of its HTML. Selection runs both ways — a row selects the element in the
  *  frame, a click in the frame highlights its row. */
-/* the reviewer layout folds the Layers section under the pages by default;
-   whether it is open is this browser's choice (CanvasDock.tsx) */
-const LAYERS_SECTION_KEY = 'doop:layers-section'
-function readLayersSection(): boolean {
-  try {
-    return localStorage.getItem(LAYERS_SECTION_KEY) === '1'
-  } catch {
-    return false
-  }
-}
-
 export function LayersPanel({
   onAddFrame,
   surface = 'floating',
   onClose,
   resize,
-  foldLayers = false,
+  pagesOnly = false,
 }: {
   onAddFrame: () => void
   /* 'inline' when the panel is filling a mobile Sheet rather than floating */
@@ -246,27 +235,17 @@ export function LayersPanel({
   /** inline only: the sheet's close, in the collapse control's place */
   onClose?: () => void
   resize?: PanelResize
-  /** the reviewer layout: the Layers section can fold away under the pages,
-   *  and starts folded, since someone reviewing moves between pages and
-   *  frames rather than through a frame's layers */
-  foldLayers?: boolean
+  /** the reviewer layout (CanvasDock.tsx): the pages alone, the whole height
+   *  of the panel. Someone reviewing moves between pages and frames on the
+   *  canvas, not through a frame's layer tree, and the design tokens are the
+   *  agents' (over MCP); both stay in the full layout */
+  pagesOnly?: boolean
 }) {
-  const [sectionOpen, setSectionOpen] = useState(readLayersSection)
-  const layersShown = !foldLayers || sectionOpen
-  function toggleSection() {
-    const next = !sectionOpen
-    setSectionOpen(next)
-    try {
-      localStorage.setItem(LAYERS_SECTION_KEY, next ? '1' : '0')
-    } catch {
-      /* the choice holds for this visit */
-    }
-  }
   /* a row's pointerleave never fires if the panel goes away under it */
   useEffect(() => () => useStore.getState().setHoveredLayer(null), [])
   /* which of the panel's two faces shows: the layer tree, or the design
      tokens; in the store so the collapsed rail can open straight onto one */
-  const tab = useStore((s) => s.layersTab)
+  const tab = useStore((s) => (pagesOnly ? 'layers' : s.layersTab))
   const setTab = useStore((s) => s.setLayersTab)
   /* view and comment links browse the tree; nothing in it moves or changes */
   const readOnly = useStore((s) => !canEditOpenCanvas(s))
@@ -571,17 +550,37 @@ export function LayersPanel({
     e.stopPropagation()
   }
 
+  const collapse =
+    surface === 'inline' ? (
+      <PanelClose label={t('common.close')} onClick={onClose} />
+    ) : (
+      <Tooltip label={t('panels.layersCollapsePanel')} side="bottom" align="end">
+        <Button
+          variant="bare"
+          size="icon-sm"
+          className="size-7 shrink-0 rounded-[7px] text-ink-faint hover:bg-paper-deep hover:text-ink"
+          aria-label={t('panels.layersCollapsePanel')}
+          onClick={() => setLayersOpen(false)}
+        >
+          <PanelCollapseIcon className="size-3.5" />
+        </Button>
+      </Tooltip>
+    )
+  const panelClass = cn(
+    surface === 'floating' && 'top-2.5 bottom-3.5 left-3.5 w-[264px]',
+    surface === 'docked' && 'left-0 w-[264px] border-r',
+  )
+
+  if (pagesOnly) {
+    return (
+      <Panel surface={surface} resize={resize} className={panelClass}>
+        <PagesPanel fill headerEnd={collapse} />
+      </Panel>
+    )
+  }
+
   return (
-    <Panel
-      surface={surface}
-      resize={resize}
-      className={cn(
-        surface === 'floating' && 'top-2.5 left-3.5 w-[264px]',
-        /* folded, the panel is as tall as its pages, not the window */
-        surface === 'floating' && (layersShown || tab !== 'layers' ? 'bottom-3.5' : 'max-h-[calc(100%-24px)]'),
-        surface === 'docked' && 'left-0 w-[264px] border-r',
-      )}
-    >
+    <Panel surface={surface} resize={resize} className={panelClass}>
       {/* the panel's two faces as icon tabs, the collapse control at the far end */}
       <PanelTabsRoot value={tab} onValueChange={(next) => setTab(next as typeof tab)} className="flex-none">
         <PanelHeader className="h-10 pl-2">
@@ -605,21 +604,7 @@ export function LayersPanel({
               {t('panels.layersTabTokens')}
             </PanelIconTab>
           </PanelTabs>
-          {surface === 'inline' ? (
-            <PanelClose label={t('common.close')} onClick={onClose} />
-          ) : (
-            <Tooltip label={t('panels.layersCollapsePanel')} side="bottom" align="end">
-              <Button
-                variant="bare"
-                size="icon-sm"
-                className="size-7 shrink-0 rounded-[7px] text-ink-faint hover:bg-paper-deep hover:text-ink"
-                aria-label={t('panels.layersCollapsePanel')}
-                onClick={() => setLayersOpen(false)}
-              >
-                <PanelCollapseIcon className="size-3.5" />
-              </Button>
-            </Tooltip>
-          )}
+          {collapse}
         </PanelHeader>
       </PanelTabsRoot>
       {tab === 'components' && <ComponentsPanel />}
@@ -633,38 +618,8 @@ export function LayersPanel({
           {/* Figma's order: the pages at the top, the frames of the active page
           under them, the search at the bottom within thumb's reach */}
           <PagesPanel />
-          {!layersShown && (
-            <Button
-              variant="bare"
-              className="mx-2 mt-1 mb-2 h-9 flex-none justify-start gap-2 rounded-[7px] border-t border-line-soft px-2 font-medium text-ink hover:bg-paper-deep"
-              aria-expanded={false}
-              onClick={toggleSection}
-            >
-              <LayersIcon className="size-3.5 text-ink-faint" />
-              {t('panels.layersTitle')}
-              <ChevronRightIcon className="ml-auto size-3.5 text-ink-faint" />
-            </Button>
-          )}
-        </>
-      )}
-      {tab === 'layers' && layersShown && (
-        <>
           <div className={cn('mt-1.5 flex h-6 flex-none items-center justify-between pr-2.5 pl-3.5', sectionHeading)}>
-            <span data-slot="frame-section-heading" className={cn(sectionHeading, 'flex items-center gap-1')}>
-              {foldLayers && (
-                <Tooltip label={t('panels.layersHideSection')} side="bottom" align="start">
-                  <Button
-                    variant="bare"
-                    size="icon-sm"
-                    className={cn(sectionBtn, '-ml-1.5')}
-                    aria-label={t('panels.layersHideSection')}
-                    aria-expanded
-                    onClick={toggleSection}
-                  >
-                    <ChevronDownIcon className="size-3.5" />
-                  </Button>
-                </Tooltip>
-              )}
+            <span data-slot="frame-section-heading" className={sectionHeading}>
               {t('panels.layersTitle')}
             </span>
             <span className="flex gap-1">
@@ -752,7 +707,7 @@ export function LayersPanel({
 
 /** The collapsed rail: a narrow column at the panel's spot with the expand
  *  control and the Layers mark. The frame count lives in the tooltip only. */
-export function LayersRailToggle({ docked = false }: { docked?: boolean }) {
+export function LayersRailToggle({ docked = false, pagesOnly = false }: { docked?: boolean; pagesOnly?: boolean }) {
   const setLayersOpen = useStore((s) => s.setLayersOpen)
   const count = usePageCanvas()?.frames.length ?? 0
   const t = useT()
@@ -770,36 +725,41 @@ export function LayersRailToggle({ docked = false }: { docked?: boolean }) {
       <ToolbarControl label={t('panels.layersExpandPanel')} side="right" onClick={() => setLayersOpen(true)}>
         <PanelExpandIcon />
       </ToolbarControl>
-      <ToolbarControl
-        label={t('panels.layersRailCount', { count })}
-        side="right"
-        onClick={() => {
-          useStore.getState().setLayersTab('layers')
-          setLayersOpen(true)
-        }}
-      >
-        <LayersIcon />
-      </ToolbarControl>
-      <ToolbarControl
-        label={t('components.title')}
-        side="right"
-        onClick={() => {
-          useStore.getState().setLayersTab('components')
-          setLayersOpen(true)
-        }}
-      >
-        <ComponentIcon />
-      </ToolbarControl>
-      <ToolbarControl
-        label={t('panels.layersTabTokens')}
-        side="right"
-        onClick={() => {
-          useStore.getState().setLayersTab('tokens')
-          setLayersOpen(true)
-        }}
-      >
-        <BracesIcon />
-      </ToolbarControl>
+      {/* the reviewer layout's panel is the pages alone: expanding is all */}
+      {!pagesOnly && (
+        <>
+          <ToolbarControl
+            label={t('panels.layersRailCount', { count })}
+            side="right"
+            onClick={() => {
+              useStore.getState().setLayersTab('layers')
+              setLayersOpen(true)
+            }}
+          >
+            <LayersIcon />
+          </ToolbarControl>
+          <ToolbarControl
+            label={t('components.title')}
+            side="right"
+            onClick={() => {
+              useStore.getState().setLayersTab('components')
+              setLayersOpen(true)
+            }}
+          >
+            <ComponentIcon />
+          </ToolbarControl>
+          <ToolbarControl
+            label={t('panels.layersTabTokens')}
+            side="right"
+            onClick={() => {
+              useStore.getState().setLayersTab('tokens')
+              setLayersOpen(true)
+            }}
+          >
+            <BracesIcon />
+          </ToolbarControl>
+        </>
+      )}
     </Toolbar>
   )
 }

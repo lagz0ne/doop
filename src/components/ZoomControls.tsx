@@ -69,6 +69,9 @@ export function ZoomControls({
   }
   /* phones have no room for shortcut hints, and no keyboard to use them */
   const hint = (keys: string) => !isMobile && <MenuHint>{keys}</MenuHint>
+  /* in a phone's dock the level alone: a pinch zooms, and the menu has the
+     steps, so the dock stays one row a thumb can reach */
+  const steps = !(inline && isMobile)
   const stepBtn = 'min-h-0'
 
   return (
@@ -86,9 +89,11 @@ export function ZoomControls({
       )}
     >
       {viewOptions.renderer && <RendererLabel />}
-      <ToolbarButton aria-label={t('canvas.zoomOut')} className={stepBtn} onClick={onZoomOut}>
-        <MinusIcon />
-      </ToolbarButton>
+      {steps && (
+        <ToolbarButton aria-label={t('canvas.zoomOut')} className={stepBtn} onClick={onZoomOut}>
+          <MinusIcon />
+        </ToolbarButton>
+      )}
       <DropdownMenu open={open} onOpenChange={onOpenChange}>
         <DropdownMenuTrigger asChild>
           <ToolbarButton
@@ -168,9 +173,11 @@ export function ZoomControls({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-      <ToolbarButton aria-label={t('canvas.zoomIn')} className={stepBtn} onClick={onZoomIn}>
-        <PlusIcon />
-      </ToolbarButton>
+      {steps && (
+        <ToolbarButton aria-label={t('canvas.zoomIn')} className={stepBtn} onClick={onZoomIn}>
+          <PlusIcon />
+        </ToolbarButton>
+      )}
     </Toolbar>
   )
 }
