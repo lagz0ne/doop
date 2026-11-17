@@ -42,10 +42,10 @@ import * as workspaces from './workspaces.ts'
 import { auth, getUserName, isBanned } from './auth.ts'
 import { capture, captureThrottled } from './analytics.ts'
 import { captureFeature, captureTokenResults } from './featureEvents.ts'
-import { renderFrame } from './screenshot.ts'
+import { renderedHeight } from './renderLimits.ts'
+import { renderFrame, renderFrameRegion, type FrameCrop, type FrameRegion } from './screenshot.ts'
 import { imagesForFrames } from './assets.ts'
 import type { FrameImage } from '../shared/imageDescriptions.ts'
-import { renderedHeight } from './renderLimits.ts'
 import {
   MAX_PDF_FRAMES,
   PDF_UNAVAILABLE_MESSAGE,
@@ -221,11 +221,6 @@ function editFrameSource(frame: Frame, find: string, replace: string): { html: s
 const MAX_MCP_PDF_BYTES = 15_000_000
 
 /** Tells the agent a very tall frame's screenshot stops short of its bottom. */
-function croppedNote(frame: Frame, scale: number): string {
-  const height = renderedHeight(frame, scale)
-  return height < Math.round(frame.height) ? ` — cropped to the top ${height}px (pixel budget)` : ''
-}
-
 function err(message: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true }
 }
@@ -2482,37 +2477,98 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
       title: 'Screenshot a frame',
       _meta: previewToolMeta('Rendering the frame…', 'Frame rendered'),
       description:
-        'Render a frame and return a PNG screenshot of it — this is how you SEE your design. Always review your work with this after creating or updating a frame, then fix what looks wrong (spacing, overflow, contrast, alignment) and check again. Iterate until it actually looks good, not just until the HTML seems right.',
+        'Render a frame and return a screenshot of it — this is how you SEE your design. Always review your work with this after creating or updating a frame, then fix what looks wrong (spacing, overflow, contrast, alignment) and check again. Iterate until it actually looks good, not just until the HTML seems right. An image costs tokens by its pixel area, not its file size: a 1440×900 frame at scale 1 is about 1,700 tokens for Claude, at 0.5 about 430. Glance at a frame with scale 0.5 or max_size; read small type with element_id or region (a crop at full scale) instead of the whole frame at 2x. A frame much taller than about 2,500 px is shrunk by the model to fit, so read it in parts with region.',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         frame_id: z.string(),
         scale: z
-          .union([z.literal(1), z.literal(2)])
+          .number()
+          .min(0.1)
+          .max(2)
           .optional()
-          .describe('Device scale factor: 1 (default) or 2 for a retina-resolution image'),
+          .describe('Pixels per design px: 1 (default), 2 for retina detail, 0.5 or less for a cheap overview'),
+        max_size: z
+          .number()
+          .int()
+          .min(64)
+          .max(4096)
+          .optional()
+          .describe('Longest edge of the image in px; lowers scale to fit (e.g. 800 for a glance)'),
+        element_id: z
+          .string()
+          .optional()
+          .describe('Crop to the element carrying this data-doop-id (from get_frame, inspect_frame or a comment)'),
+        padding: z.number().min(0).max(400).optional().describe('px of context kept around element_id (default 16)'),
+        region: z
+          .object({ x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive() })
+          .optional()
+          .describe(
+            "Crop to this box in the frame's design px (from inspect_frame's rects, or a slice of a tall frame)",
+          ),
+        format: z
+          .enum(['png', 'jpeg'])
+          .optional()
+          .describe('png (default, exact) or jpeg (a smaller download; the same token cost)'),
         agent_name: agentName.optional(),
       },
     },
-    async ({ frame_id, scale, agent_name }) => {
+    async ({ frame_id, scale, max_size, element_id, padding, region, format, agent_name }) => {
       const live = frameFor(frame_id, 'view')
       if (!live) return noFrame(frame_id)
+      if (element_id && region) return err('pass element_id or region, not both')
       arrive(live.canvasId, agent_name)
       /* a snapshot: an edit landing while Chromium renders must not stamp
          this older image with its newer updatedAt, or the cache would serve
          it as current for the next five minutes */
       const f = { ...live }
+      const crop: FrameCrop | undefined = element_id
+        ? { elementId: element_id, padding: padding ?? 16 }
+        : region
+          ? { region }
+          : undefined
+      const type = format ?? 'png'
       try {
-        const png = await renderFrame(f, scale ?? 1)
-        /* the ChatGPT card loads this exact image next — serve it from cache */
-        primeImage(f, scale ?? 1, png)
+        let density = scale ?? 1
+        let image: Buffer
+        let shown: FrameRegion = { x: 0, y: 0, width: Math.round(f.width), height: Math.round(f.height) }
+        if (crop) {
+          /* the box is known only once the page is laid out: render it at the
+             asked scale, then again smaller when max_size says so */
+          const first = await renderFrameRegion(f, density, { type, crop })
+          shown = first.region
+          image = first.image
+          const fit = max_size ? max_size / Math.max(shown.width, shown.height) : Infinity
+          if (fit < density) {
+            density = fit
+            image = (await renderFrameRegion(f, density, { type, crop: { region: shown } })).image
+          }
+        } else {
+          if (max_size) density = Math.min(density, max_size / Math.max(shown.width, shown.height))
+          image = await renderFrame(f, density, { type })
+          /* past the pixel budget the render stops partway down (renderLimits.ts) */
+          shown = { ...shown, height: renderedHeight(f, density) }
+          /* the ChatGPT card loads this exact image next — serve it from cache */
+          if (type === 'png' && (density === 1 || density === 2)) primeImage(f, density, image)
+        }
+        const px = `${Math.round(shown.width * density)}×${Math.round(shown.height * density)} px`
+        const part = crop
+          ? ` region ${shown.x},${shown.y} ${shown.width}×${shown.height} of ${Math.round(f.width)}×${Math.round(f.height)}`
+          : ` ${Math.round(f.width)}×${Math.round(f.height)}`
+        /* a frame past the pixel budget is rendered from the top down to it */
+        const budgetCut =
+          !crop && shown.height < Math.round(f.height) ? ` Cut to the top ${shown.height}px (pixel budget).` : ''
+        const tall =
+          !crop && shown.height * density > 2600 && shown.height > 2 * shown.width
+            ? ' This frame is tall: the model shrinks an image past about 2,500 px, so read it in parts with region (e.g. y 0, 1500, 3000… at height 1600).'
+            : ''
         return withPreview(
           withFeedbackNotice(
             {
               content: [
-                { type: 'image' as const, data: png.toString('base64'), mimeType: 'image/png' },
+                { type: 'image' as const, data: image.toString('base64'), mimeType: `image/${type}` },
                 {
                   type: 'text' as const,
-                  text: `Screenshot of “${f.name}” (${f.width}×${f.height}@${scale ?? 1}x, html ${f.html.length} bytes)${croppedNote(f, scale ?? 1)}`,
+                  text: `Screenshot of “${f.name}”${part} @${Math.round(density * 1000) / 1000}x = ${px}, html ${f.html.length} bytes.${budgetCut}${tall}`,
                 },
               ],
             },
@@ -2523,6 +2579,7 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
           [f],
         )
       } catch (e) {
+        if (e instanceof Error && e.name === 'CropError') return err(e.message)
         return err(`screenshot failed: ${e instanceof Error ? e.message : String(e)}`)
       }
     },

@@ -248,6 +248,13 @@
   the readable canvases with people on them. `get_canvas` carries the same as `people`. The room
   registers the reader at startup (`registerRoomReader`), so the MCP server never imports the
   room. Tests: `mcpFocus.test.ts`.
+- MCP screenshots (`get_frame_screenshot`, `renderFrameRegion` in `server/screenshot.ts`): an image
+  costs a model tokens by pixel area, so the tool takes any `scale` from 0.1 to 2, `max_size` (the
+  long edge in px), and a crop: `element_id` (the box of a `data-doop-id`, `padding` around it,
+  default 16) or `region` (design px), kept inside the frame, plus `format` png or jpeg. Its text
+  line names the region and the image's px size, and tells the agent to read a frame taller than a
+  model shows whole in slices. Only whole-frame PNGs at 1x or 2x prime the image cache. Tests:
+  `mcpScreenshotCrop.test.ts` (real Chromium).
 - `ws` 8.18.0 - WebSocket server for realtime multiplayer (cursors, presence, frame edits,
   activity feed) over one room per canvas.
 - Custom fonts (`shared/fonts.ts`, `server/fonts.ts`, `server/fontFile.ts`): font libraries, one

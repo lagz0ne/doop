@@ -447,6 +447,51 @@ async function inspectOn(page: Page, frame: Frame): Promise<FrameInspection> {
   }
 }
 
+/** A part of a frame in design px, as get_frame_screenshot crops it. */
+export interface FrameRegion {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** What to cut out of a frame's render: a region, or the box of the element
+ *  carrying this data-doop-id with `padding` px around it. */
+export type FrameCrop = { region: FrameRegion } | { elementId: string; padding?: number }
+
+/** A crop that names nothing in the frame: the caller's mistake, said as is.
+ *  Told apart by name, so code importing this module's mocks needs no class. */
+export class CropError extends Error {
+  override name = 'CropError'
+}
+
+/** The crop's box, kept inside the frame: the canvas clips a frame to its
+ *  own size, so nothing outside it is part of the design. */
+async function cropBox(page: Page, frame: Frame, crop: FrameCrop, scale: number): Promise<FrameRegion> {
+  let box: FrameRegion | null
+  if ('region' in crop) box = crop.region
+  else {
+    const id = crop.elementId
+    box = await page.evaluate((id: string) => {
+      const el = document.querySelector(`[data-doop-id="${CSS.escape(id)}"]`)
+      if (!el) return null
+      const r = el.getBoundingClientRect()
+      return { x: r.left + scrollX, y: r.top + scrollY, width: r.width, height: r.height }
+    }, id)
+    if (!box) throw new CropError(`no element with data-doop-id="${id}" in this frame`)
+    const pad = Math.max(0, crop.padding ?? 0)
+    box = { x: box.x - pad, y: box.y - pad, width: box.width + 2 * pad, height: box.height + 2 * pad }
+  }
+  const x = Math.max(0, Math.floor(box.x))
+  const y = Math.max(0, Math.floor(box.y))
+  const right = Math.min(Math.round(frame.width), Math.ceil(box.x + box.width))
+  const bottom = Math.min(Math.round(frame.height), Math.ceil(box.y + box.height))
+  if (right - x < 1 || bottom - y < 1) throw new CropError('the crop is outside the frame or empty')
+  /* the pixel budget bounds the crop, as it does a layer's (layerClip) */
+  const budget = renderedHeight({ width: right - x, height: bottom - y }, scale)
+  return { x, y, width: right - x, height: Math.min(bottom - y, budget) }
+}
+
 export interface RenderOptions extends PageOptions {
   type?: 'png' | 'jpeg' | 'webp'
   quality?: number
@@ -455,6 +500,9 @@ export interface RenderOptions extends PageOptions {
    *  matches (a layer export); rejects with LayerNotFoundError when nothing
    *  visible matches */
   layer?: string
+  /** cut the render to a region or to an element's box (get_frame_screenshot);
+   *  rejects with CropError when that names nothing in the frame */
+  crop?: FrameCrop
 }
 
 export function renderFrame(
@@ -463,6 +511,16 @@ export function renderFrame(
   scale: number = 1,
   opts: RenderOptions = {},
 ): Promise<Buffer> {
+  return renderFrameRegion(frame, scale, opts).then((r) => r.image)
+}
+
+/** renderFrame, also saying which part of the frame the image shows, in
+ *  design px. */
+export function renderFrameRegion(
+  frame: Frame,
+  scale: number = 1,
+  opts: RenderOptions = {},
+): Promise<{ image: Buffer; region: FrameRegion }> {
   return renderer.withPage(
     'rendering the frame',
     RENDER_TIMEOUT_MS,
@@ -517,7 +575,12 @@ async function layerClip(page: Page, selector: string, frame: Frame, scale: numb
   return { x, y, width: clipWidth, height: Math.min(Math.ceil(box.bottom), height, y + budget) - y }
 }
 
-async function screenshotOn(page: Page, frame: Frame, scale: number, opts: RenderOptions): Promise<Buffer> {
+async function screenshotOn(
+  page: Page,
+  frame: Frame,
+  scale: number,
+  opts: RenderOptions,
+): Promise<{ image: Buffer; region: FrameRegion }> {
   const width = Math.max(1, Math.round(frame.width))
   const fullHeight = Math.max(1, Math.round(frame.height))
   const height = renderedHeight(frame, scale, opts.maxHeight)
@@ -528,13 +591,15 @@ async function screenshotOn(page: Page, frame: Frame, scale: number, opts: Rende
   const type = opts.type ?? 'png'
   const clip = opts.layer
     ? await layerClip(page, opts.layer, frame, scale)
-    : height < fullHeight
-      ? { x: 0, y: 0, width, height }
-      : undefined
+    : opts.crop
+      ? await cropBox(page, frame, opts.crop, scale)
+      : height < fullHeight
+        ? { x: 0, y: 0, width, height }
+        : undefined
   const buf = await page.screenshot({
     type,
     ...(type === 'png' ? {} : { quality: opts.quality ?? 90 }),
     ...(clip ? { clip } : {}),
   })
-  return Buffer.from(buf)
+  return { image: Buffer.from(buf), region: clip ?? { x: 0, y: 0, width, height } }
 }
