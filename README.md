@@ -15,7 +15,9 @@ This branch (`main`) does not hold doop's code as something to edit. It holds:
 
 `bin/doop apply` builds `build/doop` = pin + patches + transforms. `bin/doop release --push` tags
 that build as `vX.Y.Z-<suffix>.N` and moves the release branch to it; a deployment builds doop's
-own Dockerfile from that tag. `docs/history.md` records what we changed and why. `CLAUDE.md` is
+own Dockerfile from that tag. `releases/<tag>.md` (also on the tag's GitHub release) says what
+deploying a release takes beyond that: a database dump before migrations, new dependencies,
+environment. `docs/history.md` records what we changed and why. `CLAUDE.md` is
 the working manual; `.env.example` lists the settings for a local setup.
 
 Branches here:

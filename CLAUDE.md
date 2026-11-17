@@ -44,6 +44,7 @@ in `.env.example`) and `local/` (notes, deploy log, hooks).
 | `build/base` | generated: the pristine pin, for A/B perf runs |
 | `perf/` | render-perf harness and results (`perf/README.md`); traces in `perf/out/` (ignored) |
 | `docs/history.md` | what we changed and why, and the decisions behind it |
+| `releases/` | per-release notes for whoever deploys (`NEXT.md`, then `<tag>.md`; `README.md` says what goes in) |
 | `.env.example` | the settings `bin/doop` and `bin/doopctl` read from `.env.local` |
 
 ## bin/doop
@@ -118,10 +119,18 @@ over MCP with `add_comment` (`feat(mcp)`).
 transform still applies, then `bin/doop check --test` and commit (`vendor/doop` + `patches/`).
 
 **Release:**
-1. Commit this repo first; a release must come from a commit.
-2. `bin/doop release --push`. It tags the build `vX.Y.Z-<suffix>.N`, moves the release branch
+1. If anything changes that the deployment must act on, write `releases/NEXT.md` for whoever
+   deploys it (format in `releases/README.md`). That means migrations (a dump first?),
+   dependencies, the Dockerfile, the environment, or behaviour a supervisor or proxy must
+   allow for. The release refuses without it when migrations, `package.json`/`bun.lock`, the
+   Dockerfile, compose or `.env.example` changed since the last release.
+2. Commit this repo first; a release must come from a commit.
+3. `bin/doop release --push`. It tags the build `vX.Y.Z-<suffix>.N`, moves the release branch
    and pushes both. A deployment builds doop's own Dockerfile from that tag.
-3. `DOOP_POST_RELEASE` (if set) is run with the tag, e.g. to ask for the deploy.
+   - The notes go into the tag's message and onto the tag's GitHub release.
+   - `NEXT.md` becomes `releases/<tag>.md`, committed and pushed.
+4. `DOOP_POST_RELEASE` (if set) is run with the tag and the notes' path, e.g. to ask for the
+   deploy with the notes attached.
 
 ## Facts
 

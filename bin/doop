@@ -27,6 +27,9 @@ fi
 SUFFIX=${DOOP_RELEASE_SUFFIX:-patched}   # release tags: <upstream-tag>-<suffix>.<n>
 FORK=${DOOP_FORK_REMOTE:-fork}           # remote in vendor/doop that releases are pushed to
 BRANCH=${DOOP_RELEASE_BRANCH:-patched}   # branch on that remote that carries the latest release
+NOTES=$ROOT/releases/NEXT.md             # notes for whoever deploys the next release (releases/README.md)
+# what a deployment has to act on: a release that changes these needs notes
+DEPLOY_PATHS="server/db/migrations Dockerfile docker-compose.yml package.json bun.lock .env.example"
 # Commits made here use a fixed committer and the author's date, so the same
 # pin + patches always give the same commit hashes (a release is reproducible).
 export GIT_COMMITTER_NAME=${DOOP_COMMITTER_NAME:-doop-build}
@@ -235,24 +238,59 @@ cmd_release() {
   else
     n=$(( ${last##*.} + 0 + 1 )); [ -z "$last" ] && n=1
     tag="$up-$SUFFIX.$n"
-    git -C "$V" tag -a "$tag" "$head" -m "doop $up + $(patches | sed '/^$/d' | wc -l) patch(es), $(transforms | sed '/^$/d' | wc -l) transform(s)
+    # what a deployment has to act on since the last release: it needs notes (releases/README.md)
+    local acts
+    acts=$(git -C "$V" diff --name-only ${last:+"$last"} "$head" -- $DEPLOY_PATHS 2>/dev/null | sed 's|^server/db/migrations/.*|migrations|' | sort -u | paste -sd' ')
+    [ -z "$last" ] && acts="first release"
+    if [ -n "$acts" ] && [ ! -s "$NOTES" ]; then
+      die "this release changes what a deployment must act on ($acts): write releases/NEXT.md for whoever deploys it (releases/README.md), commit it, release again"
+    fi
+    [ -z "$(git -C "$ROOT" status --porcelain -- releases)" ] || die "commit releases/ first"
+    git -C "$V" tag -a "$tag" "$head" -F - <<EOF
+doop $up + $(patches | sed '/^$/d' | wc -l) patch(es), $(transforms | sed '/^$/d' | wc -l) transform(s)
 
-built from the build repo at $(git -C "$ROOT" rev-parse --short=12 HEAD) (bin/doop release)"
+built from the build repo at $(git -C "$ROOT" rev-parse --short=12 HEAD) (bin/doop release)
+$([ -s "$NOTES" ] && printf '\n%s\n' "$(sed "1s/.*/# $tag/" "$NOTES")")
+EOF
     say "tagged $tag -> ${head:0:12}"
+    if [ -s "$NOTES" ]; then
+      # the notes keep the tag's name in the archive; the first line names the release
+      sed "1s/.*/# $tag/" "$NOTES" > "$ROOT/releases/$tag.md" && git -C "$ROOT" rm -q "$NOTES"
+      git -C "$ROOT" add "releases/$tag.md"
+      git -C "$ROOT" commit -q -m "release: $tag notes" -- releases && say "releases/NEXT.md -> releases/$tag.md (committed)"
+    fi
   fi
+  local notes="$ROOT/releases/$tag.md"; [ -s "$notes" ] || notes=
   git -C "$V" branch -q -f "$BRANCH" "$tag^{commit}"
   if [ $push = 1 ]; then
     git -C "$V" push "$FORK" "+refs/heads/$BRANCH:refs/heads/$BRANCH" "refs/tags/$tag"
     say "pushed $BRANCH and $tag to $FORK"
+    if [ -n "$notes" ]; then
+      # the notes where whoever deploys looks first: the tag's release page
+      local repo; repo=$(git -C "$V" remote get-url "$FORK" | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
+      if command -v gh >/dev/null && [ -n "$repo" ]; then
+        if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+          gh release edit "$tag" --repo "$repo" --notes-file "$notes" >/dev/null && say "release notes updated on $repo"
+        else
+          gh release create "$tag" --repo "$repo" --verify-tag --latest=false --title "$tag" --notes-file "$notes" >/dev/null &&
+            say "release notes published on $repo"
+        fi || say "could not publish the notes with gh; they are in releases/$tag.md"
+      fi
+      # the build repo's commit of the notes goes out with the release
+      git -C "$ROOT" rev-parse -q --verify '@{upstream}' >/dev/null && git -C "$ROOT" push -q && say "pushed the build repo"
+    fi
   else
     say "not pushed. To publish: bin/doop release --push"
   fi
   # deploying is the deployment's business: DOOP_POST_RELEASE, a command, gets the tag as $1
+  # and the release notes' path as $2 (empty when the release has none)
   if [ -n "${DOOP_POST_RELEASE:-}" ]; then
-    (cd "$ROOT" && bash -c "$DOOP_POST_RELEASE \"\$1\"" _ "$tag")
+    (cd "$ROOT" && bash -c "$DOOP_POST_RELEASE \"\$1\" \"\$2\"" _ "$tag" "$notes")
   else
     say "to deploy: build doop's own Dockerfile from tag $tag on the '$FORK' remote"
   fi
+  [ -n "$notes" ] && say "before deploying, read releases/$tag.md"
+  return 0
 }
 
 cmd_upgrade() {
