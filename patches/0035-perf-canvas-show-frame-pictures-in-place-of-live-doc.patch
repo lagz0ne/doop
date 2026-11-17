@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 11:01:22 +0000
-Subject: [PATCH 35/49] perf(canvas): show frame pictures in place of live
+Subject: [PATCH 35/52] perf(canvas): show frame pictures in place of live
  documents while the zoom moves
 
 Off by default; localStorage['doop:zoom-pictures'] = 'on' plus a reload switches it on.

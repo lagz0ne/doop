@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 05:55:14 +0000
-Subject: [PATCH 31/49] fix(frames): offer inline text editing only where its
+Subject: [PATCH 31/52] fix(frames): offer inline text editing only where its
  save is accepted
 
 The previous patch refuses doop:edited saves from any frame whose HTML

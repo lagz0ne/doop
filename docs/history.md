@@ -42,6 +42,7 @@ outside this repo.)
 | 2026-11-16 | Asked for a smaller dock: the pages in it as a pick-one instead of a panel, no renderer label, and import, export, comment threads and the people grouped behind one control, so the dock holds navigation and review and the rest is a second layer. Done in 0045: seven controls where there were fifteen, and no left panel. Page management (add, rename, order) stays in the full editor; a phone keeps its Comments button, the comments being its main way to review |
 | 2026-11-16 | Asked for the canvas's name and the back to go to the top left, subtle, since people read it once and move on, and for the room to go to the page's name with some limit. Done in 0047; the id menu went along with the name. Phones keep their dock (the name is in their actions sheet) |
 | 2026-11-16 | Reported: the first load of a canvas is slow; asked to optimise it from flame charts. A traced first load (`perf/load.mjs`, read with `perf/tasks.mjs`) of a 459-frame canvas over a shaped 4G link with a 4x CPU slowdown had the stage empty for about ten seconds: the canvas arrives as one 5.7 MB WebSocket message (every page's frames with their HTML), and the culling effect booted two live documents for the camera's pre-fit view only to tear them down at the first rest. Fixed in 0048 (nothing but the pinned documents boot before a page's camera first rests) and 0049 (permessage-deflate on the room: 5.7 MB → about 0.3 MB on the wire). Left for later: sending the page in view first and the rest after (Figma's dynamic page loading), and a lighter editor bundle |
+| 2026-11-17 | Asked how an MCP agent sees the "current" frame, and whether a cheaper medium than HTML works. It could not see it: it read frames by id only, as whole HTML (3.4k tokens at the median, 13k at p99 on a 271-frame canvas) or as a whole-frame screenshot at 1x or 2x. Researched (image tokens follow pixel area, not bytes or format; Figma Dev Mode MCP reads the selection and a metadata outline; Playwright MCP an accessibility snapshot) and did all three: 0050 `get_focus` (each person's selection, camera, frames in view, pointer), 0051 screenshots at any scale, fitted or cropped to an element or region, 0052 `get_frame` by element, query or page, and `inspect_frame`'s outline over MCP. Not done: a rasterized SVG (it is the HTML again, as text or as pixels) |
 
 ## Patches
 
@@ -96,6 +97,9 @@ outside this repo.)
 | 0047 | feat(ui): the canvas's name sits quietly at the top left, the dock gives its room to the page | back, the canvas's name (still its rename field) and id menu leave the dock for `CanvasLabel` at the top left, a pill faint until hovered or focused, the name truncated at 240px; the page picker's name may run to 320px (was 200); fits keep 52px clear at the top (`LABEL_CLEAR`); phones unchanged |
 | 0048 | perf(canvas): no live documents before a page's camera first rests | the culling effect computed the live set at once, for the view the page had before its fit (on a first load, 100% at the origin), and dropped those documents at the first rest: two sandboxed iframes made and removed per load, ~350 ms of main thread at full CPU, ~1.7 s at 4x. Until `rested`, `admit` takes the pinned documents only |
 | 0049 | perf(ws): compress the canvas room's messages with permessage-deflate | ws has it off; the `init` message carries the whole canvas (5.7 MB for 459 frames). zlib's default level and 15-bit window (312 KB for 5.1 MB of frame HTML, ~65 ms on the zlib pool; a 12-bit window still leaves 1.4 MB), no context takeover; ws skips messages under 1 KB |
+| 0050 | feat(mcp): agents see where the people on a canvas are looking | the room had each person's selection, camera and pointer, and MCP read none of it. `get_focus` (and `people` in `get_canvas`): selected frame, page, world rect on screen, up to 12 frames in view by screen share, pointer frame, focus. ~100-300 tokens a person. Silent sessions and agents left out; a viewer has no selection (the room drops it), so their focus is the camera's |
+| 0051 | feat(mcp): screenshots at any scale, fitted to a size, or cropped to an element or region | tokens follow pixel area (~w·h/784, long edge capped near 2,576 px): scale 0.1-2, `max_size`, `element_id` (+ padding) or `region` crops kept inside the frame, `png`/`jpeg` (bytes only). A 1440×900 frame is ~1.7k tokens at 1x, ~430 at 0.5 |
+| 0052 | feat(mcp): read part of a frame, and outline it, instead of the whole HTML | `get_frame` by `element_id`, `query` or `offset`/`limit` (whole HTML stays the default); `inspect_frame` (the resident's rendered outline: 64 elements with ids, boxes, colours, fonts) over MCP. The bounded read moves to `server/frameHtmlRead.ts`, shared with the resident |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -403,6 +407,14 @@ with the same build behind a proxy that strips the extension: frames on screen 5
 10.0-10.8 s, everything in view 6.0-7.0 s against 10.7-11.5 s; no iframe thrown away. What is
 left of the critical path: the bundle (~2.5 s to the chrome on that link), the socket opening
 only once the editor has mounted, and parsing the 5.7 MB message (~1 s of main thread at 4x).
+
+Tests for 0050-0052 (2026-11-17): `mcpFocus` (a real socket's camera, pointer and selection read
+back over MCP; another account's agent sees nothing), `mcpScreenshotCrop` and `mcpFrameRead` (real
+Chromium: image sizes for each scale, fit and crop, the outline under a third of the HTML) and the
+parity list pass. The full check (load 15-20) had 16 browser UI failures, timeouts in files these
+patches do not touch; alone they pass but for one or two different cases a run. `canvasClipboardBrowser`
+fails one run in two at 0049 too (and passed twice on the pristine pin): flaky since 0048-0049 or
+under load, not yet run down.
 
 Upgrading past v0.14.0 (found 2026-11-14): drizzle's migrator applies a migration only when it is
 newer than the last one applied (`created_at` < the journal's `when`), not by name. Upstream's

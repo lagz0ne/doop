@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 06:42:39 +0000
-Subject: [PATCH 46/49] fix(ui): the dock menu's faces are pictures, following
+Subject: [PATCH 46/52] fix(ui): the dock menu's faces are pictures, following
  is a row
 
 The reviewer dock's menu trigger drew the presence stack (PeerAvatars),

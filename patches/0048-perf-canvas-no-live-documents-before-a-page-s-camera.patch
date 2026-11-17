@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 07:35:58 +0000
-Subject: [PATCH 48/49] perf(canvas): no live documents before a page's camera
+Subject: [PATCH 48/52] perf(canvas): no live documents before a page's camera
  first rests
 
 Until a page's camera first rests it is about to be fitted or put back
