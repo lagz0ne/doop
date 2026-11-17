@@ -148,6 +148,15 @@
   line names the region and the image's px size, and tells the agent to read a frame taller than a
   model shows whole in slices. Only whole-frame PNGs at 1x or 2x prime the image cache. Tests:
   `mcpScreenshotCrop.test.ts` (real Chromium).
+- Reading part of a frame over MCP: `get_frame` still returns the whole HTML by default, and reads
+  less on request: `element_id` (the source of the element carrying that `data-doop-id`, children
+  included: `elementMarkup` in `server/elementIds.ts`), `query` (up to five snippets around a
+  literal text) or `offset`/`limit` (1,000-30,000 chars). The last two are `readFrameHtml`
+  (`server/frameHtmlRead.ts`), the resident agent's `get_frame_html` read, which now runs the same
+  code. `inspect_frame` is the resident's tool of the same name (`inspectFrame` in
+  `server/screenshot.ts`): the rendered outline (semantic elements with selector, preferring a
+  `data-doop-id`, text, box and computed style, plus palette, type and CSS variables). Tests:
+  `mcpFrameRead.test.ts`.
 - `ws` 8.18.0 - WebSocket server for realtime multiplayer (cursors, presence, frame edits,
   activity feed) over one room per canvas.
 - Custom fonts (`shared/fonts.ts`, `server/fonts.ts`, `server/fontFile.ts`): font libraries, one

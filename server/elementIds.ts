@@ -230,6 +230,12 @@ export function elementSnippet(html: string, id: string): string | undefined {
   return markup.length > 400 ? markup.slice(0, 397) + '...' : markup
 }
 
+/** The whole source of the element carrying this id, as written. */
+export function elementMarkup(html: string, id: string): string | undefined {
+  const loc = findByElementId(parseDocument(html), id)?.sourceCodeLocation
+  return loc ? html.slice(loc.startOffset, loc.endOffset) : undefined
+}
+
 /** Whether a stamped element is still in the HTML. */
 export function hasElementId(html: string, id: string): boolean {
   /* by the parsed attribute, whatever its quoting or case in the source */
