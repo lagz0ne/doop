@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { FULL_UI } from '../lib/fullUi'
 import { Button } from '@/components/ui/button'
 import { IconButton } from '@/components/ui/icon-button'
 import { AppIcon, BrandMark, type AppIconBrand } from '@/components/ui/brand-mark'
@@ -86,7 +87,7 @@ const PLATFORM_NAMES: Record<DesktopPlatform, string> = { macos: 'macOS', window
 /** The rail's desktop-app card, for a computer's browser. */
 export function NativeAppCard({ className }: { className?: string }) {
   const [platform] = useState(() => {
-    const found = nativeAppPlatform()
+    const found = FULL_UI ? nativeAppPlatform() : null
     return found && found !== 'ios' && !desktopCardDismissed() ? found : null
   })
   const [open, setOpen] = useState(true)
@@ -158,7 +159,7 @@ export function IosAppPrompt({ held = false }: { held?: boolean }) {
   const [due, setDue] = useState(false)
   const [closed, setClosed] = useState(false)
   useEffect(() => {
-    if (nativeAppPlatform() !== 'ios' || iosPromptSnoozed()) return
+    if (!FULL_UI || nativeAppPlatform() !== 'ios' || iosPromptSnoozed()) return
     const timer = window.setTimeout(() => setDue(true), PROMPT_DELAY_MS)
     return () => window.clearTimeout(timer)
   }, [])

@@ -1523,7 +1523,7 @@ export function CanvasPage({
         <CommandPalette
           onClose={() => setPaletteOpen(false)}
           onAsk={
-            guest || readOnly
+            guest || readOnly || (!FULL_UI && getPanelLayout() !== 'docked')
               ? null
               : (prompt) => {
                   useStore.getState().setComposerDraft(canvasId, prompt)

@@ -130,14 +130,16 @@ export function Settings() {
           >
             {t('settings.accountTitle')}
           </DashNavItem>
-          <DashNavItem
-            density="rail"
-            icon={<CreditCardIcon size="rail" />}
-            active={pane === 'plan'}
-            onClick={() => setPane('plan')}
-          >
-            {t('plans.settingsTitle')}
-          </DashNavItem>
+          {FULL_UI && (
+            <DashNavItem
+              density="rail"
+              icon={<CreditCardIcon size="rail" />}
+              active={pane === 'plan'}
+              onClick={() => setPane('plan')}
+            >
+              {t('plans.settingsTitle')}
+            </DashNavItem>
+          )}
           <DashNavItem
             density="rail"
             icon={<MoonIcon size="rail" />}
@@ -228,9 +230,11 @@ export function Settings() {
               <TabsTrigger value="account">
                 <UserIcon size="rail" /> {t('settings.accountTab')}
               </TabsTrigger>
-              <TabsTrigger value="plan">
-                <CreditCardIcon size="rail" /> {t('plans.settingsTitle')}
-              </TabsTrigger>
+              {FULL_UI && (
+                <TabsTrigger value="plan">
+                  <CreditCardIcon size="rail" /> {t('plans.settingsTitle')}
+                </TabsTrigger>
+              )}
               <TabsTrigger value="appearance">
                 <MoonIcon size="rail" /> {t('settings.appearanceTitle')}
               </TabsTrigger>

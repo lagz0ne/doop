@@ -128,7 +128,7 @@ export function AppRail({
   const t = useT()
   const { data: session } = authClient.useSession()
   const me = useMe(session?.user.id)
-  const offerUpgrade = offersUpgrade(me)
+  const offerUpgrade = FULL_UI && offersUpgrade(me)
   const [own, setOwn] = useState<RailLists | null>(() => lastLists)
   const needsOwn = canvases === undefined || workspaces === undefined
   useEffect(() => {
