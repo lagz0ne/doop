@@ -48,7 +48,7 @@ const PNG = Buffer.from(
 )
 
 const store = (page: Page, call: string) =>
-  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
+  page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
 const settle = () => new Promise((r) => setTimeout(r, 600))
 
 async function open(browser: TestBrowser, keys: Record<string, string>): Promise<Page> {
@@ -79,7 +79,7 @@ async function open(browser: TestBrowser, keys: Record<string, string>): Promise
 }
 
 const decision = (page: Page) =>
-  page.evaluate(`import('/src/lib/renderTrialClient.ts').then((m) => m.renderTrial())`) as Promise<{
+  page.evaluate(`window.testImport('/src/lib/renderTrialClient.ts').then((m) => m.renderTrial())`) as Promise<{
     active: boolean
     gpu: { level: string; reason: string; mode: string }
     zoomPictures: { level: string; reason: string }
@@ -89,7 +89,7 @@ const decision = (page: Page) =>
  *  wait past its end. */
 async function gesture(page: Page, steps: number, zoomFrom: number, zoomTo: number, dx: number) {
   /* a string, so the test runner does not rewrite the page's import() */
-  await page.evaluate(`import('/src/lib/store.ts').then(async ({ useStore }) => {
+  await page.evaluate(`window.testImport('/src/lib/store.ts').then(async ({ useStore }) => {
     const start = useStore.getState().viewport
     for (let i = 1; i <= ${steps}; i++) {
       await new Promise((r) => requestAnimationFrame(r))

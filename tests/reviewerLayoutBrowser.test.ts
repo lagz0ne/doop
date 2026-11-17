@@ -31,7 +31,9 @@ const FRAME: Frame = {
 }
 
 const store = (page: Page, expr: string) =>
-  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { const s = useStore.getState(); return ${expr} })`)
+  page.evaluate(
+    `window.testImport('/src/lib/store.ts').then(({ useStore }) => { const s = useStore.getState(); return ${expr} })`,
+  )
 const dock = '[aria-label="Canvas dock"]'
 const shown = (page: Page, selector: string) =>
   page.evaluate((sel) => {

@@ -13,6 +13,17 @@
       import { pickedSelectors, useStore } from '/src/lib/store.ts'
       import { clearHistory, undo } from '/src/lib/history.ts'
       import '/src/styles.css'
+      /* the app modules a test reaches from the page (page.evaluate): the
+         fixtures are a production build, so a test cannot import /src itself.
+         Each is the same instance the page uses. */
+      const testModules = {
+        '/src/lib/store.ts': () => import('/src/lib/store.ts'),
+        '/src/lib/liveFrames.ts': () => import('/src/lib/liveFrames.ts'),
+        '/src/lib/gpuPictures.ts': () => import('/src/lib/gpuPictures.ts'),
+        '/src/lib/gpuLabels.ts': () => import('/src/lib/gpuLabels.ts'),
+        '/src/lib/renderTrialClient.ts': () => import('/src/lib/renderTrialClient.ts'),
+      }
+      window.testImport = (path) => testModules[path]()
 
       window.canvasClipboardHarness = {
         seed: (frames, role = 'edit') => {

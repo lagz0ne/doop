@@ -28,7 +28,9 @@ const FRAME: Frame = {
 }
 
 const store = (page: Page, expr: string) =>
-  page.evaluate(`import('/src/lib/store.ts').then((m) => { const s = m.useStore.getState(); return ${expr} })`)
+  page.evaluate(
+    `window.testImport('/src/lib/store.ts').then((m) => { const s = m.useStore.getState(); return ${expr} })`,
+  )
 const dock = '[aria-label="Canvas dock"]'
 const menuOpen = (page: Page) => page.evaluate(() => !!document.querySelector('[role="menu"]'))
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -162,7 +164,7 @@ describe.skipIf(!findBrowserPath())('a phone in the reviewer layout', () => {
     await page.touchscreen.tap(tap.x, tap.y)
     /* a string: the test file's own transform would rewrite a function's import() */
     await page.waitForFunction(
-      `import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().selectedIds.includes('f'))`,
+      `window.testImport('/src/lib/store.ts').then(({ useStore }) => useStore.getState().selectedIds.includes('f'))`,
       { polling: 100 },
     )
   }, 20_000)

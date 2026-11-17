@@ -82,6 +82,9 @@ describe.skipIf(!findBrowserPath())('frame edge', { timeout: 60_000 }, () => {
   beforeEach(async () => {
     page = await pages.open()
     await page.setViewport({ width: 1200, height: 800, deviceScaleFactor: 1 })
+    /* the edge of a live document, at zooms where culling would show the
+       frame's picture instead */
+    await page.evaluateOnNewDocument(() => localStorage.setItem('doop:cull', 'off'))
     await page.goto(fixtureUrl('rulers.html'))
     await page.waitForFunction(() => !!(window as unknown as { rulersHarness?: unknown }).rulersHarness)
     await page.evaluate(() => document.documentElement.classList.add('dark'))

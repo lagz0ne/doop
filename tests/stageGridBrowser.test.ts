@@ -41,13 +41,13 @@ const canvas: Canvas = {
 
 const setViewport = (page: Page, vp: { x: number; y: number; zoom: number }) =>
   page.evaluate(
-    `import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().setViewport(${JSON.stringify(vp)}) })`,
+    `window.testImport('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().setViewport(${JSON.stringify(vp)}) })`,
   )
 const grids = (page: Page) =>
   page.evaluate(() => {
     const divs = [...document.querySelectorAll<HTMLElement>('.stage div')]
     const dots = divs.find((d) => d.className.includes('radial-gradient'))
-    const pixels = divs.find((d) => d.className.includes('--pixel-line'))
+    const pixels = document.querySelector<HTMLElement>('[data-pixel-grid="paper"]')
     return {
       dots: { size: dots?.style.backgroundSize, width: dots?.style.width, transform: dots?.style.transform },
       pixels: { hidden: pixels?.hidden, size: pixels?.style.backgroundSize, transform: pixels?.style.transform },
@@ -128,7 +128,9 @@ describe.skipIf(!findBrowserPath())('the stage grids while zooming', () => {
   it('treats the pixel grid the same way', async () => {
     await setViewport(page, { x: 0, y: 0, zoom: 4 })
     await rest()
-    expect(await grids(page)).toMatchObject({ pixels: { hidden: false, size: '4px 4px', transform: 'translate(-4px, -4px)' } })
+    expect(await grids(page)).toMatchObject({
+      pixels: { hidden: false, size: '4px 4px', transform: 'translate(-4px, -4px)' },
+    })
     await setViewport(page, { x: 0, y: 0, zoom: 4.1 })
     const moving = (await grids(page)).pixels
     expect(moving.size).toBe('4px 4px')

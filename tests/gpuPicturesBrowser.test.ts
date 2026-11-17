@@ -45,15 +45,15 @@ const canvas: Canvas = {
 const PICTURE = [200, 220, 255]
 
 const store = (page: Page, call: string) =>
-  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
+  page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
 const drawn = (page: Page) =>
   page.evaluate(
-    `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => [...useGpuPictures.getState().drawn].sort())`,
+    `window.testImport('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => [...useGpuPictures.getState().drawn].sort())`,
   ) as Promise<string[]>
 const selected = (page: Page) =>
-  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().selectedIds)`) as Promise<
-    string[]
-  >
+  page.evaluate(
+    `window.testImport('/src/lib/store.ts').then(({ useStore }) => useStore.getState().selectedIds)`,
+  ) as Promise<string[]>
 const previews = (page: Page) => page.evaluate(() => document.querySelectorAll('[data-doop-frame-preview]').length)
 const shells = (page: Page) => page.evaluate(() => document.querySelectorAll('[data-frame-shell]').length)
 const shellIds = (page: Page) =>
@@ -137,7 +137,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
     })
     if (webgl)
       await page.waitForFunction(
-        `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.size === ${FRAMES})`,
+        `window.testImport('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.size === ${FRAMES})`,
         { timeout: 30_000 },
       )
     await sleep(200)
@@ -225,7 +225,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
     await page.mouse.up()
     await sleep(200)
     const moved = (await page.evaluate(
-      `import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().canvas.frames.find((f) => f.id === 'f13'))`,
+      `window.testImport('/src/lib/store.ts').then(({ useStore }) => useStore.getState().canvas.frames.find((f) => f.id === 'f13'))`,
     )) as { x: number; y: number }
     expect(moved.x).toBeGreaterThan(5 * 1600 + 300)
     expect(moved.y).toBeGreaterThan(1100 + 150)
@@ -257,7 +257,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
     if (!webgl) ctx.skip()
     const before = { drawn: await drawn(page), shells: await shells(page) }
     const woken = (await page.evaluate(
-      `import('/src/lib/liveFrames.ts').then(({ useLiveFrames }) => useLiveFrames.getState().woken.length)`,
+      `window.testImport('/src/lib/liveFrames.ts').then(({ useLiveFrames }) => useLiveFrames.getState().woken.length)`,
     )) as number
     await page.evaluate(() => {
       const gl = document.querySelector<HTMLCanvasElement>('canvas[data-stage-pictures]')!.getContext('webgl2')!
@@ -272,7 +272,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
     expect(await previews(page)).toBeGreaterThanOrEqual(FRAMES - woken)
     await page.evaluate(() => (window as unknown as { lose: WEBGL_lose_context }).lose.restoreContext())
     await page.waitForFunction(
-      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.size === ${before.drawn.length})`,
+      `window.testImport('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.size === ${before.drawn.length})`,
       { timeout: 15_000 },
     )
     expect(await drawn(page)).toEqual(before.drawn)
@@ -335,7 +335,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
       `upsertFrame({ ...useStore.getState().canvas.frames.find((f) => f.id === 'f3'), id: 'f40', x: 0, y: 5500 })`,
     )
     await page.waitForFunction(
-      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.has('f40'))`,
+      `window.testImport('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.has('f40'))`,
       { timeout: 10_000 },
     )
     expect(await centre(40)).toEqual(PICTURE)
@@ -351,7 +351,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
     await store(page, `upsertFrame(${JSON.stringify(frame('f6'))})`)
     await store(page, `upsertFrame(${JSON.stringify(frame('f7'))})`)
     await page.waitForFunction(
-      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => ['f6', 'f7'].every((id) => useGpuPictures.getState().drawn.has(id)))`,
+      `window.testImport('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => ['f6', 'f7'].every((id) => useGpuPictures.getState().drawn.has(id)))`,
       { timeout: 10_000 },
     )
   }, 30_000)
@@ -405,7 +405,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
       await nudge()
     }
     await page.waitForFunction(
-      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.has('f24'))`,
+      `window.testImport('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.has('f24'))`,
       { timeout: 15_000 },
     )
     expect((await backing()).width).toBe(1600)
@@ -432,7 +432,7 @@ describe.skipIf(!findBrowserPath())('GPU picture names', () => {
       const page = await browser.newPage()
       await page.setViewport({ width: 800, height: 600, deviceScaleFactor: dpr })
       await page.goto(fixtureUrl('pages.html'))
-      const r = (await page.evaluate(`import('/src/lib/gpuLabels.ts').then(({ NameAtlas }) => {
+      const r = (await page.evaluate(`window.testImport('/src/lib/gpuLabels.ts').then(({ NameAtlas }) => {
         const names = ['Frame 1', 'Checkout, step 2 of 3', 'Linh joined (Linh)', 'Onboarding / Welcome back, Ana', 'WWW iii lll 0123456789']
         const span = document.createElement('span')
         span.style.cssText = 'position:absolute;left:0;top:0;white-space:nowrap;font:600 12px sans-serif'
@@ -463,7 +463,9 @@ describe.skipIf(!findBrowserPath())('GPU pictures on a phone', () => {
   let stage = { left: 0, top: 0 }
   const menuOpen = () => page.evaluate(() => !!document.querySelector('[role="menu"]'))
   const viewport = () =>
-    page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().viewport)`) as Promise<{
+    page.evaluate(
+      `window.testImport('/src/lib/store.ts').then(({ useStore }) => useStore.getState().viewport)`,
+    ) as Promise<{
       x: number
       y: number
     }>
@@ -497,7 +499,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures on a phone', () => {
     const frames = canvas.frames.map(({ pageId: _page, ...frame }) => frame)
     await page.evaluate((list) => (window as unknown as Harness).canvasClipboardHarness.seed(list), frames)
     await page.evaluate(
-      `import('/src/lib/store.ts').then(({ useStore }) => useStore.setState({ uiHidden: false, viewport: { x: 20, y: 60, zoom: 0.08 } }))`,
+      `window.testImport('/src/lib/store.ts').then(({ useStore }) => useStore.setState({ uiHidden: false, viewport: { x: 20, y: 60, zoom: 0.08 } }))`,
     )
     stage = await page.evaluate(() => {
       const r = document.querySelector('.stage')!.getBoundingClientRect()
@@ -505,7 +507,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures on a phone', () => {
     })
     if (webgl)
       await page.waitForFunction(
-        `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => ['f2', 'f8', 'f16', 'f17'].every((id) => useGpuPictures.getState().drawn.has(id)))`,
+        `window.testImport('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => ['f2', 'f8', 'f16', 'f17'].every((id) => useGpuPictures.getState().drawn.has(id)))`,
         { timeout: 30_000 },
       )
   }, 60_000)

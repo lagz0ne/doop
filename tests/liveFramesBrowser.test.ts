@@ -72,7 +72,7 @@ const canvas: Canvas = {
 const iframes = (page: Page) => page.evaluate(() => document.querySelectorAll('iframe[data-doop-frame]').length)
 /** call a store action in the page (a string, so the test transform leaves the import alone) */
 const store = (page: Page, call: string) =>
-  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
+  page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
 /** pan/zoom the camera the way the zoom controls do, then let culling settle */
 async function camera(page: Page, viewport: { x: number; y: number; zoom: number }) {
   await store(page, `setViewport(${JSON.stringify(viewport)})`)
@@ -151,13 +151,13 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
      the shell into a FrameView before it is delivered. */
   const frameAt = (page: Page, id: string) =>
     page.evaluate(
-      `import('/src/lib/store.ts').then(({ useStore }) => { const s = useStore.getState(); const f = s.canvas.frames.find((f) => f.id === '${id}'); return { x: f.x, y: f.y, selected: s.selectedIds.includes('${id}') } })`,
+      `window.testImport('/src/lib/store.ts').then(({ useStore }) => { const s = useStore.getState(); const f = s.canvas.frames.find((f) => f.id === '${id}'); return { x: f.x, y: f.y, selected: s.selectedIds.includes('${id}') } })`,
     ) as Promise<{ x: number; y: number; selected: boolean }>
   /** screen point at the middle of a frame, for the current camera */
   async function middleOf(page: Page, id: string) {
     const f = await frameAt(page, id)
     const vp = (await page.evaluate(
-      `import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().viewport)`,
+      `window.testImport('/src/lib/store.ts').then(({ useStore }) => useStore.getState().viewport)`,
     )) as { x: number; y: number; zoom: number }
     const stage = await page.evaluate(() => {
       const r = document.querySelector('.stage')!.getBoundingClientRect()
@@ -197,7 +197,7 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
 
   it('keeps a large selection as previews: no document per selected frame', async () => {
     await page.evaluate(
-      `import('/src/lib/store.ts').then(({ useStore }) => useStore.setState({ selectedIds: Array.from({ length: 60 }, (_, i) => 'f' + i), selectedId: 'f0' }))`,
+      `window.testImport('/src/lib/store.ts').then(({ useStore }) => useStore.setState({ selectedIds: Array.from({ length: 60 }, (_, i) => 'f' + i), selectedId: 'f0' }))`,
     )
     await new Promise((r) => setTimeout(r, 400))
     expect(await iframes(page)).toBe(0)
@@ -250,13 +250,13 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
        picture must be there with it, and gone once the runtime reports the
        document shown. */
     const seen = (await page.evaluate(`new Promise((resolve) => {
-      import('/src/lib/store.ts').then(({ useStore }) => {
+      window.testImport('/src/lib/store.ts').then(({ useStore }) => {
         useStore.getState().select('f60')
         const started = performance.now()
         let covered = false
         ;(function poll() {
           const iframe = document.querySelector('iframe[title="Frame 60"]')
-          const preview = iframe?.parentElement?.querySelector('[data-doop-frame-preview]')
+          const preview = iframe?.parentElement?.parentElement?.querySelector('[data-doop-frame-preview]')
           if (iframe && preview) covered = true
           const ms = performance.now() - started
           if (iframe && !preview) resolve({ covered, shown: true, ms })

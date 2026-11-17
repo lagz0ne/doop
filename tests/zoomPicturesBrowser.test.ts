@@ -44,7 +44,7 @@ const PNG = Buffer.from(
 )
 
 const store = (page: Page, call: string) =>
-  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
+  page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
 const settle = () => new Promise((r) => setTimeout(r, 600))
 
 /** each frame's iframe visibility and its picture's, '-' when it has none */
@@ -53,7 +53,7 @@ const looks = (page: Page) =>
     const out: Record<string, { iframe: string; picture: string }> = {}
     for (let i = 0; i < n; i++) {
       const iframe = document.querySelector<HTMLElement>(`iframe[title="Frame ${i}"]`)
-      const wrapper = iframe?.parentElement?.querySelector('[data-doop-frame-preview]')?.parentElement
+      const wrapper = iframe?.parentElement?.parentElement?.querySelector('[data-doop-frame-preview]')?.parentElement
       out[`f${i}`] = {
         iframe: iframe ? iframe.style.visibility || 'shown' : '-',
         picture: wrapper ? wrapper.style.visibility || 'shown' : '-',
@@ -100,7 +100,9 @@ describe.skipIf(!findBrowserPath())('pictures in place of documents while zoomin
       (n) =>
         Array.from({ length: n }, (_, i) => {
           const iframe = document.querySelector(`iframe[title="Frame ${i}"]`)
-          const img = iframe?.parentElement?.querySelector<HTMLImageElement>('[data-doop-frame-preview] img')
+          const img = iframe?.parentElement?.parentElement?.querySelector<HTMLImageElement>(
+            '[data-doop-frame-preview] img',
+          )
           return !!img && img.complete && img.naturalWidth > 0
         }).every(Boolean),
       { timeout: 15_000 },
@@ -140,7 +142,7 @@ describe.skipIf(!findBrowserPath())('pictures in place of documents while zoomin
     await page.waitForFunction(
       () =>
         [...document.querySelectorAll('iframe[data-doop-frame]')].every(
-          (iframe) => !iframe.parentElement?.querySelector('[data-doop-frame-preview]'),
+          (iframe) => !iframe.parentElement?.parentElement?.querySelector('[data-doop-frame-preview]'),
         ),
       { timeout: 15_000 },
     )

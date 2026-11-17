@@ -45,7 +45,7 @@ const PICTURE = `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="225
 
 /** call a store action in the page (a string, so the test transform leaves the import alone) */
 const store = (page: Page, call: string) =>
-  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
+  page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 async function camera(page: Page, viewport: { x: number; y: number; zoom: number }) {
   await store(page, `setViewport(${JSON.stringify(viewport)})`)
@@ -109,7 +109,7 @@ describe.skipIf(!findBrowserPath())('frame shells far from the view', () => {
   it('puts a shell back in the same task as the camera reaches it, and takes out the ones it leaves far behind', async () => {
     await camera(page, { x: 0, y: 0, zoom: 0.25 })
     const atLast = { x: -LAST.x * 0.25 + 100, y: -LAST.y * 0.25 + 100, zoom: 0.25 }
-    const jump = await page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => {
+    const jump = await page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => {
       useStore.getState().setViewport(${JSON.stringify(atLast)})
       const at = (id) => document.querySelector('[data-frame-shell="' + id + '"]').hidden
       return { last: at('f199'), first: at('f0') }
@@ -118,7 +118,7 @@ describe.skipIf(!findBrowserPath())('frame shells far from the view', () => {
     await sleep(400)
     /* 2200 px on, frame 199 is past the keep margin but not the drop one: it
        stays while the camera moves and goes once it rests */
-    const moved = await page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => {
+    const moved = await page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => {
       useStore.getState().setViewport(${JSON.stringify({ ...atLast, x: atLast.x - 2200 })})
       return document.querySelector('[data-frame-shell="f199"]').hidden
     })`)
@@ -137,7 +137,8 @@ describe.skipIf(!findBrowserPath())('frame shells far from the view', () => {
     const y = 300 - LAST.y * zoom
     await camera(page, { x: startX, y, zoom })
     await sleep(600)
-    const misses = (await page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => new Promise((resolve) => {
+    const misses =
+      (await page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => new Promise((resolve) => {
       const misses = []
       let x = ${startX}
       let steps = 0
