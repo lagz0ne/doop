@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres'
 import * as schema from './schema.ts'
+import { migrateBySet } from './migrate.ts'
 
 /**
  * DATABASE_URL set   -> real Postgres (production: Railway/Fly managed PG)
@@ -29,8 +30,7 @@ export async function initDb(): Promise<void> {
   if (url) {
     const { drizzle } = await import('drizzle-orm/node-postgres')
     db = drizzle(url, { schema })
-    const { migrate } = await import('drizzle-orm/node-postgres/migrator')
-    await migrate(db, { migrationsFolder: MIGRATIONS })
+    await migrateBySet(db, MIGRATIONS)
   } else {
     const { PGlite } = await import('@electric-sql/pglite')
     const { drizzle } = await import('drizzle-orm/pglite')
@@ -38,8 +38,7 @@ export async function initDb(): Promise<void> {
     fs.mkdirSync(dir, { recursive: true }) // PGlite's own mkdir isn't recursive
     const client = new PGlite(dir)
     const pgliteDb = drizzle(client, { schema })
-    const { migrate } = await import('drizzle-orm/pglite/migrator')
-    await migrate(pgliteDb, { migrationsFolder: MIGRATIONS })
+    await migrateBySet(pgliteDb, MIGRATIONS)
     db = pgliteDb as unknown as Db
   }
 }
