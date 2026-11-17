@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 04:38:18 +0000
-Subject: [PATCH 51/52] feat(mcp): screenshots at any scale, fitted to a size,
+Subject: [PATCH 51/55] feat(mcp): screenshots at any scale, fitted to a size,
  or cropped to an element or region
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -35,17 +35,17 @@ Tests: mcpScreenshotCrop.test.ts (real Chromium: sizes for scale,
 max_size, element and region crops, JPEG, and the errors).
 ---
  .context/TECHSTACK.md           |  7 +++
- server/mcp.ts                   | 77 ++++++++++++++++++++++----
- server/screenshot.ts            | 71 ++++++++++++++++++++----
+ server/mcp.ts                   | 89 ++++++++++++++++++++++++------
+ server/screenshot.ts            | 75 +++++++++++++++++++++++--
  tests/mcpScreenshotCrop.test.ts | 98 +++++++++++++++++++++++++++++++++
- 4 files changed, 233 insertions(+), 20 deletions(-)
+ 4 files changed, 248 insertions(+), 21 deletions(-)
  create mode 100644 tests/mcpScreenshotCrop.test.ts
 
 diff --git a/.context/TECHSTACK.md b/.context/TECHSTACK.md
-index 7558b4b..0f9389c 100644
+index a0113a4..d58d3bb 100644
 --- a/.context/TECHSTACK.md
 +++ b/.context/TECHSTACK.md
-@@ -141,6 +141,13 @@
+@@ -248,6 +248,13 @@
    the readable canvases with people on them. `get_canvas` carries the same as `people`. The room
    registers the reader at startup (`registerRoomReader`), so the MCP server never imports the
    room. Tests: `mcpFocus.test.ts`.
@@ -60,19 +60,35 @@ index 7558b4b..0f9389c 100644
    activity feed) over one room per canvas.
  - Custom fonts (`shared/fonts.ts`, `server/fonts.ts`, `server/fontFile.ts`): font libraries, one
 diff --git a/server/mcp.ts b/server/mcp.ts
-index 1a67e36..45e1145 100644
+index 089fc13..37177ef 100644
 --- a/server/mcp.ts
 +++ b/server/mcp.ts
-@@ -34,7 +34,7 @@ import { isAgentKeySecret, verifyAgentKey } from './agentKeys.ts'
- import * as workspaces from './workspaces.ts'
+@@ -42,10 +42,10 @@ import * as workspaces from './workspaces.ts'
  import { auth, getUserName, isBanned } from './auth.ts'
  import { capture, captureThrottled } from './analytics.ts'
+ import { captureFeature, captureTokenResults } from './featureEvents.ts'
 -import { renderFrame } from './screenshot.ts'
++import { renderedHeight } from './renderLimits.ts'
 +import { renderFrame, renderFrameRegion, type FrameCrop, type FrameRegion } from './screenshot.ts'
+ import { imagesForFrames } from './assets.ts'
+ import type { FrameImage } from '../shared/imageDescriptions.ts'
+-import { renderedHeight } from './renderLimits.ts'
  import {
    MAX_PDF_FRAMES,
    PDF_UNAVAILABLE_MESSAGE,
-@@ -2151,37 +2151,93 @@ export function buildMcpServer(
+@@ -221,11 +221,6 @@ function editFrameSource(frame: Frame, find: string, replace: string): { html: s
+ const MAX_MCP_PDF_BYTES = 15_000_000
+ 
+ /** Tells the agent a very tall frame's screenshot stops short of its bottom. */
+-function croppedNote(frame: Frame, scale: number): string {
+-  const height = renderedHeight(frame, scale)
+-  return height < Math.round(frame.height) ? ` — cropped to the top ${height}px (pixel budget)` : ''
+-}
+-
+ function err(message: string) {
+   return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true }
+ }
+@@ -2482,37 +2477,98 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
        title: 'Screenshot a frame',
        _meta: previewToolMeta('Rendering the frame…', 'Frame rendered'),
        description:
@@ -97,8 +113,7 @@ index 1a67e36..45e1145 100644
 +          .describe('Longest edge of the image in px; lowers scale to fit (e.g. 800 for a glance)'),
 +        element_id: z
 +          .string()
-           .optional()
--          .describe('Device scale factor: 1 (default) or 2 for a retina-resolution image'),
++          .optional()
 +          .describe('Crop to the element carrying this data-doop-id (from get_frame, inspect_frame or a comment)'),
 +        padding: z.number().min(0).max(400).optional().describe('px of context kept around element_id (default 16)'),
 +        region: z
@@ -109,7 +124,8 @@ index 1a67e36..45e1145 100644
 +          ),
 +        format: z
 +          .enum(['png', 'jpeg'])
-+          .optional()
+           .optional()
+-          .describe('Device scale factor: 1 (default) or 2 for a retina-resolution image'),
 +          .describe('png (default, exact) or jpeg (a smaller download; the same token cost)'),
          agent_name: agentName.optional(),
        },
@@ -151,6 +167,8 @@ index 1a67e36..45e1145 100644
 +        } else {
 +          if (max_size) density = Math.min(density, max_size / Math.max(shown.width, shown.height))
 +          image = await renderFrame(f, density, { type })
++          /* past the pixel budget the render stops partway down (renderLimits.ts) */
++          shown = { ...shown, height: renderedHeight(f, density) }
 +          /* the ChatGPT card loads this exact image next — serve it from cache */
 +          if (type === 'png' && (density === 1 || density === 2)) primeImage(f, density, image)
 +        }
@@ -158,6 +176,9 @@ index 1a67e36..45e1145 100644
 +        const part = crop
 +          ? ` region ${shown.x},${shown.y} ${shown.width}×${shown.height} of ${Math.round(f.width)}×${Math.round(f.height)}`
 +          : ` ${Math.round(f.width)}×${Math.round(f.height)}`
++        /* a frame past the pixel budget is rendered from the top down to it */
++        const budgetCut =
++          !crop && shown.height < Math.round(f.height) ? ` Cut to the top ${shown.height}px (pixel budget).` : ''
 +        const tall =
 +          !crop && shown.height * density > 2600 && shown.height > 2 * shown.width
 +            ? ' This frame is tall: the model shrinks an image past about 2,500 px, so read it in parts with region (e.g. y 0, 1500, 3000… at height 1600).'
@@ -170,12 +191,12 @@ index 1a67e36..45e1145 100644
 +                { type: 'image' as const, data: image.toString('base64'), mimeType: `image/${type}` },
                  {
                    type: 'text' as const,
--                  text: `Screenshot of “${f.name}” (${f.width}×${f.height}@${scale ?? 1}x, html ${f.html.length} bytes)`,
-+                  text: `Screenshot of “${f.name}”${part} @${Math.round(density * 1000) / 1000}x = ${px}, html ${f.html.length} bytes.${tall}`,
+-                  text: `Screenshot of “${f.name}” (${f.width}×${f.height}@${scale ?? 1}x, html ${f.html.length} bytes)${croppedNote(f, scale ?? 1)}`,
++                  text: `Screenshot of “${f.name}”${part} @${Math.round(density * 1000) / 1000}x = ${px}, html ${f.html.length} bytes.${budgetCut}${tall}`,
                  },
                ],
              },
-@@ -2192,6 +2248,7 @@ export function buildMcpServer(
+@@ -2523,6 +2579,7 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
            [f],
          )
        } catch (e) {
@@ -184,10 +205,10 @@ index 1a67e36..45e1145 100644
        }
      },
 diff --git a/server/screenshot.ts b/server/screenshot.ts
-index 5fa58b3..f7b8e72 100644
+index 059ce3f..00d6083 100644
 --- a/server/screenshot.ts
 +++ b/server/screenshot.ts
-@@ -399,31 +399,82 @@ export async function inspectFrame(frame: Frame): Promise<FrameInspection> {
+@@ -447,6 +447,51 @@ async function inspectOn(page: Page, frame: Frame): Promise<FrameInspection> {
    }
  }
  
@@ -211,7 +232,7 @@ index 5fa58b3..f7b8e72 100644
 +
 +/** The crop's box, kept inside the frame: the canvas clips a frame to its
 + *  own size, so nothing outside it is part of the design. */
-+async function cropBox(page: Page, frame: Frame, crop: FrameCrop): Promise<FrameRegion> {
++async function cropBox(page: Page, frame: Frame, crop: FrameCrop, scale: number): Promise<FrameRegion> {
 +  let box: FrameRegion | null
 +  if ('region' in crop) box = crop.region
 +  else {
@@ -231,55 +252,75 @@ index 5fa58b3..f7b8e72 100644
 +  const right = Math.min(Math.round(frame.width), Math.ceil(box.x + box.width))
 +  const bottom = Math.min(Math.round(frame.height), Math.ceil(box.y + box.height))
 +  if (right - x < 1 || bottom - y < 1) throw new CropError('the crop is outside the frame or empty')
-+  return { x, y, width: right - x, height: bottom - y }
++  /* the pixel budget bounds the crop, as it does a layer's (layerClip) */
++  const budget = renderedHeight({ width: right - x, height: bottom - y }, scale)
++  return { x, y, width: right - x, height: Math.min(bottom - y, budget) }
 +}
 +
- export async function renderFrame(
-   frame: Frame,
-   /* output pixel density — fractional values downscale huge frames */
+ export interface RenderOptions extends PageOptions {
+   type?: 'png' | 'jpeg' | 'webp'
+   quality?: number
+@@ -455,6 +500,9 @@ export interface RenderOptions extends PageOptions {
+    *  matches (a layer export); rejects with LayerNotFoundError when nothing
+    *  visible matches */
+   layer?: string
++  /** cut the render to a region or to an element's box (get_frame_screenshot);
++   *  rejects with CropError when that names nothing in the frame */
++  crop?: FrameCrop
+ }
+ 
+ export function renderFrame(
+@@ -463,6 +511,16 @@ export function renderFrame(
    scale: number = 1,
--  opts: { type?: 'png' | 'jpeg' | 'webp'; quality?: number; maxHeight?: number } = {},
-+  opts: { type?: 'png' | 'jpeg' | 'webp'; quality?: number; maxHeight?: number; crop?: FrameCrop } = {},
+   opts: RenderOptions = {},
  ): Promise<Buffer> {
-+  return (await renderFrameRegion(frame, scale, opts)).image
++  return renderFrameRegion(frame, scale, opts).then((r) => r.image)
 +}
 +
-+/** renderFrame, also saying which part of the frame the image shows. */
-+export async function renderFrameRegion(
++/** renderFrame, also saying which part of the frame the image shows, in
++ *  design px. */
++export function renderFrameRegion(
 +  frame: Frame,
 +  scale: number = 1,
-+  opts: { type?: 'png' | 'jpeg' | 'webp'; quality?: number; maxHeight?: number; crop?: FrameCrop } = {},
++  opts: RenderOptions = {},
 +): Promise<{ image: Buffer; region: FrameRegion }> {
-   const loaded = await loadFramePage(frame)
-   const { page } = loaded
-   try {
--    await page.setViewport({
--      width: Math.max(1, Math.round(frame.width)),
--      height: Math.max(1, Math.round(frame.height)),
--      deviceScaleFactor: scale,
--    })
-+    const width = Math.max(1, Math.round(frame.width))
-+    const height = Math.max(1, Math.round(frame.height))
-+    await page.setViewport({ width, height, deviceScaleFactor: scale })
-     const type = opts.type ?? 'png'
--    const clip =
--      opts.maxHeight && frame.height > opts.maxHeight
--        ? { x: 0, y: 0, width: Math.round(frame.width), height: Math.round(opts.maxHeight) }
-+    const clip = opts.crop
-+      ? await cropBox(page, frame, opts.crop)
-+      : opts.maxHeight && frame.height > opts.maxHeight
-+        ? { x: 0, y: 0, width, height: Math.round(opts.maxHeight) }
-         : undefined
-     const buf = await page.screenshot({
-       type,
-       ...(type === 'png' ? {} : { quality: opts.quality ?? 90 }),
-       ...(clip ? { clip } : {}),
-     })
--    return Buffer.from(buf)
-+    return { image: Buffer.from(buf), region: clip ?? { x: 0, y: 0, width, height } }
-   } finally {
-     await loaded.close()
-   }
+   return renderer.withPage(
+     'rendering the frame',
+     RENDER_TIMEOUT_MS,
+@@ -517,7 +575,12 @@ async function layerClip(page: Page, selector: string, frame: Frame, scale: numb
+   return { x, y, width: clipWidth, height: Math.min(Math.ceil(box.bottom), height, y + budget) - y }
+ }
+ 
+-async function screenshotOn(page: Page, frame: Frame, scale: number, opts: RenderOptions): Promise<Buffer> {
++async function screenshotOn(
++  page: Page,
++  frame: Frame,
++  scale: number,
++  opts: RenderOptions,
++): Promise<{ image: Buffer; region: FrameRegion }> {
+   const width = Math.max(1, Math.round(frame.width))
+   const fullHeight = Math.max(1, Math.round(frame.height))
+   const height = renderedHeight(frame, scale, opts.maxHeight)
+@@ -528,13 +591,15 @@ async function screenshotOn(page: Page, frame: Frame, scale: number, opts: Rende
+   const type = opts.type ?? 'png'
+   const clip = opts.layer
+     ? await layerClip(page, opts.layer, frame, scale)
+-    : height < fullHeight
+-      ? { x: 0, y: 0, width, height }
+-      : undefined
++    : opts.crop
++      ? await cropBox(page, frame, opts.crop, scale)
++      : height < fullHeight
++        ? { x: 0, y: 0, width, height }
++        : undefined
+   const buf = await page.screenshot({
+     type,
+     ...(type === 'png' ? {} : { quality: opts.quality ?? 90 }),
+     ...(clip ? { clip } : {}),
+   })
+-  return Buffer.from(buf)
++  return { image: Buffer.from(buf), region: clip ?? { x: 0, y: 0, width, height } }
+ }
 diff --git a/tests/mcpScreenshotCrop.test.ts b/tests/mcpScreenshotCrop.test.ts
 new file mode 100644
 index 0000000..f601ddd

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 05:09:37 +0000
-Subject: [PATCH 16/52] perf(canvas): a pan press restyles nothing
+Subject: [PATCH 16/55] perf(canvas): a pan press restyles nothing
 
 With the Hand tool (the first tool in the reviewer layout) every press on
 the canvas starts a pan, and each press and each release restyled the
@@ -31,7 +31,7 @@ Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
  1 file changed, 25 insertions(+), 6 deletions(-)
 
 diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
-index 3b5f65f..e6cb20f 100644
+index 7dddc87..e431b55 100644
 --- a/src/components/Stage.tsx
 +++ b/src/components/Stage.tsx
 @@ -126,11 +126,17 @@ const PRESSABLE = 'button, [role="button"], [role="switch"], [role="checkbox"],
@@ -76,7 +76,7 @@ index 3b5f65f..e6cb20f 100644
    /* the selection rectangle being dragged out, in world coordinates */
    /* Z held down: the tool to go back to on release */
    const zoomHeld = useRef<{ previous: Tool } | null>(null)
-@@ -1177,6 +1186,7 @@ export function Stage({
+@@ -1143,6 +1152,7 @@ export function Stage({
    function startPan(e: React.PointerEvent, isBackground: boolean) {
      e.currentTarget.setPointerCapture(e.pointerId)
      setPanning(true)
@@ -84,7 +84,7 @@ index 3b5f65f..e6cb20f 100644
      const unlockSelection = lockTextSelection()
      let last = { x: e.clientX, y: e.clientY }
      let moved = false
-@@ -1203,6 +1213,7 @@ export function Stage({
+@@ -1169,6 +1179,7 @@ export function Stage({
        window.removeEventListener('pointerup', onUp)
        window.removeEventListener('pointercancel', onCancel)
        setPanning(false)
@@ -92,7 +92,7 @@ index 3b5f65f..e6cb20f 100644
        unlockSelection()
      }
      function onUp() {
-@@ -1359,8 +1370,12 @@ export function Stage({
+@@ -1325,8 +1336,12 @@ export function Stage({
             attached to it — everything visual is in the utilities beside it. */
              className={cn(
                'stage absolute inset-0 touch-none',
@@ -106,9 +106,9 @@ index 3b5f65f..e6cb20f 100644
                  : panMode || tool === 'hand'
                    ? 'cursor-grab! [&_*]:cursor-grab!'
                    : tool === 'zoom'
-@@ -1434,6 +1449,10 @@ export function Stage({
-               ref={pixelGridRef}
-             />
+@@ -1405,6 +1420,10 @@ export function Stage({
+                 the world so no frame, however it stacks, covers it */}
+             <div className="pointer-events-none absolute inset-0" data-stage-labels="" ref={attachLabelLayer} />
              {showRulers && <Rulers stage={ref} />}
 +            {/* While a pan lasts, the closed hand is this one element's cursor
 +                (doubled class: it has to win over the Hand tool's descendant

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 08:07:09 +0000
-Subject: [PATCH 23/52] feat(api): read a frame's HTML over HTTP with an agent
+Subject: [PATCH 23/55] feat(api): read a frame's HTML over HTTP with an agent
  key
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -31,20 +31,20 @@ render, and a link that needs no key would be new exposure.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  README.md                    |   7 ++-
- server/frameHtml.ts          |  57 +++++++++++++++++++
+ server/frameHtmlRoute.ts     |  64 ++++++++++++++++++++++
  server/guide.ts              |   7 +++
  server/index.ts              |  10 ++++
- server/mcp.ts                |   5 +-
+ server/mcp.ts                |   4 +-
  tests/frameHtmlRoute.test.ts | 103 +++++++++++++++++++++++++++++++++++
- 6 files changed, 186 insertions(+), 3 deletions(-)
- create mode 100644 server/frameHtml.ts
+ 6 files changed, 192 insertions(+), 3 deletions(-)
+ create mode 100644 server/frameHtmlRoute.ts
  create mode 100644 tests/frameHtmlRoute.test.ts
 
 diff --git a/README.md b/README.md
-index 288c7dd..9218b3b 100644
+index 9ee6a64..0c081b4 100644
 --- a/README.md
 +++ b/README.md
-@@ -785,6 +785,11 @@ Then tell the agent something like:
+@@ -811,6 +811,11 @@ Then tell the agent something like:
  
  Screenshots render in your system Chrome/Chromium via `puppeteer-core` (set `CHROME_PATH` if it isn't
  auto-detected). Humans can hit the same renderer at `GET /api/frames/:id/screenshot.png?scale=2`.
@@ -56,7 +56,7 @@ index 288c7dd..9218b3b 100644
  For website viewing/imports, setting `CONTEXT_DEV_API_KEY` makes Context.dev acquire the rendered
  HTML while Doop still sanitizes it and renders the preview locally; without the key, Doop navigates
  to the public page directly in Chromium.
-@@ -1045,7 +1050,7 @@ applies the same canvas access rules. Route handlers live in
+@@ -1071,7 +1076,7 @@ applies the same canvas access rules. Route handlers live in
  | Prefix                                                      | What it covers                                                                                                                           |
  | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
  | `/api/canvases`                                             | Canvases and their members, pages, flow start, guides, guidelines, references, cards, comments, imports, sync keys, assets, `export.pdf` |
@@ -65,12 +65,12 @@ index 288c7dd..9218b3b 100644
  | `/api/comments`, `/api/tasks`, `/api/feedback`              | Replies, resolve and retry; task feedback                                                                                                |
  | `/api/workspaces`, `/api/billing`                           | Workspaces, people, roles, Stripe checkout                                                                                               |
  | `/api/automations`, `/api/integrations`, `/api/webhooks`    | Automations, connected tools, outbound webhooks                                                                                          |
-diff --git a/server/frameHtml.ts b/server/frameHtml.ts
+diff --git a/server/frameHtmlRoute.ts b/server/frameHtmlRoute.ts
 new file mode 100644
-index 0000000..8d7d9bd
+index 0000000..3a0b36e
 --- /dev/null
-+++ b/server/frameHtml.ts
-@@ -0,0 +1,57 @@
++++ b/server/frameHtmlRoute.ts
+@@ -0,0 +1,64 @@
 +import type { NextFunction, Request, Response } from 'express'
 +import { roleAllows } from '../shared/canvasRole.ts'
 +import type { Frame } from '../shared/types.ts'
@@ -94,6 +94,8 @@ index 0000000..8d7d9bd
 + * own origin it would run with doop's cookies if a browser opened it, so the
 + * response is sandboxed (an opaque origin, nothing loads or runs) and never
 + * stored by a cache.
++ *
++ * Named apart from frameHtml.ts, which is the store's lazy HTML loading.
 + */
 +
 +const HEADERS = {
@@ -123,18 +125,23 @@ index 0000000..8d7d9bd
 +    const canvas = frame ? store.getCanvas(frame.canvasId) : undefined
 +    if (!frame || !canvas || !roleAllows(canvasRole(key.userId, canvas), 'view'))
 +      return void res.status(404).json({ error: 'frame not found' })
++    /* ahead of the session gate, so the route's loadFirst has not run: a
++       frame's HTML is in memory only once its canvas is loaded (frameHtml.ts),
++       and only a key with access brings the canvas in */
++    await store.load(canvas.id)
++    res.once('close', store.hold(canvas.id))
 +    sendFrameHtml(res, frame)
 +  } catch (err) {
 +    next(err)
 +  }
 +}
 diff --git a/server/guide.ts b/server/guide.ts
-index bccb82a..daa6ba8 100644
+index 476ccc8..c3ded00 100644
 --- a/server/guide.ts
 +++ b/server/guide.ts
-@@ -448,6 +448,13 @@ For print, a client handoff or a deck, export_frame with format "pdf" returns th
- at the frame's own size. Pass frame_ids to bind several frames of one canvas into one multi-page
- PDF; pages follow the order given (frame_id first, then frame_ids as listed).
+@@ -564,6 +564,13 @@ them; the rest is open to you. get_guide({ topic: "comments-and-agents" }) has b
+ Every frame result carries image_url, a public render of its current HTML. export_frame
+ gives PNG, JPG or PDF, export_layer one element (get_guide export).
  
 +## Frame HTML over plain HTTP
 +
@@ -147,29 +154,29 @@ index bccb82a..daa6ba8 100644
  
  - Call get_canvas before adding or editing anything. Note each frame's updatedBy and
 diff --git a/server/index.ts b/server/index.ts
-index dd48ab7..c0e9c3c 100644
+index 1bb0432..4f66a2e 100644
 --- a/server/index.ts
 +++ b/server/index.ts
-@@ -45,6 +45,7 @@ import { isLinkAccess, roleAllows, type CanvasRole } from '../shared/canvasRole.
- import { auth, initAuth, syncAdmins, getUserName, loginProvidersConfig } from './auth.ts'
+@@ -92,6 +92,7 @@ import { auth, initAuth, syncAdmins, getUserName, loginProvidersConfig } from '.
+ import { getInstanceSettings, hydrateInstanceSettings, loginPolicy } from './instanceSettings.ts'
  import { adminRouter } from './admin.ts'
  import { operatorRouter } from './operator.ts'
-+import { frameHtmlByAgentKey, sendFrameHtml } from './frameHtml.ts'
++import { frameHtmlByAgentKey, sendFrameHtml } from './frameHtmlRoute.ts'
  import {
    canvasForReviewer,
    embedGrantOf,
-@@ -738,6 +739,10 @@ app.post('/ingest/:key', express.json({ limit: '10mb', type: () => true }), (req
+@@ -893,6 +894,10 @@ app.post('/ingest/:key', express.json({ limit: '10mb', type: () => true }), (req
     is unset — see server/operator.ts. Ahead of the session gate on purpose. */
  app.use('/api/operator', operatorRouter(refreshRoomRoles))
  
-+/* a frame's HTML for scripts holding an agent key (server/frameHtml.ts);
++/* a frame's HTML for scripts holding an agent key (server/frameHtmlRoute.ts);
 +   other requests go on to the session gate and the route below it */
 +app.get('/api/frames/:id/html', frameHtmlByAgentKey)
 +
  /* everything else under /api requires a logged-in user; the session's user
     is authoritative for names — clients don't get to pick who they are */
  interface SessionUser {
-@@ -2166,6 +2171,11 @@ app.delete('/api/frames/:id', (req, res) => {
+@@ -2902,6 +2907,11 @@ app.delete('/api/frames/:id', (req, res) => {
  /* design history: the states a frame had before later edits replaced them,
     newest first and without HTML; one version in full; restore (same
     permission model as editing — anyone with access to the canvas) */
@@ -182,20 +189,19 @@ index dd48ab7..c0e9c3c 100644
    if (!requireFrame(req, res, req.params.id, 'view')) return
    res.json(await persist.listFrameVersions(req.params.id))
 diff --git a/server/mcp.ts b/server/mcp.ts
-index f2fe045..e0f49ca 100644
+index 3233d0c..e3ccc46 100644
 --- a/server/mcp.ts
 +++ b/server/mcp.ts
-@@ -1498,7 +1498,8 @@ export function buildMcpServer(
-     'get_frame',
+@@ -1625,7 +1625,7 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
      {
        title: 'Get a frame and its HTML',
--      description: 'Get a frame including its full HTML content.',
-+      description:
-+        'Get a frame including its full HTML content. A script holding an agent key can read the same HTML without MCP: GET /api/frames/<frame_id>/html with Authorization: Bearer dpk_… (read-only, needs view access).',
+       description:
+-        'Get a frame including its HTML. Component instances come back as <doop-use> (see the Components section of the guide), and `instances` lists each with its id, props and overridden parts. Write them back the same way.',
++        'Get a frame including its HTML. Component instances come back as <doop-use> (see the Components section of the guide), and `instances` lists each with its id, props and overridden parts. Write them back the same way. A script holding an agent key can read the same HTML without MCP: GET /api/frames/<frame_id>/html with Authorization: Bearer dpk_… (read-only, needs view access).',
        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-       inputSchema: { frame_id: z.string(), agent_name: agentName.optional() },
-     },
-@@ -1553,7 +1554,7 @@ export function buildMcpServer(
+       inputSchema: {
+         frame_id: z.string(),
+@@ -1701,7 +1701,7 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
      {
        title: 'Export frame as image or PDF',
        description:
@@ -206,14 +212,14 @@ index f2fe045..e0f49ca 100644
          frame_id: z.string(),
 diff --git a/tests/frameHtmlRoute.test.ts b/tests/frameHtmlRoute.test.ts
 new file mode 100644
-index 0000000..9b074a5
+index 0000000..e40b575
 --- /dev/null
 +++ b/tests/frameHtmlRoute.test.ts
 @@ -0,0 +1,103 @@
 +import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 +import { Client, startServer, type Server } from './harness.ts'
 +
-+/* GET /api/frames/:id/html (server/frameHtml.ts) on a real server: an agent
++/* GET /api/frames/:id/html (server/frameHtmlRoute.ts) on a real server: an agent
 +   key reads what get_frame reads, a session reads it too, and nothing gets
 +   through that the account could not open. */
 +

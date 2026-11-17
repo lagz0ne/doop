@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 05:55:14 +0000
-Subject: [PATCH 31/52] fix(frames): offer inline text editing only where its
+Subject: [PATCH 31/55] fix(frames): offer inline text editing only where its
  save is accepted
 
 The previous patch refuses doop:edited saves from any frame whose HTML
@@ -25,18 +25,18 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 tests/agentGuidelineWrites.test.ts
 
 diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
-index 756845c..91683f8 100644
+index f6f9605..5c84a88 100644
 --- a/src/components/FrameView.tsx
 +++ b/src/components/FrameView.tsx
-@@ -1338,7 +1338,7 @@ export const FrameView = memo(function FrameView({
+@@ -1498,7 +1498,7 @@ export const FrameView = memo(function FrameView({
    }, [selected]) // eslint-disable-line react-hooks/exhaustive-deps
  
    /* ---- inline text editing ---- */
 -  const canEdit = !!frame.html && !stream && !frame.locked && !readOnly && !/<script/i.test(frame.html)
 +  const canEdit = !!frame.html && !stream && !frame.locked && !readOnly && !hasExecutableContent(frame.html)
  
-   async function enterElementEdit(where: { x: number; y: number } | { selector: string }) {
-     if (
+   async function enterGroup(at: { x: number; y: number }): Promise<boolean> {
+     const selected = pickedHere()
 diff --git a/tests/agentGuidelineWrites.test.ts b/tests/agentGuidelineWrites.test.ts
 new file mode 100644
 index 0000000..15c4ddf

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 09:21:34 +0000
-Subject: [PATCH 28/52] feat(ui): a phone reviews: one finger pans, a long hold
+Subject: [PATCH 28/55] feat(ui): a phone reviews: one finger pans, a long hold
  for menus, no editing
 
 A phone in the reviewer layout (FULL_UI off, <= 900px) is for reading and
@@ -47,14 +47,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/components/AccessBanner.tsx  |   5 +-
  src/components/CanvasDock.tsx    | 106 ++++++++++-----------
- src/components/FrameView.tsx     |  33 ++++++-
+ src/components/FrameView.tsx     |  40 ++++++--
  src/components/Stage.tsx         |  18 +++-
  src/lib/gesture.ts               |   6 +-
  src/lib/store.ts                 |  41 ++++++--
  src/lib/touchHold.ts             | 103 +++++++++++++++++++++
  src/pages/CanvasPage.tsx         |  39 +++++++-
  tests/phoneReviewBrowser.test.ts | 154 +++++++++++++++++++++++++++++++
- 9 files changed, 430 insertions(+), 75 deletions(-)
+ 9 files changed, 433 insertions(+), 79 deletions(-)
  create mode 100644 src/lib/touchHold.ts
  create mode 100644 tests/phoneReviewBrowser.test.ts
 
@@ -213,10 +213,10 @@ index 6c64f98..26d551c 100644
    )
  }
 diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
-index 2176115..8cee3b3 100644
+index f9cfb66..a070351 100644
 --- a/src/components/FrameView.tsx
 +++ b/src/components/FrameView.tsx
-@@ -23,6 +23,7 @@ import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type H
+@@ -24,6 +24,7 @@ import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type H
  import { snapFrame } from '../lib/snap'
  import { visibleGuides } from '../lib/guides'
  import { gesture } from '../lib/gesture'
@@ -224,7 +224,7 @@ index 2176115..8cee3b3 100644
  import { resolvePointerAction } from '../lib/tools'
  import { FrameContextMenu } from './FrameContextMenu'
  import { FrameApprovalBadge } from './FrameApproval'
-@@ -267,6 +268,8 @@ export const FrameView = memo(function FrameView({
+@@ -292,6 +293,8 @@ export const FrameView = memo(function FrameView({
       moved, resized or edited — the server refuses those writes anyway */
    const readOnly = useStore((s) => !canEditOpenCanvas(s))
    const select = useStore((s) => s.select)
@@ -233,13 +233,25 @@ index 2176115..8cee3b3 100644
    const flash = useStore((s) => s.flashes[frame.id])
    const stream = useStore((s) => s.streams[frame.id])
    /* select the stable presences map, derive in render — a selector that
-@@ -340,13 +343,30 @@ export const FrameView = memo(function FrameView({
+@@ -365,17 +368,33 @@ export const FrameView = memo(function FrameView({
      if (action === 'comment') {
        /* the Comment tool: no drag — the frame is selected and a click on its
           surface opens the composer on the element under the pointer */
+-      e.stopPropagation()
+-      e.preventDefault()
+-      if (!s.selectedIds.includes(frame.id)) select(frame.id)
+-      if (probeOnClick) {
+-        const at = designOffset(e, frame.rotation)
+-        probeAt(at.x, at.y, 'comment')
+-      } else if (panelOnClick) {
+-        /* the frame's name: a comment on the frame as a whole, the one a
 +      const comment = () => {
 +        if (!useStore.getState().selectedIds.includes(frame.id)) select(frame.id)
++        /* on the frame's name, a comment on the frame as a whole: the one a
+            frame filled edge to edge by its layers leaves no background for */
+-        commentOnFrame()
 +        if (probeOnClick) probeAt(at.x, at.y, 'comment')
++        else if (panelOnClick) commentOnFrame()
 +      }
 +      const at = designOffset(e, frame.rotation)
 +      /* by finger it is a tap that comments: the press goes on to the Stage,
@@ -257,19 +269,14 @@ index 2176115..8cee3b3 100644
 +        window.addEventListener('pointerup', onUp)
 +        window.addEventListener('pointercancel', onUp)
 +        return
-+      }
-       e.stopPropagation()
-       e.preventDefault()
--      if (!s.selectedIds.includes(frame.id)) select(frame.id)
--      if (probeOnClick) {
--        const at = designOffset(e, frame.rotation)
--        probeAt(at.x, at.y, 'comment')
--      }
+       }
++      e.stopPropagation()
++      e.preventDefault()
 +      comment()
        return
      }
      /* a locked frame is not the stage's to select, move or resize: the press
-@@ -1513,10 +1533,13 @@ export const FrameView = memo(function FrameView({
+@@ -1693,10 +1712,13 @@ export const FrameView = memo(function FrameView({
            }
            /* stop the event here so the Stage's background menu — whose trigger
           wraps this one — does not open a second menu behind ours */
@@ -284,7 +291,7 @@ index 2176115..8cee3b3 100644
              const target = e.target as HTMLElement
              const request = ++menuRequest.current
 diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
-index 2e2a83e..b9688df 100644
+index c1170dd..cc65885 100644
 --- a/src/components/Stage.tsx
 +++ b/src/components/Stage.tsx
 @@ -26,6 +26,7 @@ import { useIsMobile } from '../hooks/use-mobile'
@@ -295,7 +302,7 @@ index 2e2a83e..b9688df 100644
  import { hasFrameClip, pasteFrameAtScreen } from '../lib/frameClipboard'
  import { MenuHint } from './ui/menu'
  import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from './ui/context-menu'
-@@ -1150,7 +1151,11 @@ export function Stage({
+@@ -1116,7 +1117,11 @@ export function Stage({
      }
    }, [tool])
  
@@ -308,7 +315,7 @@ index 2e2a83e..b9688df 100644
      const target = e.target as HTMLElement
      /* a locked frame lets the press through (FrameView.startDrag), and the
         stage treats it as empty canvas: a click clears, a drag marquees */
-@@ -1176,6 +1181,10 @@ export function Stage({
+@@ -1142,6 +1147,10 @@ export function Stage({
        if (e.pointerType === 'touch') startPan(e, isBackground)
        startCanvasComment(e)
      }
@@ -319,7 +326,7 @@ index 2e2a83e..b9688df 100644
    }
  
    /* the Comment tool on empty canvas: a click (not a drag) opens the composer
-@@ -1212,8 +1221,9 @@ export function Stage({
+@@ -1178,8 +1187,9 @@ export function Stage({
        if (Math.abs(dx) + Math.abs(dy) > 2) moved = true
        last = { x: ev.clientX, y: ev.clientY }
        /* a pinch owns the viewport while it lasts; keep tracking the finger
@@ -331,7 +338,7 @@ index 2e2a83e..b9688df 100644
        const vp = useStore.getState().viewport
        useStore.getState().setViewport({ ...vp, x: vp.x + dx, y: vp.y + dy })
      }
-@@ -1411,6 +1421,8 @@ export function Stage({
+@@ -1377,6 +1387,8 @@ export function Stage({
              onPointerDown={onPointerDown}
              onPointerMove={onPointerMove}
              onContextMenu={(e) => {
@@ -355,10 +362,10 @@ index 2e19cb4..f74d48d 100644
 +   still until it lifts. */
 +export const gesture: { pinching: boolean; held: number | null } = { pinching: false, held: null }
 diff --git a/src/lib/store.ts b/src/lib/store.ts
-index 74faf08..cc132ad 100644
+index 9de49e9..e4bab32 100644
 --- a/src/lib/store.ts
 +++ b/src/lib/store.ts
-@@ -68,6 +68,11 @@ interface State {
+@@ -71,6 +71,11 @@ interface State {
    selectedId: string | null
    /** the active canvas tool in the bottom toolbar */
    tool: Tool
@@ -370,15 +377,15 @@ index 74faf08..cc132ad 100644
    /** space bar held: the stage pans on drag instead of drawing a marquee */
    panMode: boolean
    /** a file is being dragged over the page: every frame keeps its shield up,
-@@ -259,6 +264,7 @@ interface State {
-   setLayersTab(tab: 'layers' | 'tokens'): void
+@@ -274,6 +279,7 @@ interface State {
+   setLayersTab(tab: 'layers' | 'components' | 'tokens'): void
    toggleUiHidden(): void
    setPrototypeMode(on: boolean): void
 +  setReviewOnly(on: boolean): void
    setViewport(v: Viewport): void
    setSnapGuides(guides: SnapGuide[]): void
    toggleRulers(): void
-@@ -315,6 +321,7 @@ export const useStore = create<State>((set, get) => ({
+@@ -332,6 +338,7 @@ export const useStore = create<State>((set, get) => ({
    selectedIds: [],
    selectedId: null,
    tool: 'select',
@@ -386,7 +393,7 @@ index 74faf08..cc132ad 100644
    panMode: false,
    fileDragging: false,
    inspectorOpen: false,
-@@ -639,7 +646,8 @@ export const useStore = create<State>((set, get) => ({
+@@ -669,7 +676,8 @@ export const useStore = create<State>((set, get) => ({
          : { selectedIds: ids, selectedId, inspectorOpen: false, selectedElement: null, elementPanelOpen: false }
      })
    },
@@ -396,7 +403,7 @@ index 74faf08..cc132ad 100644
    setRole: (role) =>
      set((s) => {
        if (!s.canvas) return {}
-@@ -718,6 +726,14 @@ export const useStore = create<State>((set, get) => ({
+@@ -748,6 +756,14 @@ export const useStore = create<State>((set, get) => ({
    /* hidden guides cannot stay selected: Delete would remove one unseen */
    toggleUiHidden: () => set((s) => ({ uiHidden: !s.uiHidden, ...(s.uiHidden ? {} : { selectedGuideId: null }) })),
    setPrototypeMode: (prototypeMode) => set({ prototypeMode }),
@@ -411,7 +418,7 @@ index 74faf08..cc132ad 100644
    /* every ordinary camera move (pan, zoom, fit, fly-to) is ours, so it ends a follow */
    setViewport: (viewport) => set({ viewport, following: null }),
    /* fires on every pointermove during a drag — skip the no-op transitions
-@@ -785,24 +801,35 @@ export function pickedSelectors(s: Pick<State, 'selectedElement' | 'selectedElem
+@@ -821,24 +837,35 @@ export function pickedSelectors(s: Pick<State, 'selectedElement' | 'selectedElem
    return s.selectedElements.at(-1) === primary ? s.selectedElements : [primary]
  }
  
@@ -563,10 +570,10 @@ index 0000000..4ade663
 +  window.addEventListener('pointercancel', release, true)
 +}
 diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
-index 844d710..f1a38c0 100644
+index a0fd951..1c83762 100644
 --- a/src/pages/CanvasPage.tsx
 +++ b/src/pages/CanvasPage.tsx
-@@ -751,6 +751,31 @@ export function CanvasPage({
+@@ -764,6 +764,31 @@ export function CanvasPage({
    useEffect(() => {
      if (reviewerLayout) useStore.getState().setTool('hand')
    }, [canvasId, reviewerLayout])
@@ -598,7 +605,7 @@ index 844d710..f1a38c0 100644
    /* docked, the rulers sit on the stage's own edges inside the columns, so
       nothing steps in past them */
    const rulerInset = rulersShown && !docked ? RULER_PX : 0
-@@ -914,7 +939,13 @@ export function CanvasPage({
+@@ -927,7 +952,13 @@ export function CanvasPage({
    return (
      /* --app-inset is 0 normally; the impersonation shell raises it so this
         fixed layer starts below the banner instead of under it */
@@ -613,7 +620,7 @@ index 844d710..f1a38c0 100644
        {/* Floating pills over the canvas, which shows through the transparent
            bar: the title pill on the left, live presence centred, sharing on
            the right. Tablet (xs..md) folds the text actions into the •••
-@@ -1282,8 +1313,10 @@ export function CanvasPage({
+@@ -1296,8 +1327,10 @@ export function CanvasPage({
                </div>
                {/* the same glyphs as the desktop bar and islands; pages live
                    in the Layers sheet, as on desktop. In the reviewer layout

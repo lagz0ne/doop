@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 08:25:27 +0000
-Subject: [PATCH 32/52] feat(share): a canvas's editors set its link, not only
+Subject: [PATCH 32/55] feat(share): a canvas's editors set its link, not only
  its owner
 
 Agents that work over MCP sign in as their own account, so the canvases
@@ -36,10 +36,10 @@ flag in GET, list and room), access.test.ts updated from owner-only.
  10 files changed, 101 insertions(+), 19 deletions(-)
 
 diff --git a/.context/TECHSTACK.md b/.context/TECHSTACK.md
-index 82c0010..f7c4f3a 100644
+index fed4483..508bdd8 100644
 --- a/.context/TECHSTACK.md
 +++ b/.context/TECHSTACK.md
-@@ -639,8 +639,11 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
+@@ -1045,8 +1045,11 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
    spec in `.context/specs/share-link-roles.md`. A link with a password (`canvas.linkPassword`)
    admits nobody by itself, account or not: its visitors come in as link guests.
  
@@ -74,10 +74,10 @@ index 0442ab3..d112471 100644
   *  and the owner/admins of the workspace it lives in — the org keeps
   *  control of the work done in its space. */
 diff --git a/server/index.ts b/server/index.ts
-index 4aae220..b292d67 100644
+index 080a64a..8ff8c45 100644
 --- a/server/index.ts
 +++ b/server/index.ts
-@@ -35,6 +35,7 @@ import { fontsForCanvas, hydrateFonts } from './fonts.ts'
+@@ -81,6 +81,7 @@ import { MAX_FONT_BYTES } from '../shared/fonts.ts'
  import { tokensCss, tokensMarkdown, tokensTailwind } from '../shared/designTokens.ts'
  import {
    canManageCanvas,
@@ -85,7 +85,7 @@ index 4aae220..b292d67 100644
    canvasRole,
    guestCanvasRole,
    hasDurableCanvasAccess,
-@@ -1258,6 +1259,7 @@ app.get('/api/canvases', async (req, res) => {
+@@ -1572,6 +1573,7 @@ app.get('/api/canvases', async (req, res) => {
        }
        return {
          ...c,
@@ -93,7 +93,7 @@ index 4aae220..b292d67 100644
          people: canvasPeopleIds(c.id).map((id) => ({
            id,
            name: users.get(id)?.name ?? 'Unknown',
-@@ -1270,6 +1272,11 @@ app.get('/api/canvases', async (req, res) => {
+@@ -1584,6 +1586,11 @@ app.get('/api/canvases', async (req, res) => {
    )
  })
  
@@ -105,16 +105,13 @@ index 4aae220..b292d67 100644
  /** owner first, then invited members, each once */
  function canvasPeopleIds(canvasId: string): string[] {
    const c = store.getCanvas(canvasId)
-@@ -1324,10 +1331,14 @@ app.get('/api/canvases/:id', (req, res) => {
-   /* the caller's own role rides along, so the editor knows to go read-only */
-   if (!c) return
-   /* a reviewer reads the canvas without its memory or member list */
--  res.json(req.embed ? { ...canvasForReviewer(c), role: callerRole(req, c) } : { ...c, role: callerRole(req, c) })
-+  res.json(
-+    req.embed
-+      ? { ...canvasForReviewer(c), role: callerRole(req, c) }
-+      : { ...c, role: callerRole(req, c), ...linkRight(req.user?.id, c) },
-+  )
+@@ -1642,11 +1649,11 @@ app.get('/api/canvases/:id', (req, res) => {
+   res.json(
+     req.embed
+       ? { ...canvasForReviewer(c), role, landingPageId: landingPageOf(c) }
+-      : { ...c, role, landingPageId: landingPageOf(c), team: teamOfCanvas(c) },
++      : { ...c, role, landingPageId: landingPageOf(c), team: teamOfCanvas(c), ...linkRight(req.user?.id, c) },
+   )
  })
  
 -/* Community gallery listing — the owner's call alone, like link access.
@@ -122,7 +119,7 @@ index 4aae220..b292d67 100644
     PUT both lists and re-describes; DELETE takes it down. */
  app.put('/api/canvases/:id/publish', (req, res) => {
    const c = requireCanvas(req, res, req.params.id, 'edit')
-@@ -1408,9 +1419,10 @@ app.patch('/api/canvases/:id', async (req, res) => {
+@@ -1729,9 +1736,10 @@ app.patch('/api/canvases/:id', async (req, res) => {
    const c = requireCanvas(req, res, req.params.id, 'edit')
    if (!c) return
    const { name, linkAccess, linkPassword } = req.body ?? {}
@@ -135,22 +132,26 @@ index 4aae220..b292d67 100644
      if (linkAccess !== undefined && !isLinkAccess(linkAccess))
        return res.status(400).json({ error: 'linkAccess must be "none", "view", "comment", "review" or "edit"' })
      /* a password string sets it, null or '' takes it away */
-@@ -2752,7 +2764,9 @@ wss.on('connection', (ws, upgradeReq) => {
-       const agents = [...(agentPresences.get(msg.canvasId)?.values() ?? [])]
-       send(ws, {
+@@ -3513,7 +3521,13 @@ wss.on('connection', (ws, upgradeReq) => {
          type: 'init',
--        canvas: embed ? { ...canvasForReviewer(canvas), role } : { ...canvas, role },
-+        canvas: embed
-+          ? { ...canvasForReviewer(canvas), role }
-+          : { ...canvas, role, ...linkRight(session.user.id, canvas) },
+         canvas: embed
+           ? { ...canvasForReviewer(canvas), role, landingPageId: landingPageOf(canvas) }
+-          : { ...canvas, role, landingPageId: landingPageOf(canvas), team: teamOfCanvas(canvas) },
++          : {
++              ...canvas,
++              role,
++              landingPageId: landingPageOf(canvas),
++              team: teamOfCanvas(canvas),
++              ...linkRight(session.user.id, canvas),
++            },
          presences: embed ? [...others, ...agents].map(presenceForReviewer) : [...others, ...agents],
          ...(embed
            ? { activity: [], tasks: [], feedback: [], decisions: [], proposals: [] }
 diff --git a/shared/types.ts b/shared/types.ts
-index a7daef5..0888c0a 100644
+index 9cb10b0..bc2e615 100644
 --- a/shared/types.ts
 +++ b/shared/types.ts
-@@ -110,6 +110,8 @@ export interface CanvasMeta {
+@@ -115,6 +115,8 @@ export interface CanvasMeta {
    /** the owner first, then everyone invited — the home tile's avatar stack;
     *  `image` is a profile photo's URL when the person uploaded one */
    people?: { id: string; name: string; image?: string }[]
@@ -159,16 +160,16 @@ index a7daef5..0888c0a 100644
  }
  
  /** The dashboard/gallery preview render (`/i/<id>.jpg?preview`) clips a
-@@ -229,6 +231,9 @@ export interface Canvas {
-   /** the caller's own role, set on the copy a canvas GET or a room `init`
-    *  hands one person; never stored */
-   role?: CanvasRole
+@@ -244,6 +246,9 @@ export interface Canvas {
+    *  a canvas GET or a room `init` hands out; never stored. Unset reads as the
+    *  built-in team as it ships */
+   team?: AgentRole[]
 +  /** the caller may set the share link (server/access.ts `canSetLink`),
 +   *  set beside `role` on the same per-person copies; never stored */
 +  canSetLink?: true
    /** user ids invited to collaborate (the owner is not listed) */
    memberIds?: string[]
-   /** the shared workspace this canvas belongs to — every workspace member
+   /** reusable designs on this canvas; unset = none. See shared/components.ts. */
 diff --git a/src/components/ShareModal.tsx b/src/components/ShareModal.tsx
 index c0d8e44..6169d72 100644
 --- a/src/components/ShareModal.tsx
@@ -209,10 +210,10 @@ index c0d8e44..6169d72 100644
          )}
          {isOwner && FULL_UI && (
 diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
-index f1a38c0..d599a6d 100644
+index 1c83762..b63d56b 100644
 --- a/src/pages/CanvasPage.tsx
 +++ b/src/pages/CanvasPage.tsx
-@@ -702,8 +702,8 @@ export function CanvasPage({
+@@ -715,8 +715,8 @@ export function CanvasPage({
    /* a share-link guest (server/shareLink.ts) has this canvas and no account:
       no way back to a canvas list, no settings, no sharing */
    const linkGuest = !!useMe(session?.user.id)?.linkGuest
@@ -224,10 +225,10 @@ index f1a38c0..d599a6d 100644
      () => Object.values(presences).filter((p) => p.clientId !== me.clientId),
      [presences, me.clientId],
 diff --git a/src/pages/Home.tsx b/src/pages/Home.tsx
-index ac78d64..ecfb032 100644
+index f54d423..05c3930 100644
 --- a/src/pages/Home.tsx
 +++ b/src/pages/Home.tsx
-@@ -713,9 +713,8 @@ function CanvasActions({
+@@ -710,9 +710,8 @@ function CanvasActions({
    onDelete?: () => void
  }) {
    const t = useT()

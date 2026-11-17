@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 15:07:00 +0000
-Subject: [PATCH 38/52] feat(telemetry): render trial reports, forwarded to an
+Subject: [PATCH 38/55] feat(telemetry): render trial reports, forwarded to an
  OpenTelemetry collector
 
 The canvas has two render experiments behind switches (the GPU picture
@@ -66,10 +66,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 tests/telemetry.test.ts
 
 diff --git a/.env.example b/.env.example
-index 5dd2cf1..25ce57a 100644
+index 530c187..8b279d6 100644
 --- a/.env.example
 +++ b/.env.example
-@@ -365,6 +365,23 @@
+@@ -423,6 +423,23 @@
  #POSTHOG_INGEST_HOST=https://us.i.posthog.com
  #POSTHOG_ASSETS_HOST=https://us-assets.i.posthog.com
  
@@ -94,10 +94,10 @@ index 5dd2cf1..25ce57a 100644
  # The list_backgrounds library ships as a checked-in catalog
  # (server/backgrounds.json) whose image bytes live in object storage under
 diff --git a/server/env.ts b/server/env.ts
-index 593af06..d8f094e 100644
+index e0cae4b..1842127 100644
 --- a/server/env.ts
 +++ b/server/env.ts
-@@ -276,6 +276,15 @@ const schema = {
+@@ -330,6 +330,15 @@ const schema = {
    POSTHOG_INGEST_HOST: origin({ default: 'https://us.i.posthog.com' }),
    POSTHOG_ASSETS_HOST: origin({ default: 'https://us-assets.i.posthog.com' }),
  
@@ -114,18 +114,18 @@ index 593af06..d8f094e 100644
    BACKGROUNDS_ORIGIN: origin({ default: undefined }),
  
 diff --git a/server/index.ts b/server/index.ts
-index b292d67..0f6effe 100644
+index 8ff8c45..3e1950e 100644
 --- a/server/index.ts
 +++ b/server/index.ts
-@@ -89,6 +89,7 @@ import {
-   MAX_ASSET_BYTES,
- } from './assets.ts'
+@@ -134,6 +134,7 @@ import { handleMcpRequest } from './mcp.ts'
+ import { RendererBusyError } from './renderBrowser.ts'
+ import { getAsset, reconcileAssetRefs, beginTicketUpload, endTicketUpload, createAsset } from './assets.ts'
  import * as ingest from './ingest.ts'
 +import { renderTelemetry } from './telemetry.ts'
  import * as agentKeys from './agentKeys.ts'
  import * as backgrounds from './backgrounds.ts'
- import * as storage from './storage.ts'
-@@ -652,6 +653,21 @@ for (const extension of extensions) {
+ import { serveIcon } from './iconProxy.ts'
+@@ -806,6 +807,21 @@ for (const extension of extensions) {
    if (extension.webhookRouter) app.use(`/webhooks/${extension.id}`, extension.webhookRouter())
  }
  

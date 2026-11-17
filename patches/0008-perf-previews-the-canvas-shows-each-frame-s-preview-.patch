@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Thu, 12 Nov 2026 05:00:31 +0000
-Subject: [PATCH 08/52] perf(previews): the canvas shows each frame's preview
+Subject: [PATCH 08/55] perf(previews): the canvas shows each frame's preview
  at the scale it is on screen
 
 A frame without a live document shows a picture of itself. That picture
@@ -47,36 +47,36 @@ of these differences.
 
 Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
 ---
- server/index.ts                 | 11 +++-
- server/previews.ts              | 31 ++++++++---
- server/screenshot.ts            |  4 +-
- server/thumbs.ts                | 97 ++++++++++++++++++++++-----------
- shared/types.ts                 | 40 ++++++++++++++
- src/components/FrameView.tsx    | 13 +++--
- src/components/Stage.tsx        | 35 +++++++++++-
- src/lib/liveFrames.ts           | 51 +++++++++++++++--
- tests/liveFrames.test.ts        | 19 +++++++
- tests/liveFramesBrowser.test.ts | 39 +++++++++++++
- tests/previewLevels.test.ts     | 53 ++++++++++++++++++
- tests/previews.test.ts          | 17 ++++++
- tests/thumbs.test.ts            | 45 +++++++++++++++
- 13 files changed, 400 insertions(+), 55 deletions(-)
+ server/index.ts                 |  11 +++-
+ server/previews.ts              |  25 +++++---
+ server/screenshot.ts            |   4 +-
+ server/thumbs.ts                | 100 ++++++++++++++++++++++----------
+ shared/types.ts                 |  40 +++++++++++++
+ src/components/FrameView.tsx    |  13 +++--
+ src/components/Stage.tsx        |  35 ++++++++++-
+ src/lib/liveFrames.ts           |  51 ++++++++++++++--
+ tests/liveFrames.test.ts        |  19 ++++++
+ tests/liveFramesBrowser.test.ts |  39 +++++++++++++
+ tests/previewLevels.test.ts     |  53 +++++++++++++++++
+ tests/previews.test.ts          |  17 ++++++
+ tests/thumbs.test.ts            |  45 ++++++++++++++
+ 13 files changed, 396 insertions(+), 56 deletions(-)
  create mode 100644 tests/previewLevels.test.ts
 
 diff --git a/server/index.ts b/server/index.ts
-index 3512b03..8847358 100644
+index 01d0eb9..25a0a1f 100644
 --- a/server/index.ts
 +++ b/server/index.ts
-@@ -87,7 +87,7 @@ import { isRunnerProvider } from '../shared/agentRunner.ts'
- import { modelCatalogFor } from './modelCatalog.ts'
- import { mentionedRole } from '../shared/agents.ts'
+@@ -146,7 +146,7 @@ import { mentionedRole } from '../shared/agents.ts'
+ import { hydrateCustomAgents, rosterFor, teamOfCanvas } from './customAgents.ts'
+ import { customAgentsRouter } from './customAgentRoutes.ts'
  import { activeAgentTasks } from '../shared/agentActivity.ts'
 -import { colorFor } from '../shared/types.ts'
 +import { colorFor, isPreviewScale } from '../shared/types.ts'
  import { isPeerViewport } from '../shared/viewport.ts'
  import { exportScaleSuffix, fitExportScale, parseExportScale } from '../shared/exportScale.ts'
  import { emailShare } from './canvasShares.ts'
-@@ -427,7 +427,11 @@ app.use('/relay', async (req, res) => {
+@@ -543,7 +543,11 @@ function sendRenderFailure(res: express.Response, error: unknown, fallback = 're
  
  app.get('/i/:id.:ext', async (req, res) => {
    const { id, ext } = req.params as { id: string; ext: string }
@@ -86,18 +86,18 @@ index 3512b03..8847358 100644
 +     /i/<id>.webp?preview&s=<scale> (previews.ts) */
 +  const level = ext === 'webp' && req.query.preview !== undefined ? Number(req.query.s) : undefined
 +  if (ext === 'webp' && !isPreviewScale(level)) return res.status(404).end()
+   /* metadata only: a cached image needs no html, and a render reads the
+      one frame's html when it starts (store.renderableFrame) */
    const frame = store.getFrame(id)
-   if (!frame) return res.status(404).end()
- 
-@@ -442,6 +446,7 @@ app.get('/i/:id.:ext', async (req, res) => {
-       quality: Math.min(100, Math.max(1, Number(req.query.quality) || 90)),
+@@ -564,6 +568,7 @@ app.get('/i/:id.:ext', async (req, res) => {
        /* ?preview — the dashboard-card variant; see previews.ts */
-       preview: req.query.preview !== undefined,
+       preview: !layer && req.query.preview !== undefined,
+       layer: layer ? layerSelector(layer) : undefined,
 +      ...(isPreviewScale(level) ? { level } : null),
        ...(typeof req.query.v === 'string' && /^\d+$/.test(req.query.v) ? { version: Number(req.query.v) } : null),
        ip: req.ip ?? 'unknown',
        /* the render limit targets anonymous hotlink abuse — a logged-in user
-@@ -460,7 +465,7 @@ app.get('/i/:id.:ext', async (req, res) => {
+@@ -583,7 +588,7 @@ app.get('/i/:id.:ext', async (req, res) => {
    }
    const { buf } = result
  
@@ -107,7 +107,7 @@ index 3512b03..8847358 100644
       editor's culled frames ask for it) can never show anything else: the
       browser keeps it for good and a page of hundreds of previews costs no
 diff --git a/server/previews.ts b/server/previews.ts
-index 5e3fad5..49bd57f 100644
+index d219e4f..7cc5997 100644
 --- a/server/previews.ts
 +++ b/server/previews.ts
 @@ -1,5 +1,5 @@
@@ -115,9 +115,9 @@ index 5e3fad5..49bd57f 100644
 -import type { Frame } from '../shared/types.ts'
 +import type { Frame, PreviewScale } from '../shared/types.ts'
  import * as thumbs from './thumbs.ts'
+ import { store } from './store.ts'
  
- /**
-@@ -32,7 +32,7 @@ const renderHits = new Map<string, number[]>()
+@@ -33,7 +33,7 @@ const renderHits = new Map<string, number[]>()
  const RENDERS_PER_MIN = env.PREVIEW_RENDERS_PER_MIN
  
  export interface ImageRequest {
@@ -126,10 +126,10 @@ index 5e3fad5..49bd57f 100644
    /** output density, already parsed and fitted (shared/exportScale.ts) */
    scale: number
    quality: number
-@@ -40,6 +40,10 @@ export interface ImageRequest {
-    *  meaningful for jpg — a png?preview would serve jpeg bytes under an
-    *  image/png content-type, so the flag is ignored there. */
+@@ -43,6 +43,10 @@ export interface ImageRequest {
    preview: boolean
+   /** a layer export: the CSS selector of the element to cut the render to */
+   layer?: string
 +  /** the level of the editor's preview pyramid asked for (?preview&s=):
 +   *  the whole frame at that scale, persisted like the card thumbnail.
 +   *  The only thing a webp is. */
@@ -137,23 +137,23 @@ index 5e3fad5..49bd57f 100644
    /** the frame version the URL names (?v=), if any. The editor's culled
     *  frames ask for the current one and show nothing else until the next
     *  edit, so a thumbnail known to be older is not an answer to them. */
-@@ -55,8 +59,13 @@ export type ImageResult = { status: 'ok'; buf: Buffer; fresh: boolean } | { stat
+@@ -58,8 +62,13 @@ export type ImageResult = { status: 'ok'; buf: Buffer; fresh: boolean } | { stat
  
  /** May reject when the render itself fails — the caller owns the 500. */
  export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageResult> {
 -  const preview = req.preview && req.ext === 'jpg'
--  const key = imageKey(frame.id, req.ext, req.scale, req.ext === 'jpg' ? req.quality : '', preview)
+-  const key = imageKey(frame.id, req.ext, req.scale, req.ext === 'jpg' ? req.quality : '', preview, req.layer)
 +  const level = req.ext === 'webp' ? req.level : undefined
 +  if (req.ext === 'webp' && level === undefined) throw new Error('a webp image is a preview level: ?preview&s=')
 +  const preview = level !== undefined || (req.preview && req.ext === 'jpg')
 +  const key =
 +    level !== undefined
 +      ? `${frame.id}:level:${level}`
-+      : imageKey(frame.id, req.ext, req.scale, req.ext === 'jpg' ? req.quality : '', preview)
++      : imageKey(frame.id, req.ext, req.scale, req.ext === 'jpg' ? req.quality : '', preview, req.layer)
    const cached = imgCache.get(key)
    let pending =
      cached && cached.updatedAt === frame.updatedAt && Date.now() - cached.at < IMG_CACHE_MS ? cached.buf : null
-@@ -66,7 +75,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
+@@ -69,7 +78,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
       costs no Chromium boot — so it isn't metered either */
    let fresh = true
    if (!pending && preview) {
@@ -162,7 +162,7 @@ index 5e3fad5..49bd57f 100644
      /* A request for exactly this version, answered from a thumbnail on record
         as older, would pin the old picture on a frame that shows it until its
         next edit: that one waits for the render instead (deduped and capped in
-@@ -79,7 +88,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
+@@ -82,7 +91,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
        req.version === frame.updatedAt &&
        (await consumeRenderBudget(req.ip, req.isAuthenticated))
      if (mustRender) {
@@ -171,54 +171,48 @@ index 5e3fad5..49bd57f 100644
        remember(key, pending, frame.updatedAt)
      } else if (stored) {
        pending = Promise.resolve(stored.buf)
-@@ -94,7 +103,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
+@@ -97,7 +106,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
      if (!(await consumeRenderBudget(req.ip, req.isAuthenticated))) return { status: 'rate-limited' }
      pending = preview
        ? /* renders AND persists — the next cold start serves from storage */
 -        thumbs.create(frame)
 +        thumbs.create(frame, level)
-       : loadScreenshot().then(({ renderFrame }) =>
-           renderFrame(frame, req.scale, { type: req.ext === 'jpg' ? 'jpeg' : 'png', quality: req.quality }),
-         )
-@@ -104,7 +113,13 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
-   return { status: 'ok', buf: await pending, fresh }
- }
+       : loadScreenshot().then(async ({ renderFrame }) =>
+           renderFrame(await store.renderSource(frame), req.scale, {
+             type: req.ext === 'jpg' ? 'jpeg' : 'png',
+@@ -113,7 +122,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
  
--function imageKey(id: string, ext: 'png' | 'jpg', scale: number, quality: number | '', preview: boolean): string {
-+function imageKey(
-+  id: string,
+ function imageKey(
+   id: string,
+-  ext: 'png' | 'jpg',
 +  ext: 'png' | 'jpg' | 'webp',
-+  scale: number,
-+  quality: number | '',
-+  preview: boolean,
-+): string {
-   return `${id}:${ext}:${scale}:${quality}:${preview ? 'p' : ''}`
- }
- 
+   scale: number,
+   quality: number | '',
+   preview: boolean,
 diff --git a/server/screenshot.ts b/server/screenshot.ts
-index d3c3742..5fa58b3 100644
+index 1b8083e..059ce3f 100644
 --- a/server/screenshot.ts
 +++ b/server/screenshot.ts
-@@ -403,7 +403,7 @@ export async function renderFrame(
-   frame: Frame,
-   /* output pixel density — fractional values downscale huge frames */
-   scale: number = 1,
--  opts: { type?: 'png' | 'jpeg'; quality?: number; maxHeight?: number } = {},
-+  opts: { type?: 'png' | 'jpeg' | 'webp'; quality?: number; maxHeight?: number } = {},
- ): Promise<Buffer> {
-   const loaded = await loadFramePage(frame)
-   const { page } = loaded
-@@ -420,7 +420,7 @@ export async function renderFrame(
-         : undefined
-     const buf = await page.screenshot({
-       type,
--      ...(type === 'jpeg' ? { quality: opts.quality ?? 90 } : {}),
-+      ...(type === 'png' ? {} : { quality: opts.quality ?? 90 }),
-       ...(clip ? { clip } : {}),
-     })
-     return Buffer.from(buf)
+@@ -448,7 +448,7 @@ async function inspectOn(page: Page, frame: Frame): Promise<FrameInspection> {
+ }
+ 
+ export interface RenderOptions extends PageOptions {
+-  type?: 'png' | 'jpeg'
++  type?: 'png' | 'jpeg' | 'webp'
+   quality?: number
+   maxHeight?: number
+   /** cut the render to the box of the first element this CSS selector
+@@ -533,7 +533,7 @@ async function screenshotOn(page: Page, frame: Frame, scale: number, opts: Rende
+       : undefined
+   const buf = await page.screenshot({
+     type,
+-    ...(type === 'jpeg' ? { quality: opts.quality ?? 90 } : {}),
++    ...(type === 'png' ? {} : { quality: opts.quality ?? 90 }),
+     ...(clip ? { clip } : {}),
+   })
+   return Buffer.from(buf)
 diff --git a/server/thumbs.ts b/server/thumbs.ts
-index d52324c..0d8c048 100644
+index 4bb0c4c..5186082 100644
 --- a/server/thumbs.ts
 +++ b/server/thumbs.ts
 @@ -1,4 +1,10 @@
@@ -231,9 +225,9 @@ index d52324c..0d8c048 100644
 +  type PreviewScale,
 +} from '../shared/types.ts'
  import * as storage from './storage.ts'
+ import { store } from './store.ts'
  
- /**
-@@ -16,8 +22,19 @@ import * as storage from './storage.ts'
+@@ -17,8 +23,19 @@ import { store } from './store.ts'
   * showed (the editor's culled frames show these previews, hundreds a page).
   * A thumbnail stored before the sidecar existed still degrades to one
   * background re-render — never to a blank tile.
@@ -253,7 +247,7 @@ index d52324c..0d8c048 100644
  /** frame.updatedAt the stored thumb was rendered from; absent = unknown */
  const written = new Map<string, number>()
  /** in-flight render+persist per frame — concurrent callers share it */
-@@ -29,8 +46,13 @@ const MIN_REVALIDATE_MS = 30_000
+@@ -30,8 +47,13 @@ const MIN_REVALIDATE_MS = 30_000
  /** frames purged mid-render — a pending create must not re-persist them */
  const dead = new Set<string>()
  
@@ -269,7 +263,7 @@ index d52324c..0d8c048 100644
  
  /* Global bound on concurrent preview renders. Per-frame dedupe caps repeat
     requests but not breadth: a post-restart dashboard of 50 stale canvases
-@@ -47,11 +69,17 @@ const loadScreenshot = () => (screenshot ??= import('./screenshot.ts'))
+@@ -48,13 +70,20 @@ const loadScreenshot = () => (screenshot ??= import('./screenshot.ts'))
  
  /** The preview render: card-sized, clipped, cheap — matches what /i/?preview
   *  serves, because this IS what /i/?preview serves. */
@@ -279,16 +273,20 @@ index d52324c..0d8c048 100644
    active++
    try {
      const { renderFrame } = await loadScreenshot()
+     /* the html is read when the render starts, not when it was queued */
+-    return await renderFrame(await store.renderSource(frame), Math.min(1, 640 / frame.width), {
++    const source = await store.renderSource(frame)
 +    /* A level of the pyramid is the whole frame, unclipped, at that scale.
 +       WebP at 90 because the picture stands in for the live document right
 +       beside live ones: JPEG at 70 rings around every glyph and hairline,
 +       and WebP at 90 is clean at half the bytes of JPEG at 90 or PNG. */
 +    if (level !== undefined)
-+      return await renderFrame(frame, previewRenderScale(frame, level), { type: 'webp', quality: 90 })
-     return await renderFrame(frame, Math.min(1, 640 / frame.width), {
++      return await renderFrame(source, previewRenderScale(frame, level), { type: 'webp', quality: 90 })
++    return await renderFrame(source, Math.min(1, 640 / frame.width), {
        type: 'jpeg',
        quality: 70,
-@@ -65,29 +93,30 @@ async function render(frame: Frame): Promise<Buffer> {
+       maxHeight: PREVIEW_MAX_HEIGHT,
+@@ -69,29 +98,30 @@ async function render(frame: Frame): Promise<Buffer> {
  
  /** Render now, persist, and return the bytes. Deduped per frame; rejects on
   *  render failure (the caller decides what a failed render means). */
@@ -330,7 +328,7 @@ index d52324c..0d8c048 100644
    return p
  }
  
-@@ -96,40 +125,46 @@ export function create(frame: Frame): Promise<Buffer> {
+@@ -100,40 +130,46 @@ export function create(frame: Frame): Promise<Buffer> {
   *  off (throttled, deduped, errors logged and swallowed) and the stored
   *  bytes are returned anyway: stale beats blank. Returns null when nothing
   *  is stored yet. */
@@ -394,10 +392,10 @@ index d52324c..0d8c048 100644
 +  }
  }
 diff --git a/shared/types.ts b/shared/types.ts
-index b2e3c49..d3e5b8a 100644
+index 45ba706..13ccd84 100644
 --- a/shared/types.ts
 +++ b/shared/types.ts
-@@ -93,6 +93,46 @@ export interface CanvasMeta {
+@@ -98,6 +98,46 @@ export interface CanvasMeta {
   *  image must assume this cap, not the frame's real height. */
  export const PREVIEW_MAX_HEIGHT = 1200
  
@@ -445,10 +443,10 @@ index b2e3c49..d3e5b8a 100644
  
  export const COMMUNITY_CATEGORIES = ['website', 'app', 'dashboard', 'mobile', 'marketing', 'other'] as const
 diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
-index 435f3d8..d4d25a9 100644
+index ed8776f..83909c4 100644
 --- a/src/components/FrameView.tsx
 +++ b/src/components/FrameView.tsx
-@@ -16,7 +16,7 @@ import { copyElementLink } from '../lib/elementLink'
+@@ -17,7 +17,7 @@ import { copyElementLink } from '../lib/elementLink'
  import { sendWs } from '../lib/ws'
  import { throttle } from '../lib/throttle'
  import { getIdentity } from '../lib/identity'
@@ -457,7 +455,7 @@ index 435f3d8..d4d25a9 100644
  import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
  import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
  import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
-@@ -2163,21 +2163,26 @@ function FramePreview({ frame }: { frame: Frame }) {
+@@ -2370,21 +2370,26 @@ function FramePreview({ frame }: { frame: Frame }) {
    const attempt = retry.version === frame.updatedAt ? retry.count : 0
    const timer = useRef(0)
    useEffect(() => () => window.clearTimeout(timer.current), [])
@@ -488,11 +486,11 @@ index 435f3d8..d4d25a9 100644
              if (attempt >= PREVIEW_RETRIES) return
              window.clearTimeout(timer.current)
 diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
-index b81d485..a06823d 100644
+index 3b2ca30..7f0ea11 100644
 --- a/src/components/Stage.tsx
 +++ b/src/components/Stage.tsx
-@@ -55,7 +55,14 @@ import { spaceWouldScroll } from '../lib/spaceScroll'
- import { viewOptionForKey } from '../lib/viewOptions'
+@@ -55,7 +55,14 @@ import { NO_INSETS, fitBox, type StageInsets } from '../lib/viewFit'
+ import { spaceWouldScroll } from '../lib/spaceScroll'
  import { ZOOM_DRAG_MIN, ZOOM_TOOL_STEP, zoomAtPoint, zoomToBox } from '../lib/zoomTool'
  import { isCanvasElement } from '../lib/drawing'
 -import { computeLiveFrames, cullingEnabled, pinnedBySelection, useLiveFrames, type FrameBox } from '../lib/liveFrames'
@@ -516,7 +514,7 @@ index b81d485..a06823d 100644
    /* the zoom and grid period last written to the DOM (see apply) */
    const appliedZoom = useRef<number | null>(null)
    const appliedPeriod = useRef<number | null>(null)
-@@ -404,6 +413,17 @@ export function Stage({
+@@ -407,6 +416,17 @@ export function Stage({
      const elements = new Set(frames.filter((f) => f.element).map((f) => f.id))
      let timer = 0
      let pump = 0
@@ -534,7 +532,7 @@ index b81d485..a06823d 100644
      /* Documents boot a few per animation frame, nearest the view first. A
         camera that comes to rest over twenty frames would otherwise create
         twenty documents in one task: a visible hitch, and input queued behind
-@@ -432,15 +452,24 @@ export function Stage({
+@@ -435,15 +455,24 @@ export function Stage({
        for (const p of Object.values(s.presences)) if (p.activeFrameId) pinned.add(p.activeFrameId)
        for (const id of Object.keys(s.streams)) pinned.add(id)
        const live = useLiveFrames.getState()
@@ -687,10 +685,10 @@ index 94c33a2..8d4b3e9 100644
 +  })
 +})
 diff --git a/tests/liveFramesBrowser.test.ts b/tests/liveFramesBrowser.test.ts
-index a25a255..3ab4a96 100644
+index e8f7a8c..e2429b0 100644
 --- a/tests/liveFramesBrowser.test.ts
 +++ b/tests/liveFramesBrowser.test.ts
-@@ -172,6 +172,45 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
+@@ -181,6 +181,45 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
      await store(page, 'select(null)')
    }, 30_000)
  

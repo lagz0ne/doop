@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Thu, 12 Nov 2026 04:53:20 +0000
-Subject: [PATCH 06/52] feat(operator): a token-gated API for users, sharing,
+Subject: [PATCH 06/55] feat(operator): a token-gated API for users, sharing,
  canvas owners and agent keys
 
 Running a one-person instance with sign-up closed left no way to manage it:
@@ -52,7 +52,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 tests/operator.test.ts
 
 diff --git a/.env.example b/.env.example
-index 02b4a5c..ab6eab7 100644
+index a6c9c64..e8d5825 100644
 --- a/.env.example
 +++ b/.env.example
 @@ -54,6 +54,14 @@
@@ -68,13 +68,13 @@ index 02b4a5c..ab6eab7 100644
 +#DOOP_ADMIN_TOKEN=
 +
  # Optional SSO against an external OIDC provider (Zitadel, Okta, Authentik,
- # Keycloak, etc.), alongside email/password — not a replacement for it.
- # Set all three of ISSUER/CLIENT_ID/CLIENT_SECRET together to enable; the
+ # Keycloak, etc.), alongside email/password. To make it the only way in,
+ # an admin turns email/password sign-up off and the SSO auto-redirect on
 diff --git a/server/auth.ts b/server/auth.ts
-index 8057023..be789ae 100644
+index cd26c83..5afe763 100644
 --- a/server/auth.ts
 +++ b/server/auth.ts
-@@ -14,6 +14,20 @@ import { purgeUserData } from './accountDeletion.ts'
+@@ -15,6 +15,20 @@ import { purgeUserData } from './accountDeletion.ts'
  import { MCP_REFRESH_TOKEN_TTL_S } from './mcpTokens.ts'
  import { createHash } from 'node:crypto'
  import { createRemoteJWKSet, jwtVerify } from 'jose'
@@ -95,7 +95,7 @@ index 8057023..be789ae 100644
  
  /**
   * better-auth on our own database: email/password + cookie sessions now;
-@@ -478,12 +492,14 @@ function buildAuth() {
+@@ -484,12 +498,14 @@ function buildAuth() {
        user: {
          create: {
            before: async (user) => {
@@ -115,10 +115,10 @@ index 8057023..be789ae 100644
                 people who already existed at boot, this covers signups after.
                 With SMTP on, a fresh signup is never verified yet, so the
 diff --git a/server/env.ts b/server/env.ts
-index 715fe49..1482eb0 100644
+index 71ddb58..5f3c647 100644
 --- a/server/env.ts
 +++ b/server/env.ts
-@@ -90,6 +90,12 @@ const int = (minimum: number) =>
+@@ -96,6 +96,12 @@ const int = (minimum: number) =>
  
  /** A per-minute cap: 0 would refuse every call, so the floor is 1. */
  const perMinute = int(1)
@@ -131,7 +131,7 @@ index 715fe49..1482eb0 100644
  const nonNegativeInt = int(0)
  
  /* ------------------------------------------------------------------ */
-@@ -118,6 +124,8 @@ const schema = {
+@@ -124,6 +130,8 @@ const schema = {
    TRUSTED_ORIGINS: list({ default: [] }),
    SIGNUP_EMAIL_DOMAINS: list({ default: [] }),
    ADMIN_EMAILS: list({ default: [] }),
@@ -141,18 +141,18 @@ index 715fe49..1482eb0 100644
    OIDC_ISSUER: str({ default: undefined }),
    OIDC_CLIENT_ID: str({ default: undefined }),
 diff --git a/server/index.ts b/server/index.ts
-index 86b4b8a..3512b03 100644
+index 3abc943..01d0eb9 100644
 --- a/server/index.ts
 +++ b/server/index.ts
-@@ -45,6 +45,7 @@ import {
- import { isLinkAccess, roleAllows, type CanvasRole } from '../shared/canvasRole.ts'
+@@ -92,6 +92,7 @@ import { isLinkAccess, roleAllows, type CanvasRole } from '../shared/canvasRole.
  import { auth, initAuth, syncAdmins, getUserName, loginProvidersConfig } from './auth.ts'
+ import { getInstanceSettings, hydrateInstanceSettings, loginPolicy } from './instanceSettings.ts'
  import { adminRouter } from './admin.ts'
 +import { operatorRouter } from './operator.ts'
  import { communityRouter, parseListing, publishableFrames } from './community.ts'
  import { automationsRouter, startScheduler } from './automations.ts'
  import { startMcpTokenPrune } from './mcpTokens.ts'
-@@ -704,6 +705,10 @@ app.post('/ingest/:key', express.json({ limit: '10mb', type: () => true }), (req
+@@ -859,6 +860,10 @@ app.post('/ingest/:key', express.json({ limit: '10mb', type: () => true }), (req
    })
  })
  
@@ -551,10 +551,10 @@ index 0000000..e9762ea
 +  return router
 +}
 diff --git a/server/store.ts b/server/store.ts
-index e8e6cfd..b2282e8 100644
+index a86401a..f49cf86 100644
 --- a/server/store.ts
 +++ b/server/store.ts
-@@ -410,6 +410,18 @@ class Store {
+@@ -687,6 +687,18 @@ class Store {
      return c
    }
  

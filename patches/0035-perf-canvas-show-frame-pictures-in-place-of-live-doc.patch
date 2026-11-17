@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 11:01:22 +0000
-Subject: [PATCH 35/52] perf(canvas): show frame pictures in place of live
+Subject: [PATCH 35/55] perf(canvas): show frame pictures in place of live
  documents while the zoom moves
 
 Off by default; localStorage['doop:zoom-pictures'] = 'on' plus a reload switches it on.
@@ -55,10 +55,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 tests/zoomPicturesBrowser.test.ts
 
 diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
-index 961c29a..d446223 100644
+index db7040a..1576e9c 100644
 --- a/src/components/FrameView.tsx
 +++ b/src/components/FrameView.tsx
-@@ -19,6 +19,7 @@ import { getIdentity } from '../lib/identity'
+@@ -20,6 +20,7 @@ import { getIdentity } from '../lib/identity'
  import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
  import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
  import { trackShell } from '../lib/shellCull'
@@ -66,7 +66,7 @@ index 961c29a..d446223 100644
  
  /** `<script>`, inline event handlers or `javascript:` URLs: anything that runs inside the frame. */
  export function hasExecutableContent(html: string): boolean {
-@@ -1135,6 +1136,35 @@ export const FrameView = memo(function FrameView({
+@@ -1298,6 +1299,35 @@ export const FrameView = memo(function FrameView({
    )
    const picked = JSON.parse(pickedKey) as string[]
    const multiPick = picked.length > 1
@@ -102,10 +102,10 @@ index 961c29a..d446223 100644
    /* the picked element's grips and rotate zones: only where a drag can
       change the box, and never on a locked layer or frame, or under the
       Comment tool — nor on a multi-element pick, where a drag would size
-@@ -1812,8 +1842,14 @@ export const FrameView = memo(function FrameView({
-             for both, so the picture is never taken down and put back between
+@@ -2017,8 +2047,14 @@ export const FrameView = memo(function FrameView({
              them. A frame being streamed into has no picture of what is
-             arriving, and shows its document as it comes. */}
+             arriving, and shows its document as it comes. It sits at the
+             frame's box, not out by the bleed. */}
 -            {(!live || (!documentShown && previews && !stream)) && (
 -              <div className={live ? 'pointer-events-none absolute inset-0' : undefined}>
 +            {(!live || (!documentShown && previews && !stream) || pictureStandby) && (
@@ -119,7 +119,7 @@ index 961c29a..d446223 100644
                  <FramePreview frame={frame} />
                </div>
              )}
-@@ -2207,6 +2243,9 @@ export const FrameView = memo(function FrameView({
+@@ -2413,6 +2449,9 @@ export const FrameView = memo(function FrameView({
  })
  
  const PREVIEW_RETRIES = 4
@@ -130,18 +130,18 @@ index 961c29a..d446223 100644
  /** What a frame shows without its document: the persisted preview image.
   *  Lazy and async, so a page of hundreds fetches and decodes the ones near
 diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
-index 2f321ae..737d5b8 100644
+index d64a2ab..c4b5e4e 100644
 --- a/src/components/Stage.tsx
 +++ b/src/components/Stage.tsx
-@@ -51,6 +51,7 @@ import { useCanvasDrawing } from './CanvasDrawing'
- import { FrameLabelLayer } from './FrameLabelLayer'
+@@ -52,6 +52,7 @@ import { FrameLabelLayer } from './FrameLabelLayer'
+ import { pixelGridLines } from './PixelGrid'
  import { chromeZoomStale, layoutZoomFor } from '../lib/layoutZoom'
  import { DOT_PERIOD, GRID_ZOOM_DRIFT, gridPaintZoom, gridStale, gridTransform } from '../lib/stageGrid'
 +import { zoomPicturesActive, zoomPicturesEnabled, zoomPicturesEnd, zoomPicturesStart } from '../lib/zoomPictures'
  import { useT, type PlainMessageKey } from '../lib/i18n'
  import { NO_INSETS, fitBox, type StageInsets } from '../lib/viewFit'
  import { spaceWouldScroll } from '../lib/spaceScroll'
-@@ -444,12 +445,22 @@ export function Stage({
+@@ -449,12 +450,22 @@ export function Stage({
      apply(useStore.getState().viewport, true)
      let settle = 0
      let chromeRest = 0
@@ -164,7 +164,7 @@ index 2f321ae..737d5b8 100644
        apply(s.viewport)
        if (ref.current) sendViewport(s.viewport, ref.current)
        window.clearTimeout(chromeRest)
-@@ -459,12 +470,18 @@ export function Stage({
+@@ -464,12 +475,18 @@ export function Stage({
        window.clearTimeout(settle)
        settle = window.setTimeout(() => {
          setLayoutZoom(layoutZoomFor(useStore.getState().viewport.zoom, MAX_ZOOM))
@@ -184,10 +184,10 @@ index 2f321ae..737d5b8 100644
    }, [])
  
 diff --git a/src/lib/frameRuntime.ts b/src/lib/frameRuntime.ts
-index 227d783..12d63e7 100644
+index 5cb7597..7da4ca2 100644
 --- a/src/lib/frameRuntime.ts
 +++ b/src/lib/frameRuntime.ts
-@@ -1292,6 +1292,14 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
+@@ -1807,6 +1807,14 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
        }
        parent.postMessage({ type: 'doop:settle-result', reqId: d.reqId }, '*')
      }
@@ -200,7 +200,7 @@ index 227d783..12d63e7 100644
 +      })
 +    }
      if (d.type === 'doop:style' && d.styles && typeof d.styles === 'object') {
-       var applied = applyStyle(d.selector, d.styles)
+       var applied = applyStyle(d.selector, d.styles, d.uniformText === true)
        parent.postMessage({ type: 'doop:style-result', reqId: d.reqId, ok: applied, info: applied ? inspect(d.selector) : null }, '*')
 diff --git a/src/lib/zoomPictures.ts b/src/lib/zoomPictures.ts
 new file mode 100644

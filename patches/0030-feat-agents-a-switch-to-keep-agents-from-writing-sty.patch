@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jim Keeney <jim.keeney@ttalks.show>
 Date: Sun, 15 Nov 2026 05:53:23 +0000
-Subject: [PATCH 30/52] feat(agents): a switch to keep agents from writing
+Subject: [PATCH 30/55] feat(agents): a switch to keep agents from writing
  style guides (AGENT_GUIDELINE_WRITES)
 
 Style guides are injected into the resident agent's system prompt and read by
@@ -21,10 +21,10 @@ parts of its fixups 6818059) until upstream releases it.
  4 files changed, 19 insertions(+)
 
 diff --git a/.env.example b/.env.example
-index fbcc5c5..5dd2cf1 100644
+index f79eaf8..530c187 100644
 --- a/.env.example
 +++ b/.env.example
-@@ -230,6 +230,11 @@
+@@ -268,6 +268,11 @@
  # subscription from a third-party server is outside OpenAI's terms and can get
  # an account rate-limited — the API-key path is the supported alternative.
  #CHATGPT_CONNECT_DISABLED=
@@ -37,10 +37,10 @@ index fbcc5c5..5dd2cf1 100644
  # whose only registered redirect is the loopback URL below.
  #CHATGPT_OAUTH_CLIENT_ID=
 diff --git a/server/env.ts b/server/env.ts
-index b5d93e8..593af06 100644
+index c7ebffd..e0cae4b 100644
 --- a/server/env.ts
 +++ b/server/env.ts
-@@ -195,6 +195,12 @@ const schema = {
+@@ -224,6 +224,12 @@ const schema = {
       echoes the worker secrets it contains */
    DOOP_GEMINI_CLOUD_WORKERS: str({ default: undefined }),
    CHATGPT_CONNECT_DISABLED: bool({ default: false }),
@@ -54,10 +54,10 @@ index b5d93e8..593af06 100644
    CHATGPT_OAUTH_CLIENT_ID: str({ default: 'app_EMoamEEZ73f0CkXaXp7hrann' }),
    CHATGPT_OAUTH_REDIRECT_URI: str({ default: 'http://localhost:1455/auth/callback' }),
 diff --git a/server/mcp.ts b/server/mcp.ts
-index 0b28080..502258d 100644
+index e40b2f0..3a1bb68 100644
 --- a/server/mcp.ts
 +++ b/server/mcp.ts
-@@ -708,6 +708,10 @@ export function buildMcpServer(
+@@ -814,6 +814,10 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
      },
      async ({ canvas_id, name, markdown, title, agent_name }) => {
        if (!canvasFor(canvas_id, 'edit')) return noCanvas(canvas_id)
@@ -69,10 +69,10 @@ index 0b28080..502258d 100644
        try {
          const doc = actions.setGuideline(canvas_id, name, markdown, actor, undefined, title)
 diff --git a/server/resident.ts b/server/resident.ts
-index 10d0467..a9f5d89 100644
+index 857fe4a..024f75f 100644
 --- a/server/resident.ts
 +++ b/server/resident.ts
-@@ -2096,6 +2096,10 @@ export async function execTool(
+@@ -2470,6 +2470,10 @@ async function runResidentTool(
          return saved.ok ? ok('sent to the Doop team — carry on with the task') : fail(saved.error)
        }
        case 'set_guidelines': {

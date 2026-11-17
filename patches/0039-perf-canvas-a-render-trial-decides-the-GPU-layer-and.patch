@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 15:21:22 +0000
-Subject: [PATCH 39/52] perf(canvas): a render trial decides the GPU layer and
+Subject: [PATCH 39/55] perf(canvas): a render trial decides the GPU layer and
  zoom pictures per browser
 
 Both render experiments (the GPU picture layer, doop:gpu, and zoom
@@ -155,10 +155,10 @@ Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
  create mode 100644 tests/renderTrialBrowser.test.ts
 
 diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
-index a9f5b04..a15c963 100644
+index a050159..f334380 100644
 --- a/src/components/FrameView.tsx
 +++ b/src/components/FrameView.tsx
-@@ -1138,7 +1138,7 @@ export const FrameView = memo(function FrameView({
+@@ -1301,7 +1301,7 @@ export const FrameView = memo(function FrameView({
    const picked = JSON.parse(pickedKey) as string[]
    const multiPick = picked.length > 1
    /* ---- the picture in place of the document while the zoom moves ----
@@ -168,11 +168,11 @@ index a9f5b04..a15c963 100644
       can show it at once; it registers while nobody works in it, and taking
       it back (selected, edited, streamed into…) puts its document back. */
 diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
-index 30164c6..0980804 100644
+index 965c7d4..2fa9bc9 100644
 --- a/src/components/Stage.tsx
 +++ b/src/components/Stage.tsx
-@@ -51,6 +51,8 @@ import { useCanvasDrawing } from './CanvasDrawing'
- import { FrameLabelLayer } from './FrameLabelLayer'
+@@ -52,6 +52,8 @@ import { FrameLabelLayer } from './FrameLabelLayer'
+ import { pixelGridLines } from './PixelGrid'
  import { gpuFrameAt } from '../lib/gpuPictures'
  import { StagePictures } from './StagePictures'
 +import { startRenderRecorder } from '../lib/renderTrialClient'
@@ -180,7 +180,7 @@ index 30164c6..0980804 100644
  import { chromeZoomStale, layoutZoomFor } from '../lib/layoutZoom'
  import { DOT_PERIOD, GRID_ZOOM_DRIFT, gridPaintZoom, gridStale, gridTransform } from '../lib/stageGrid'
  import { zoomPicturesActive, zoomPicturesEnabled, zoomPicturesEnd, zoomPicturesStart } from '../lib/zoomPictures'
-@@ -489,6 +491,31 @@ export function Stage({
+@@ -494,6 +496,31 @@ export function Stage({
      }
    }, [])
  
@@ -1252,10 +1252,10 @@ index ac3e638..8a34276 100644
  
  /** What a frame is doing, for the decision below. */
 diff --git a/tests/browser.ts b/tests/browser.ts
-index 3df2884..ce79e6a 100644
+index 7442d8b..ac7add2 100644
 --- a/tests/browser.ts
 +++ b/tests/browser.ts
-@@ -142,10 +142,14 @@ export async function openBrowser(): Promise<TestBrowser> {
+@@ -179,10 +179,14 @@ export async function openBrowser(): Promise<TestBrowser> {
        /* the tests drive the editor's full layout (the top bar, the tool rail,
           the select tool first), which is what they were written against; this
           build's reviewer layout (FULL_UI off, CanvasDock.tsx) has its own test,

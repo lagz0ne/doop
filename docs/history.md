@@ -43,6 +43,7 @@ outside this repo.)
 | 2026-11-16 | Asked for the canvas's name and the back to go to the top left, subtle, since people read it once and move on, and for the room to go to the page's name with some limit. Done in 0047; the id menu went along with the name. Phones keep their dock (the name is in their actions sheet) |
 | 2026-11-16 | Reported: the first load of a canvas is slow; asked to optimise it from flame charts. A traced first load (`perf/load.mjs`, read with `perf/tasks.mjs`) of a 459-frame canvas over a shaped 4G link with a 4x CPU slowdown had the stage empty for about ten seconds: the canvas arrives as one 5.7 MB WebSocket message (every page's frames with their HTML), and the culling effect booted two live documents for the camera's pre-fit view only to tear them down at the first rest. Fixed in 0048 (nothing but the pinned documents boot before a page's camera first rests) and 0049 (permessage-deflate on the room: 5.7 MB → about 0.3 MB on the wire). Left for later: sending the page in view first and the rest after (Figma's dynamic page loading), and a lighter editor bundle |
 | 2026-11-17 | Asked how an MCP agent sees the "current" frame, and whether a cheaper medium than HTML works. It could not see it: it read frames by id only, as whole HTML (3.4k tokens at the median, 13k at p99 on a 271-frame canvas) or as a whole-frame screenshot at 1x or 2x. Researched (image tokens follow pixel area, not bytes or format; Figma Dev Mode MCP reads the selection and a metadata outline; Playwright MCP an accessibility snapshot) and did all three: 0050 `get_focus` (each person's selection, camera, frames in view, pointer), 0051 screenshots at any scale, fitted or cropped to an element or region, 0052 `get_frame` by element, query or page, and `inspect_frame`'s outline over MCP. Not done: a rasterized SVG (it is the HTML again, as text or as pixels) |
+| 2026-11-17 | Upstream released v0.15.0 (the first release after v0.14.0). Upgraded: the pin moves, our patches rebase onto it (our three migrations become 0060-0062 behind upstream's 0049-0059, with their original stamps), and three patches are added. 0053 replaces drizzle's migrator with one that applies every journal entry missing from the table, not only those newer than the last applied (see Upgrading); 0054 hides the chrome v0.15 added (the native-app prompts, Plan in Settings, the upgrade offer in the rail, Ask in the command palette) with FULL_UI off; 0055 adapts our browser tests to v0.15's test rig. v0.15 adds the dependencies cmdk, css-select and zod-to-json-schema |
 
 ## Patches
 
@@ -100,6 +101,9 @@ outside this repo.)
 | 0050 | feat(mcp): agents see where the people on a canvas are looking | the room had each person's selection, camera and pointer, and MCP read none of it. `get_focus` (and `people` in `get_canvas`): selected frame, page, world rect on screen, up to 12 frames in view by screen share, pointer frame, focus. ~100-300 tokens a person. Silent sessions and agents left out; a viewer has no selection (the room drops it), so their focus is the camera's |
 | 0051 | feat(mcp): screenshots at any scale, fitted to a size, or cropped to an element or region | tokens follow pixel area (~w·h/784, long edge capped near 2,576 px): scale 0.1-2, `max_size`, `element_id` (+ padding) or `region` crops kept inside the frame, `png`/`jpeg` (bytes only). A 1440×900 frame is ~1.7k tokens at 1x, ~430 at 0.5 |
 | 0052 | feat(mcp): read part of a frame, and outline it, instead of the whole HTML | `get_frame` by `element_id`, `query` or `offset`/`limit` (whole HTML stays the default); `inspect_frame` (the resident's rendered outline: 64 elements with ids, boxes, colours, fonts) over MCP. The bounded read moves to `server/frameHtmlRead.ts`, shared with the resident |
+| 0053 | fix(db): apply migrations by version set | drizzle 0.45 applies an entry only when it is newer than the last one applied, so upstream migrations dated before ours would be skipped on a database that has ours. `migrateBySet` applies every journal entry whose stamp is not recorded, in journal order, in one transaction (Rails, Django, Flyway `outOfOrder` work this way); node-postgres and pglite both use it |
+| 0054 | feat(ui): the product chrome v0.15 added is hidden without FULL_UI | the native-app card and iOS prompt, Plan in Settings, the rail's upgrade offer, and Ask in the command palette outside the docked layout. The palette, find bar and shortcuts sheet stay (keys, not chrome) |
+| 0055 | test: browser tests reach app modules through the fixture page | v0.15's fixtures are a production build, so tests call `window.testImport` (the page's own module instances) instead of importing `/src`; selectors follow the bleed wrapper and the paper grid, `pageCanvas` waits for 0048's later mount, `frameEdge` turns culling off |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -415,6 +419,15 @@ parity list pass. The full check (load 15-20) had 16 browser UI failures, timeou
 patches do not touch; alone they pass but for one or two different cases a run. `canvasClipboardBrowser`
 fails one run in two at 0049 too (and passed twice on the pristine pin): flaky since 0048-0049 or
 under load, not yet run down.
+
+Done at v0.15.0 (2026-11-17), and differently: instead of renumbering and redating, 0053 decides by
+membership (the approach of Rails' `schema_migrations`, Django and Flyway's `outOfOrder`): every
+journal entry whose stamp is not in `drizzle.__drizzle_migrations` is applied, in journal order, in
+one transaction. Our migrations keep their stamps, so a database that has them skips them and gets
+upstream's 0049-0059; `migrateBySet` has a test that builds exactly that database. Tests for the
+upgrade: the full check, with the browser tests adapted (0055); `drawingShapes` (path preview
+snapping at zoom 0.5/2/3) and `frameResize` (grips zoomed in) fail on the pristine v0.15.0 pin as
+well, so they are not ours.
 
 Upgrading past v0.14.0 (found 2026-11-14): drizzle's migrator applies a migration only when it is
 newer than the last one applied (`created_at` < the journal's `when`), not by name. Upstream's

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 05:09:38 +0000
-Subject: [PATCH 18/52] perf(canvas): boot one document per frame while frames
+Subject: [PATCH 18/55] perf(canvas): boot one document per frame while frames
  come late
 
 Documents went live two per animation frame. Each one costs the editor's
@@ -29,7 +29,7 @@ Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
  1 file changed, 19 insertions(+), 5 deletions(-)
 
 diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
-index e6cb20f..2e2a83e 100644
+index e431b55..c1170dd 100644
 --- a/src/components/Stage.tsx
 +++ b/src/components/Stage.tsx
 @@ -175,9 +175,16 @@ export const TOOL_ICONS: Record<Tool, React.ReactNode> = {
@@ -51,7 +51,7 @@ index e6cb20f..2e2a83e 100644
  
  const sendCursor = throttle((x: number, y: number) => sendWs({ type: 'cursor', x, y }), 50)
  /* the camera is shared so others can follow it — same cadence as the cursor */
-@@ -452,6 +459,8 @@ export function Stage({
+@@ -455,6 +462,8 @@ export function Stage({
      const elements = new Set(frames.filter((f) => f.element).map((f) => f.id))
      let timer = 0
      let pump = 0
@@ -60,7 +60,7 @@ index e6cb20f..2e2a83e 100644
      /* The previews' resolution follows the camera too (setPreviews), but
         only a camera at rest. A page that has just opened is about to be
         fitted or put back where it was, and its zoom until then is the last
-@@ -469,19 +478,24 @@ export function Stage({
+@@ -472,19 +481,24 @@ export function Stage({
         it. Pins and canvas elements (no preview to wait behind) are admitted
         at once; what is already live and still wanted stays. (Tearing the
         departed ones down a few per frame was measured too: no gain.) */

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 05:25:31 +0000
-Subject: [PATCH 20/52] feat(share): share-link guests: a name, an optional
+Subject: [PATCH 20/55] feat(share): share-link guests: a name, an optional
  password, the link's level
 
 Reviewers without a doop account had no way in past looking: a link's
@@ -56,12 +56,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  server/access.ts                              |   20 +-
  server/auth.ts                                |    5 +-
  server/db/auth-schema.ts                      |    5 +
- .../migrations/0050_share_link_password.sql   |    3 +
- server/db/migrations/meta/0050_snapshot.json  | 4471 +++++++++++++++++
- server/db/migrations/meta/_journal.json       |    9 +-
+ .../migrations/0061_share_link_password.sql   |    3 +
+ server/db/migrations/meta/0061_snapshot.json  | 5037 +++++++++++++++++
+ server/db/migrations/meta/_journal.json       |    7 +
  server/db/persist.ts                          |    9 +
  server/db/schema.ts                           |    3 +
- server/index.ts                               |   55 +-
+ server/index.ts                               |   52 +-
  server/linkPasswords.ts                       |   27 +
  server/operator.ts                            |   17 +-
  server/shareLink.ts                           |  233 +
@@ -83,19 +83,19 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  src/pages/Home.tsx                            |    5 +-
  src/pages/LinkJoin.tsx                        |  169 +
  tests/shareLink.test.ts                       |  216 +
- 31 files changed, 5501 insertions(+), 45 deletions(-)
- create mode 100644 server/db/migrations/0050_share_link_password.sql
- create mode 100644 server/db/migrations/meta/0050_snapshot.json
+ 31 files changed, 6063 insertions(+), 44 deletions(-)
+ create mode 100644 server/db/migrations/0061_share_link_password.sql
+ create mode 100644 server/db/migrations/meta/0061_snapshot.json
  create mode 100644 server/linkPasswords.ts
  create mode 100644 server/shareLink.ts
  create mode 100644 src/pages/LinkJoin.tsx
  create mode 100644 tests/shareLink.test.ts
 
 diff --git a/.context/TECHSTACK.md b/.context/TECHSTACK.md
-index bcada40..82c0010 100644
+index fe10db1..fed4483 100644
 --- a/.context/TECHSTACK.md
 +++ b/.context/TECHSTACK.md
-@@ -634,9 +634,31 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
+@@ -1040,9 +1040,31 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
  ## 6. Build and Dependency Management
  
  - Canvas access: `canvasRole` in `server/access.ts` gives owners, members and workspace members
@@ -181,7 +181,7 @@ index 72f461d..0442ab3 100644
  
  /** May this user read the canvas (open it, join its room, see its frames)? */
 diff --git a/server/auth.ts b/server/auth.ts
-index 4e7c56b..80ee407 100644
+index 1f3d3f4..c396868 100644
 --- a/server/auth.ts
 +++ b/server/auth.ts
 @@ -9,6 +9,7 @@ import * as authSchema from './db/auth-schema.ts'
@@ -190,9 +190,9 @@ index 4e7c56b..80ee407 100644
  import { embedPlugin } from './embed.ts'
 +import { linkPlugin } from './shareLink.ts'
  import { mailerConfigured, sendMail } from './mailer.ts'
- import { acceptInvites } from './workspaces.ts'
- import { purgeUserData } from './accountDeletion.ts'
-@@ -35,7 +36,8 @@ export function createdByOperator<T>(create: () => Promise<T>): Promise<T> {
+ import { acceptInvites, joinDefaultWorkspace } from './workspaces.ts'
+ import { getInstanceSettings } from './instanceSettings.ts'
+@@ -36,7 +37,8 @@ export function createdByOperator<T>(create: () => Promise<T>): Promise<T> {
   *  endpoint, since better-auth runs after-create hooks once the endpoint's
   *  transaction ends, outside any scope set inside the handler. */
  function letIn(ctx: unknown): boolean {
@@ -202,7 +202,7 @@ index 4e7c56b..80ee407 100644
  }
  
  /**
-@@ -547,6 +549,7 @@ function buildAuth() {
+@@ -557,6 +559,7 @@ function buildAuth() {
         actually decides linking, as intended. */
      plugins: [
        embedPlugin(),
@@ -226,25 +226,25 @@ index 88066c0..be89cf2 100644
  })
  
  export const account = pgTable('account', {
-diff --git a/server/db/migrations/0050_share_link_password.sql b/server/db/migrations/0050_share_link_password.sql
+diff --git a/server/db/migrations/0061_share_link_password.sql b/server/db/migrations/0061_share_link_password.sql
 new file mode 100644
 index 0000000..8500eb8
 --- /dev/null
-+++ b/server/db/migrations/0050_share_link_password.sql
++++ b/server/db/migrations/0061_share_link_password.sql
 @@ -0,0 +1,3 @@
 +ALTER TABLE "canvases" ADD COLUMN "link_password" text;--> statement-breakpoint
 +ALTER TABLE "session" ADD COLUMN "link_canvas_id" text;--> statement-breakpoint
 +ALTER TABLE "session" ADD COLUMN "link_key" text;
 \ No newline at end of file
-diff --git a/server/db/migrations/meta/0050_snapshot.json b/server/db/migrations/meta/0050_snapshot.json
+diff --git a/server/db/migrations/meta/0061_snapshot.json b/server/db/migrations/meta/0061_snapshot.json
 new file mode 100644
-index 0000000..0d9e12c
+index 0000000..d461277
 --- /dev/null
-+++ b/server/db/migrations/meta/0050_snapshot.json
-@@ -0,0 +1,4471 @@
++++ b/server/db/migrations/meta/0061_snapshot.json
+@@ -0,0 +1,5037 @@
 +{
-+  "id": "ae73854f-626b-4f20-ba6f-4e53f80cf65b",
-+  "prevId": "ed3ed48b-7a06-4b7b-895c-df39b7c1fe43",
++  "id": "d683df81-01ff-4d51-97de-e95fb60efe04",
++  "prevId": "34024e15-49eb-4bdc-bff5-057fbffd3d85",
 +  "version": "7",
 +  "dialect": "postgresql",
 +  "tables": {
@@ -537,6 +537,79 @@ index 0000000..0d9e12c
 +      "checkConstraints": {},
 +      "isRLSEnabled": false
 +    },
++    "public.agent_overrides": {
++      "name": "agent_overrides",
++      "schema": "",
++      "columns": {
++        "scope": {
++          "name": "scope",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "role_id": {
++          "name": "role_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "disabled": {
++          "name": "disabled",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "color": {
++          "name": "color",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "blurb": {
++          "name": "blurb",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "brief": {
++          "name": "brief",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "reviewer": {
++          "name": "reviewer",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "updated_by": {
++          "name": "updated_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {
++        "agent_overrides_scope_role_id_pk": {
++          "name": "agent_overrides_scope_role_id_pk",
++          "columns": ["scope", "role_id"]
++        }
++      },
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
 +    "public.asset_refs": {
 +      "name": "asset_refs",
 +      "schema": "",
@@ -575,10 +648,7 @@ index 0000000..0d9e12c
 +      "compositePrimaryKeys": {
 +        "asset_refs_asset_id_frame_id_pk": {
 +          "name": "asset_refs_asset_id_frame_id_pk",
-+          "columns": [
-+            "asset_id",
-+            "frame_id"
-+          ]
++          "columns": ["asset_id", "frame_id"]
 +        }
 +      },
 +      "uniqueConstraints": {},
@@ -637,6 +707,43 @@ index 0000000..0d9e12c
 +          "type": "bigint",
 +          "primaryKey": false,
 +          "notNull": true
++        },
++        "description": {
++          "name": "description",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "described_at": {
++          "name": "described_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "described_by": {
++          "name": "described_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "describe_attempts": {
++          "name": "describe_attempts",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        },
++        "describe_payer_id": {
++          "name": "describe_payer_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "describe_provider": {
++          "name": "describe_provider",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
 +        }
 +      },
 +      "indexes": {
@@ -1063,10 +1170,7 @@ index 0000000..0d9e12c
 +      "compositePrimaryKeys": {
 +        "canvas_members_canvas_id_user_id_pk": {
 +          "name": "canvas_members_canvas_id_user_id_pk",
-+          "columns": [
-+            "canvas_id",
-+            "user_id"
-+          ]
++          "columns": ["canvas_id", "user_id"]
 +        }
 +      },
 +      "uniqueConstraints": {},
@@ -1346,6 +1450,274 @@ index 0000000..0d9e12c
 +      "checkConstraints": {},
 +      "isRLSEnabled": false
 +    },
++    "public.components": {
++      "name": "components",
++      "schema": "",
++      "columns": {
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "description": {
++          "name": "description",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "template": {
++          "name": "template",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "css": {
++          "name": "css",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "raw_css": {
++          "name": "raw_css",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "head": {
++          "name": "head",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "props": {
++          "name": "props",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "slots": {
++          "name": "slots",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "rev": {
++          "name": "rev",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "main_frame_id": {
++          "name": "main_frame_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "code": {
++          "name": "code",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "source": {
++          "name": "source",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "history": {
++          "name": "history",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "status": {
++          "name": "status",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'active'"
++        },
++        "deleted_at": {
++          "name": "deleted_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "deleted_by": {
++          "name": "deleted_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_by": {
++          "name": "updated_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {
++        "components_canvas_id_id_pk": {
++          "name": "components_canvas_id_id_pk",
++          "columns": ["canvas_id", "id"]
++        }
++      },
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.custom_agents": {
++      "name": "custom_agents",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "scope": {
++          "name": "scope",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "handle": {
++          "name": "handle",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "color": {
++          "name": "color",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "blurb": {
++          "name": "blurb",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "brief": {
++          "name": "brief",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "reviewer": {
++          "name": "reviewer",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "created_by": {
++          "name": "created_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "custom_agents_scope_handle_idx": {
++          "name": "custom_agents_scope_handle_idx",
++          "columns": [
++            {
++              "expression": "scope",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "handle",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "custom_agents_scope_name_idx": {
++          "name": "custom_agents_scope_name_idx",
++          "columns": [
++            {
++              "expression": "scope",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "name",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
 +    "public.decisions": {
 +      "name": "decisions",
 +      "schema": "",
@@ -1499,10 +1871,7 @@ index 0000000..0d9e12c
 +      "compositePrimaryKeys": {
 +        "design_tokens_canvas_id_name_pk": {
 +          "name": "design_tokens_canvas_id_name_pk",
-+          "columns": [
-+            "canvas_id",
-+            "name"
-+          ]
++          "columns": ["canvas_id", "name"]
 +        }
 +      },
 +      "uniqueConstraints": {},
@@ -1580,6 +1949,12 @@ index 0000000..0d9e12c
 +          "primaryKey": false,
 +          "notNull": false
 +        },
++        "claimed_by_resident": {
++          "name": "claimed_by_resident",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": false
++        },
 +        "completed_at": {
 +          "name": "completed_at",
 +          "type": "bigint",
@@ -1600,6 +1975,12 @@ index 0000000..0d9e12c
 +        },
 +        "runner": {
 +          "name": "runner",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "reply": {
++          "name": "reply",
 +          "type": "text",
 +          "primaryKey": false,
 +          "notNull": false
@@ -2204,12 +2585,41 @@ index 0000000..0d9e12c
 +      "compositePrimaryKeys": {
 +        "guidelines_canvas_id_name_pk": {
 +          "name": "guidelines_canvas_id_name_pk",
-+          "columns": [
-+            "canvas_id",
-+            "name"
-+          ]
++          "columns": ["canvas_id", "name"]
 +        }
 +      },
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.image_description_prefs": {
++      "name": "image_description_prefs",
++      "schema": "",
++      "columns": {
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "mode": {
++          "name": "mode",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'account'"
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
 +      "uniqueConstraints": {},
 +      "policies": {},
 +      "checkConstraints": {},
@@ -2236,6 +2646,57 @@ index 0000000..0d9e12c
 +          "type": "bigint",
 +          "primaryKey": false,
 +          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.instance_settings": {
++      "name": "instance_settings",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "email_password_signup": {
++          "name": "email_password_signup",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": true
++        },
++        "sso_auto_redirect": {
++          "name": "sso_auto_redirect",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "default_workspace_id": {
++          "name": "default_workspace_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_by": {
++          "name": "updated_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
 +        }
 +      },
 +      "indexes": {},
@@ -2335,6 +2796,114 @@ index 0000000..0d9e12c
 +      "checkConstraints": {},
 +      "isRLSEnabled": false
 +    },
++    "public.library_components": {
++      "name": "library_components",
++      "schema": "",
++      "columns": {
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "description": {
++          "name": "description",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "template": {
++          "name": "template",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "css": {
++          "name": "css",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "raw_css": {
++          "name": "raw_css",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "head": {
++          "name": "head",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "props": {
++          "name": "props",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "slots": {
++          "name": "slots",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "code": {
++          "name": "code",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "nested": {
++          "name": "nested",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "rev": {
++          "name": "rev",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "published_at": {
++          "name": "published_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "published_by": {
++          "name": "published_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {
++        "library_components_canvas_id_id_pk": {
++          "name": "library_components_canvas_id_id_pk",
++          "columns": ["canvas_id", "id"]
++        }
++      },
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
 +    "public.linear_installations": {
 +      "name": "linear_installations",
 +      "schema": "",
@@ -2395,9 +2964,7 @@ index 0000000..0d9e12c
 +        "linear_installations_user_id_unique": {
 +          "name": "linear_installations_user_id_unique",
 +          "nullsNotDistinct": false,
-+          "columns": [
-+            "user_id"
-+          ]
++          "columns": ["user_id"]
 +        }
 +      },
 +      "policies": {},
@@ -2644,9 +3211,7 @@ index 0000000..0d9e12c
 +        "live_activities_token_unique": {
 +          "name": "live_activities_token_unique",
 +          "nullsNotDistinct": false,
-+          "columns": [
-+            "token"
-+          ]
++          "columns": ["token"]
 +        }
 +      },
 +      "policies": {},
@@ -2990,6 +3555,18 @@ index 0000000..0d9e12c
 +          "primaryKey": false,
 +          "notNull": false
 +        },
++        "custom": {
++          "name": "custom",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "custom_headers": {
++          "name": "custom_headers",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
 +        "connected_at": {
 +          "name": "connected_at",
 +          "type": "bigint",
@@ -3008,10 +3585,7 @@ index 0000000..0d9e12c
 +      "compositePrimaryKeys": {
 +        "model_accounts_user_id_kind_pk": {
 +          "name": "model_accounts_user_id_kind_pk",
-+          "columns": [
-+            "user_id",
-+            "kind"
-+          ]
++          "columns": ["user_id", "kind"]
 +        }
 +      },
 +      "uniqueConstraints": {},
@@ -3131,9 +3705,7 @@ index 0000000..0d9e12c
 +        "slack_installations_user_id_unique": {
 +          "name": "slack_installations_user_id_unique",
 +          "nullsNotDistinct": false,
-+          "columns": [
-+            "user_id"
-+          ]
++          "columns": ["user_id"]
 +        }
 +      },
 +      "policies": {},
@@ -3400,11 +3972,7 @@ index 0000000..0d9e12c
 +      "compositePrimaryKeys": {
 +        "sync_edges_key_id_from_page_to_page_pk": {
 +          "name": "sync_edges_key_id_from_page_to_page_pk",
-+          "columns": [
-+            "key_id",
-+            "from_page",
-+            "to_page"
-+          ]
++          "columns": ["key_id", "from_page", "to_page"]
 +        }
 +      },
 +      "uniqueConstraints": {},
@@ -3717,6 +4285,12 @@ index 0000000..0d9e12c
 +          "type": "text",
 +          "primaryKey": false,
 +          "notNull": false
++        },
++        "reply": {
++          "name": "reply",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
 +        }
 +      },
 +      "indexes": {
@@ -3982,10 +4556,7 @@ index 0000000..0d9e12c
 +      "compositePrimaryKeys": {
 +        "workspace_members_workspace_id_user_id_pk": {
 +          "name": "workspace_members_workspace_id_user_id_pk",
-+          "columns": [
-+            "workspace_id",
-+            "user_id"
-+          ]
++          "columns": ["workspace_id", "user_id"]
 +        }
 +      },
 +      "uniqueConstraints": {},
@@ -4041,6 +4612,13 @@ index 0000000..0d9e12c
 +          "notNull": true,
 +          "default": 0
 +        },
++        "seats_bought": {
++          "name": "seats_bought",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 1
++        },
 +        "stripe_customer_id": {
 +          "name": "stripe_customer_id",
 +          "type": "text",
@@ -4069,6 +4647,12 @@ index 0000000..0d9e12c
 +        "billing_event_at": {
 +          "name": "billing_event_at",
 +          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "library_publish": {
++          "name": "library_publish",
++          "type": "text",
 +          "primaryKey": false,
 +          "notNull": false
 +        },
@@ -4184,12 +4768,8 @@ index 0000000..0d9e12c
 +          "name": "account_user_id_user_id_fk",
 +          "tableFrom": "account",
 +          "tableTo": "user",
-+          "columnsFrom": [
-+            "user_id"
-+          ],
-+          "columnsTo": [
-+            "id"
-+          ],
++          "columnsFrom": ["user_id"],
++          "columnsTo": ["id"],
 +          "onDelete": "cascade",
 +          "onUpdate": "no action"
 +        }
@@ -4274,16 +4854,12 @@ index 0000000..0d9e12c
 +        "oauth_access_token_access_token_unique": {
 +          "name": "oauth_access_token_access_token_unique",
 +          "nullsNotDistinct": false,
-+          "columns": [
-+            "access_token"
-+          ]
++          "columns": ["access_token"]
 +        },
 +        "oauth_access_token_refresh_token_unique": {
 +          "name": "oauth_access_token_refresh_token_unique",
 +          "nullsNotDistinct": false,
-+          "columns": [
-+            "refresh_token"
-+          ]
++          "columns": ["refresh_token"]
 +        }
 +      },
 +      "policies": {},
@@ -4377,9 +4953,7 @@ index 0000000..0d9e12c
 +        "oauth_application_client_id_unique": {
 +          "name": "oauth_application_client_id_unique",
 +          "nullsNotDistinct": false,
-+          "columns": [
-+            "client_id"
-+          ]
++          "columns": ["client_id"]
 +        }
 +      },
 +      "policies": {},
@@ -4534,12 +5108,8 @@ index 0000000..0d9e12c
 +          "name": "session_user_id_user_id_fk",
 +          "tableFrom": "session",
 +          "tableTo": "user",
-+          "columnsFrom": [
-+            "user_id"
-+          ],
-+          "columnsTo": [
-+            "id"
-+          ],
++          "columnsFrom": ["user_id"],
++          "columnsTo": ["id"],
 +          "onDelete": "cascade",
 +          "onUpdate": "no action"
 +        }
@@ -4549,9 +5119,7 @@ index 0000000..0d9e12c
 +        "session_token_unique": {
 +          "name": "session_token_unique",
 +          "nullsNotDistinct": false,
-+          "columns": [
-+            "token"
-+          ]
++          "columns": ["token"]
 +        }
 +      },
 +      "policies": {},
@@ -4640,9 +5208,7 @@ index 0000000..0d9e12c
 +        "user_email_unique": {
 +          "name": "user_email_unique",
 +          "nullsNotDistinct": false,
-+          "columns": [
-+            "email"
-+          ]
++          "columns": ["email"]
 +        }
 +      },
 +      "policies": {},
@@ -4713,40 +5279,37 @@ index 0000000..0d9e12c
 +    "tables": {}
 +  }
 +}
-\ No newline at end of file
 diff --git a/server/db/migrations/meta/_journal.json b/server/db/migrations/meta/_journal.json
-index fb442aa..c00750a 100644
+index 7eddfe7..c5784ed 100644
 --- a/server/db/migrations/meta/_journal.json
 +++ b/server/db/migrations/meta/_journal.json
-@@ -344,6 +344,13 @@
+@@ -421,6 +421,13 @@
        "when": 1794535672070,
-       "tag": "0049_embed_session",
+       "tag": "0060_embed_session",
        "breakpoints": true
 +    },
 +    {
-+      "idx": 50,
++      "idx": 61,
 +      "version": "7",
 +      "when": 1794546908531,
-+      "tag": "0050_share_link_password",
++      "tag": "0061_share_link_password",
 +      "breakpoints": true
      }
    ]
--}
-+}
-\ No newline at end of file
+ }
 diff --git a/server/db/persist.ts b/server/db/persist.ts
-index b77d72b..8463a98 100644
+index d7cbdbc..be507b4 100644
 --- a/server/db/persist.ts
 +++ b/server/db/persist.ts
-@@ -8,6 +8,7 @@ import { extractAssetIds } from '../assets.ts'
- import { roleByAgentName } from '../../shared/agents.ts'
+@@ -9,6 +9,7 @@ import { AGENT_ROLES, roleByAgentName } from '../../shared/agents.ts'
  import { isCommunityCategory } from '../../shared/types.ts'
  import { storedLinkAccess } from '../../shared/canvasRole.ts'
+ import type { ComponentDef, LibraryComponent } from '../../shared/components.ts'
 +import { rememberLinkPassword } from '../linkPasswords.ts'
  import type { DesignToken, TokenType } from '../../shared/designTokens.ts'
  import { parseRunnerPick } from '../../shared/agentRunner.ts'
  import { byStack } from '../../shared/frameStack.ts'
-@@ -67,6 +68,12 @@ export function saveCanvas(c: Canvas) {
+@@ -69,6 +70,12 @@ export function saveCanvas(c: Canvas) {
    )
  }
  
@@ -4759,7 +5322,7 @@ index b77d72b..8463a98 100644
  /** Persist a newly duplicated canvas as one unit. Unlike ordinary live edits,
   * duplication must not report success until every copied row is durable. */
  export async function saveCanvasCopy(c: Canvas): Promise<void> {
-@@ -911,6 +918,7 @@ export async function hydrate(): Promise<Hydrated> {
+@@ -1218,6 +1225,7 @@ export async function hydrate(): Promise<Hydrated> {
      ownerId: c.ownerId ?? undefined,
      /* 'view' / 'comment' / 'edit'; null and anything unknown read as private */
      linkAccess: storedLinkAccess(c.linkAccess),
@@ -4767,7 +5330,7 @@ index b77d72b..8463a98 100644
      ...(c.publishedAt != null ? { publishedAt: c.publishedAt } : {}),
      ...(c.description ? { description: c.description } : {}),
      ...(isCommunityCategory(c.category) ? { category: c.category } : {}),
-@@ -921,6 +929,7 @@ export async function hydrate(): Promise<Hydrated> {
+@@ -1228,6 +1236,7 @@ export async function hydrate(): Promise<Hydrated> {
      frames: [],
    }))
    const byId = new Map(canvases.map((c) => [c.id, c]))
@@ -4776,10 +5339,10 @@ index b77d72b..8463a98 100644
      const c = byId.get(m.canvasId)
      if (c) (c.memberIds ??= []).push(m.userId)
 diff --git a/server/db/schema.ts b/server/db/schema.ts
-index 0512f55..f45380b 100644
+index 30faa54..6c4de83 100644
 --- a/server/db/schema.ts
 +++ b/server/db/schema.ts
-@@ -68,6 +68,9 @@ export const canvases = pgTable('canvases', {
+@@ -75,6 +75,9 @@ export const canvases = pgTable('canvases', {
    ownerId: text('owner_id'),
    /** 'edit' | 'none'; null = 'none' (private — link sharing is opt-in) */
    linkAccess: text('link_access'),
@@ -4790,18 +5353,18 @@ index 0512f55..f45380b 100644
     *  null = private to its collaborators. Publishing grants read-only
     *  previews and copies, never access to the canvas itself. */
 diff --git a/server/index.ts b/server/index.ts
-index f772037..dd48ab7 100644
+index 52afdf5..1bb0432 100644
 --- a/server/index.ts
 +++ b/server/index.ts
-@@ -34,7 +34,6 @@ import { MAX_AVATAR_BYTES, avatarUrl } from '../shared/avatar.ts'
- import { fontsForCanvas, hydrateFonts } from './fonts.ts'
+@@ -80,7 +80,6 @@ import { addCanvasFont, uploadedFontResult } from './canvasFontUpload.ts'
+ import { MAX_FONT_BYTES } from '../shared/fonts.ts'
  import { tokensCss, tokensMarkdown, tokensTailwind } from '../shared/designTokens.ts'
  import {
 -  canEditCanvas,
    canManageCanvas,
    canvasRole,
    guestCanvasRole,
-@@ -55,6 +54,14 @@ import {
+@@ -102,6 +101,14 @@ import {
    presenceForReviewer,
    type EmbedGrant,
  } from './embed.ts'
@@ -4816,7 +5379,7 @@ index f772037..dd48ab7 100644
  import { serveEmbedPage } from './embedPage.ts'
  import { communityRouter, parseListing, publishableFrames } from './community.ts'
  import { automationsRouter, startScheduler } from './automations.ts'
-@@ -205,6 +212,8 @@ interface Conn {
+@@ -266,6 +273,8 @@ interface Conn {
    /** an embedded review panel session: its role comes from the grant, and
     *  the room reaches it through forReviewer */
    embed?: EmbedGrant
@@ -4825,7 +5388,7 @@ index f772037..dd48ab7 100644
  }
  
  /* What a signed-out guest is not sent: the team's conversation (comments,
-@@ -257,6 +266,7 @@ function connRole(conn: Conn): CanvasRole | null {
+@@ -318,6 +327,7 @@ function connRole(conn: Conn): CanvasRole | null {
    const canvas = store.getCanvas(conn.canvasId)
    if (!canvas) return null
    if (conn.embed) return embedRole(conn.embed, canvas)
@@ -4833,7 +5396,7 @@ index f772037..dd48ab7 100644
    return conn.userId ? canvasRole(conn.userId, canvas) : guestCanvasRole(canvas)
  }
  
-@@ -746,6 +756,8 @@ declare global {
+@@ -901,6 +911,8 @@ declare global {
        impersonatedBy?: string
        /** an embedded review panel session: its one canvas and role */
        embed?: EmbedGrant
@@ -4842,7 +5405,7 @@ index f772037..dd48ab7 100644
      }
    }
  }
-@@ -765,6 +777,11 @@ app.use('/api', async (req, res, next) => {
+@@ -920,6 +932,11 @@ app.use('/api', async (req, res, next) => {
      req.embed = embedGrantOf(session.session)
      if (req.embed && !embedRouteAllowed(req.method, req.path))
        return res.status(403).json({ error: 'not available in the review panel' })
@@ -4854,7 +5417,7 @@ index f772037..dd48ab7 100644
      /* Viewing as someone else is read-only, full stop. Every doop mutation is
         a non-GET REST call — the websocket after `join` carries only cursor,
         editing and frame:drag — so this single rule covers the whole surface.
-@@ -796,6 +813,8 @@ app.get('/api/me', async (req, res) => {
+@@ -982,6 +999,8 @@ app.get('/api/me', async (req, res) => {
         outright, so everything else on this response describes the person
         being viewed, not the admin doing the viewing */
      impersonating: req.impersonatedBy ? { byName: (await getUserName(req.impersonatedBy)) ?? 'an admin' } : undefined,
@@ -4863,7 +5426,7 @@ index f772037..dd48ab7 100644
    })
  })
  
-@@ -902,9 +921,12 @@ function requireCanvas(req: express.Request, res: express.Response, canvasId: st
+@@ -1088,9 +1107,12 @@ function requireCanvas(req: express.Request, res: express.Response, canvasId: st
    return checkRole(req, res, c, need) ? c : null
  }
  
@@ -4878,16 +5441,16 @@ index f772037..dd48ab7 100644
  }
  
  function checkRole(req: express.Request, res: express.Response, canvas: Canvas, need: CanvasRole): boolean {
-@@ -932,7 +954,7 @@ const ROLE_DENIED: Record<CanvasRole, string> = {
+@@ -1118,7 +1140,7 @@ const ROLE_DENIED: Record<CanvasRole, string> = {
     agent would make the edits the link withholds. Answers the 403 itself. */
  function refuseAgentMention(req: express.Request, res: express.Response, canvasId: string, text: string): boolean {
    const canvas = store.getCanvas(canvasId)
--  if (!mentionedRole(text) || (canvas && canEditCanvas(req.user!.id, canvas))) return false
-+  if (!mentionedRole(text) || (canvas && roleAllows(callerRole(req, canvas), 'edit'))) return false
+-  if (!mentionedRole(text, rosterFor(canvas)) || (canvas && canEditCanvas(req.user!.id, canvas))) return false
++  if (!mentionedRole(text, rosterFor(canvas)) || (canvas && roleAllows(callerRole(req, canvas), 'edit'))) return false
    res.status(403).json({ error: 'asking an agent to change the canvas needs edit access' })
    return true
  }
-@@ -1373,16 +1395,20 @@ app.delete('/api/canvases/:id', (req, res) => {
+@@ -1694,16 +1716,20 @@ app.delete('/api/canvases/:id', (req, res) => {
    res.json({ ok: true })
  })
  
@@ -4914,21 +5477,18 @@ index f772037..dd48ab7 100644
      refreshRoomRoles(c.id)
    }
    if (typeof name === 'string' && name.trim()) {
-@@ -2683,7 +2709,12 @@ wss.on('connection', (ws, upgradeReq) => {
-         return
+@@ -3429,7 +3455,9 @@ wss.on('connection', (ws, upgradeReq) => {
        }
+       /* checked before loading, so a denied join never loads the canvas */
        const embed = embedGrantOf(session.session)
--      const role = embed ? embedRole(embed, canvas) : canvasRole(session.user.id, canvas)
+-      const roleOn = (c: Canvas) => (embed ? embedRole(embed, c) : canvasRole(session.user.id, c))
 +      const linkGuest = linkGrantOf(session.session)
-+      const role = embed
-+        ? embedRole(embed, canvas)
-+        : linkGuest
-+          ? linkRole(linkGuest, canvas)
-+          : canvasRole(session.user.id, canvas)
-       if (!role) {
++      const roleOn = (c: Canvas) =>
++        embed ? embedRole(embed, c) : linkGuest ? linkRole(linkGuest, c) : canvasRole(session.user.id, c)
+       if (!roleOn(canvas)) {
          ws.close(4403, 'no access')
          return
-@@ -2698,7 +2729,7 @@ wss.on('connection', (ws, upgradeReq) => {
+@@ -3460,7 +3488,7 @@ wss.on('connection', (ws, upgradeReq) => {
          activeFrameId: null,
        }
        const silent = !!(session.session as { impersonatedBy?: string | null }).impersonatedBy
@@ -5275,10 +5835,10 @@ index 740e1a7..956fd23 100644
  /* review: comment, plus setting a frame's approval; never a design change */
  const RANK: Record<CanvasRole, number> = { view: 0, comment: 1, review: 2, edit: 3 }
 diff --git a/shared/types.ts b/shared/types.ts
-index 53aa179..a7daef5 100644
+index e83b33d..9cb10b0 100644
 --- a/shared/types.ts
 +++ b/shared/types.ts
-@@ -220,9 +220,12 @@ export interface Canvas {
+@@ -225,9 +225,12 @@ export interface Canvas {
    name: string
    ownerId?: string
    /** what the share link grants people who are not the owner or invited:
@@ -5294,7 +5854,7 @@ index 53aa179..a7daef5 100644
     *  hands one person; never stored */
    role?: CanvasRole
 diff --git a/src/App.tsx b/src/App.tsx
-index 4c828fb..8a53204 100644
+index 2a75d42..e632164 100644
 --- a/src/App.tsx
 +++ b/src/App.tsx
 @@ -5,6 +5,7 @@ import { Home } from './pages/Home'
@@ -5305,7 +5865,7 @@ index 4c828fb..8a53204 100644
  import { PrototypePage } from './pages/PrototypePage'
  import { AuthPage } from './pages/AuthPage'
  import { DesktopHandoff } from './pages/DesktopHandoff'
-@@ -75,6 +76,20 @@ export function App() {
+@@ -76,6 +77,20 @@ export function App() {
       zoom bar; every other page keeps it */
    useEffect(() => setSupportWidgetVisible(!canvasId), [canvasId])
  
@@ -5326,7 +5886,7 @@ index 4c828fb..8a53204 100644
    const returningToAdmin = !!me?.impersonating && path.startsWith('/admin')
    useEffect(() => {
      if (!returningToAdmin) return
-@@ -167,12 +182,20 @@ export function App() {
+@@ -168,12 +183,20 @@ export function App() {
      return (
        <>
          <ShellDragBar />
@@ -5350,7 +5910,7 @@ index 4c828fb..8a53204 100644
          />
        </>
      )
-@@ -194,6 +217,7 @@ export function App() {
+@@ -195,6 +218,7 @@ export function App() {
       its not-found screen. Also blank while the effect above swaps the
       session back and reloads. */
    if (path.startsWith('/admin') && (!me || returningToAdmin)) return <div className="auth-page" />
@@ -5589,10 +6149,10 @@ index c059bce..c0d8e44 100644
     copies, never access — so it sits apart from the access controls above,
     with its own switch and its own blurb. */
 diff --git a/src/lib/api.ts b/src/lib/api.ts
-index 4f9a9a5..f1046ba 100644
+index 2840399..1b67ca5 100644
 --- a/src/lib/api.ts
 +++ b/src/lib/api.ts
-@@ -356,6 +356,9 @@ export const api = {
+@@ -523,6 +523,9 @@ export const api = {
    /* owner-only: what the share link grants people who aren't invited */
    setLinkAccess: (id: string, linkAccess: LinkAccess) =>
      req('/api/canvases/' + id, { method: 'PATCH', body: JSON.stringify({ linkAccess }) }),
@@ -5603,10 +6163,10 @@ index 4f9a9a5..f1046ba 100644
    publishCanvas: (id: string, listing: { description: string; category: CommunityCategory }) =>
      req<Pick<Canvas, 'publishedAt' | 'description' | 'category'>>(`/api/canvases/${id}/publish`, {
 diff --git a/src/lib/i18n/en/admin.ts b/src/lib/i18n/en/admin.ts
-index 9640c0b..f5043e3 100644
+index defe6b5..8340e90 100644
 --- a/src/lib/i18n/en/admin.ts
 +++ b/src/lib/i18n/en/admin.ts
-@@ -23,9 +23,11 @@ export const admin = {
+@@ -24,9 +24,11 @@ export const admin = {
    showingRecent: 'Showing the {shown} most recently updated of {total}',
    linkAccessView: 'Anyone with the link can view this canvas',
    linkAccessComment: 'Anyone with the link can comment this canvas',
@@ -5619,7 +6179,7 @@ index 9640c0b..f5043e3 100644
    unclaimed: 'unclaimed',
    invited: '{count} invited',
 diff --git a/src/lib/i18n/en/canvas.ts b/src/lib/i18n/en/canvas.ts
-index c3f2e23..1aa6298 100644
+index 89e6a29..28e162c 100644
 --- a/src/lib/i18n/en/canvas.ts
 +++ b/src/lib/i18n/en/canvas.ts
 @@ -61,6 +61,21 @@ export const canvas = {
@@ -5645,10 +6205,10 @@ index c3f2e23..1aa6298 100644
    backToCanvases: 'Back to your canvases',
  
 diff --git a/src/lib/i18n/en/panels.ts b/src/lib/i18n/en/panels.ts
-index 67dfc16..5e0aec8 100644
+index cc74340..ea43b31 100644
 --- a/src/lib/i18n/en/panels.ts
 +++ b/src/lib/i18n/en/panels.ts
-@@ -190,10 +190,12 @@ export const panels = {
+@@ -198,10 +198,12 @@ export const panels = {
    shareAccessNone: 'No access',
    shareAccessView: 'View',
    shareAccessComment: 'Comment',
@@ -5661,7 +6221,7 @@ index 67dfc16..5e0aec8 100644
    shareSummaryEdit: 'Anyone with the link can edit',
    shareCategoryWebsite: 'Websites',
    shareCategoryApp: 'Web apps',
-@@ -227,6 +229,18 @@ export const panels = {
+@@ -235,6 +237,18 @@ export const panels = {
    shareLinkAria: 'What anyone with the link can do',
    shareLinkTitle: 'No access = only you, invited people and workspace members can open this canvas',
    shareCopyLink: 'Copy link',
@@ -5677,14 +6237,14 @@ index 67dfc16..5e0aec8 100644
 +  sharePasswordSaved: 'Password saved. Guests who joined before must type the new one.',
 +  sharePasswordRemoved: 'Password removed.',
 +  sharePasswordFailed: 'could not save the password',
-   shareUpgradeReason: 'Moving a canvas into a workspace needs a Team plan.',
+   shareUpgradeReason: 'Moving a canvas into a workspace needs a Pro plan.',
    shareGalleryTitle: 'Anyone on doop can preview and copy a listed canvas. The canvas itself stays private.',
    shareGallery: 'Show in the community gallery',
 diff --git a/src/lib/i18n/pt-BR/admin.ts b/src/lib/i18n/pt-BR/admin.ts
-index 876b57b..8a7b96c 100644
+index 874a0b2..c6301ba 100644
 --- a/src/lib/i18n/pt-BR/admin.ts
 +++ b/src/lib/i18n/pt-BR/admin.ts
-@@ -24,9 +24,11 @@ export const admin: Catalog['admin'] = {
+@@ -25,9 +25,11 @@ export const admin: Catalog['admin'] = {
    showingRecent: 'Mostrando os {shown} atualizados mais recentemente de {total}',
    linkAccessView: 'Qualquer pessoa com o link pode ver este canvas',
    linkAccessComment: 'Qualquer pessoa com o link pode comentar neste canvas',
@@ -5697,7 +6257,7 @@ index 876b57b..8a7b96c 100644
    unclaimed: 'sem dono',
    invited: '{count} convidados',
 diff --git a/src/lib/i18n/pt-BR/canvas.ts b/src/lib/i18n/pt-BR/canvas.ts
-index 844c5dc..5eafd8b 100644
+index 3d8efe0..7c8af7f 100644
 --- a/src/lib/i18n/pt-BR/canvas.ts
 +++ b/src/lib/i18n/pt-BR/canvas.ts
 @@ -61,6 +61,21 @@ export const canvas: Catalog['canvas'] = {
@@ -5723,10 +6283,10 @@ index 844c5dc..5eafd8b 100644
      '“{id}” não corresponde a nenhum canvas que conhecemos. Ele pode ter sido excluído, ou o link pode estar errado.',
    backToCanvases: 'Voltar para seus canvases',
 diff --git a/src/lib/i18n/pt-BR/panels.ts b/src/lib/i18n/pt-BR/panels.ts
-index 531d94a..bb768d9 100644
+index 09c3f62..3d582b7 100644
 --- a/src/lib/i18n/pt-BR/panels.ts
 +++ b/src/lib/i18n/pt-BR/panels.ts
-@@ -190,10 +190,12 @@ export const panels: Catalog['panels'] = {
+@@ -198,10 +198,12 @@ export const panels: Catalog['panels'] = {
    shareAccessNone: 'Sem acesso',
    shareAccessView: 'Ver',
    shareAccessComment: 'Comentar',
@@ -5739,7 +6299,7 @@ index 531d94a..bb768d9 100644
    shareSummaryEdit: 'Qualquer pessoa com o link pode editar',
    shareCategoryWebsite: 'Sites',
    shareCategoryApp: 'Apps web',
-@@ -227,6 +229,18 @@ export const panels: Catalog['panels'] = {
+@@ -235,6 +237,18 @@ export const panels: Catalog['panels'] = {
    shareLinkAria: 'O que qualquer pessoa com o link pode fazer',
    shareLinkTitle: 'Sem acesso = só você, pessoas convidadas e membros do workspace podem abrir este canvas',
    shareCopyLink: 'Copiar link',
@@ -5755,14 +6315,14 @@ index 531d94a..bb768d9 100644
 +  sharePasswordSaved: 'Senha salva. Quem entrou antes precisa digitar a nova.',
 +  sharePasswordRemoved: 'Senha removida.',
 +  sharePasswordFailed: 'não foi possível salvar a senha',
-   shareUpgradeReason: 'Mover um canvas para um workspace exige um plano Team.',
+   shareUpgradeReason: 'Mover um canvas para um workspace exige um plano Pro.',
    shareGalleryTitle:
      'Qualquer pessoa no doop pode visualizar e copiar um canvas listado. O canvas em si continua privado.',
 diff --git a/src/lib/me.ts b/src/lib/me.ts
-index 07b5af5..121e6c1 100644
+index 4d52662..50b2e19 100644
 --- a/src/lib/me.ts
 +++ b/src/lib/me.ts
-@@ -16,6 +16,9 @@ export interface Me {
+@@ -18,6 +18,9 @@ export interface Me {
     *  impersonation replaces the session cookie outright — so this flag is the
     *  only way the app can tell it is in a borrowed session. */
    impersonating?: { byName: string }
@@ -5773,10 +6333,10 @@ index 07b5af5..121e6c1 100644
  
  /* Keyed by the signed-in user id, and never caching a failure. Both matter:
 diff --git a/src/pages/Admin.tsx b/src/pages/Admin.tsx
-index b1a4283..1aab0f5 100644
+index 0e21127..9b2413d 100644
 --- a/src/pages/Admin.tsx
 +++ b/src/pages/Admin.tsx
-@@ -40,12 +40,14 @@ type SharedAccess = Exclude<LinkAccess, 'none'>
+@@ -51,12 +51,14 @@ type SharedAccess = Exclude<LinkAccess, 'none'>
  const LINK_BADGE = {
    view: 'admin.linkView',
    comment: 'admin.linkComment',
@@ -5792,18 +6352,18 @@ index b1a4283..1aab0f5 100644
  } as const satisfies Record<SharedAccess, PlainMessageKey>
  
 diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
-index 64a5db6..2c7cad2 100644
+index 76b7949..aef44ac 100644
 --- a/src/pages/CanvasPage.tsx
 +++ b/src/pages/CanvasPage.tsx
-@@ -87,6 +87,7 @@ import { copyPicked, hasElementClip, pasteLayer } from '../lib/elementClipboard'
+@@ -86,6 +86,7 @@ import { copyPicked, hasElementClip, pasteLayer } from '../lib/elementClipboard'
  import { isCanvasClipboard, writeCanvasClipboard } from '../lib/canvasClipboard'
  import { authClient } from '../lib/auth'
  import { FULL_UI } from '../lib/fullUi'
 +import { useMe } from '../lib/me'
  import { avatarUrl } from '../../shared/avatar'
- import { posthog } from '../lib/posthog'
+ import { openSupportChat, posthog } from '../lib/posthog'
  import { useIsMobile } from '../hooks/use-mobile'
-@@ -698,6 +699,11 @@ export function CanvasPage({
+@@ -711,6 +712,11 @@ export function CanvasPage({
    /* the face's photo comes from the account, not the room: our own presence
       is never in the roster */
    const { data: session } = authClient.useSession()
@@ -5815,7 +6375,7 @@ index 64a5db6..2c7cad2 100644
    const others = useMemo(
      () => Object.values(presences).filter((p) => p.clientId !== me.clientId),
      [presences, me.clientId],
-@@ -982,7 +988,7 @@ export function CanvasPage({
+@@ -995,7 +1001,7 @@ export function CanvasPage({
              </BarPill>
            )}
            <BarPill>
@@ -5824,7 +6384,7 @@ index 64a5db6..2c7cad2 100644
                <Button variant="bare" className={barPillBtn} onClick={() => setShowShare(true)}>
                  <ShareUpIcon className="size-3.5" />
                  {t('canvas.share')}
-@@ -1199,7 +1205,7 @@ export function CanvasPage({
+@@ -1213,7 +1219,7 @@ export function CanvasPage({
                <CanvasDock
                  title={<CanvasName readOnly={readOnly} />}
                  idMenu={<CanvasIdMenu canvasId={canvasId} onCopied={showToast} compact />}
@@ -5833,7 +6393,7 @@ index 64a5db6..2c7cad2 100644
                  zoomSlot={setZoomSlot}
                  me={meFace}
                  others={others}
-@@ -1217,7 +1223,7 @@ export function CanvasPage({
+@@ -1231,7 +1237,7 @@ export function CanvasPage({
                          setShowActivity(true)
                        }
                  }
@@ -5842,7 +6402,7 @@ index 64a5db6..2c7cad2 100644
                  inspector={
                    readOnly
                      ? null
-@@ -1227,7 +1233,8 @@ export function CanvasPage({
+@@ -1241,7 +1247,8 @@ export function CanvasPage({
                          onToggle: toggleProperties,
                        }
                  }
@@ -5852,7 +6412,7 @@ index 64a5db6..2c7cad2 100644
                />
              </>
            )}
-@@ -1272,7 +1279,7 @@ export function CanvasPage({
+@@ -1286,7 +1293,7 @@ export function CanvasPage({
                      <ImportIcon /> {t('canvas.importWebsite')}
                    </Button>
                  )}
@@ -5862,10 +6422,10 @@ index 64a5db6..2c7cad2 100644
                      variant="ghost"
                      className="h-11 justify-start gap-2.5 border-line bg-surface px-4"
 diff --git a/src/pages/Home.tsx b/src/pages/Home.tsx
-index 257813a..ac78d64 100644
+index 6d76348..f54d423 100644
 --- a/src/pages/Home.tsx
 +++ b/src/pages/Home.tsx
-@@ -713,6 +713,9 @@ function CanvasActions({
+@@ -710,6 +710,9 @@ function CanvasActions({
    onDelete?: () => void
  }) {
    const t = useT()
@@ -5875,7 +6435,7 @@ index 257813a..ac78d64 100644
    return (
      <DropdownMenu>
        <DropdownMenuTrigger asChild>
-@@ -731,7 +734,7 @@ function CanvasActions({
+@@ -728,7 +731,7 @@ function CanvasActions({
          </IconButton>
        </DropdownMenuTrigger>
        <DropdownMenuContent width="md">

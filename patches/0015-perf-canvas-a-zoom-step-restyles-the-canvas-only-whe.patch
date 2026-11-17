@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 05:09:37 +0000
-Subject: [PATCH 15/52] perf(canvas): a zoom step restyles the canvas only when
+Subject: [PATCH 15/55] perf(canvas): a zoom step restyles the canvas only when
  its chrome has drifted
 
 Chrome drawn inside the world at a fixed screen size (frame names, rings,
@@ -59,13 +59,13 @@ index 46e0938..5f8b43c 100644
       anchor it already placed, or just add the next point */
    const penCursor = (() => {
 diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
-index 4bf0984..3b5f65f 100644
+index c330b93..7dddc87 100644
 --- a/src/components/Stage.tsx
 +++ b/src/components/Stage.tsx
-@@ -48,7 +48,7 @@ import {
- import { TOOLS, isDrawingTool, resolvePointerAction, toolForKey, type Tool } from '../lib/tools'
+@@ -49,7 +49,7 @@ import { TOOLS, isDrawingTool, resolvePointerAction, toolForKey, type Tool } fro
  import { useCanvasDrawing } from './CanvasDrawing'
  import { FrameLabelLayer } from './FrameLabelLayer'
+ import { pixelGridLines } from './PixelGrid'
 -import { layoutZoomFor } from '../lib/layoutZoom'
 +import { chromeZoomStale, layoutZoomFor } from '../lib/layoutZoom'
  import { useT, type PlainMessageKey } from '../lib/i18n'
@@ -136,7 +136,7 @@ index 4bf0984..3b5f65f 100644
        const period = 26 * vp.zoom
        if (appliedPeriod.current !== period) {
          appliedPeriod.current = period
-@@ -389,8 +406,9 @@ export function Stage({
+@@ -392,8 +409,9 @@ export function Stage({
        if (zoomLabelRef.current && zoomLabelRef.current.textContent !== percent)
          zoomLabelRef.current.textContent = percent
      }
@@ -147,7 +147,7 @@ index 4bf0984..3b5f65f 100644
      const unsub = useStore.subscribe((s, prev) => {
        /* a (re)connect needs the camera announced afresh — the server only
           knows what this socket has sent */
-@@ -399,6 +417,9 @@ export function Stage({
+@@ -402,6 +420,9 @@ export function Stage({
        if (s.viewport === prev.viewport) return
        apply(s.viewport)
        if (ref.current) sendViewport(s.viewport, ref.current)
@@ -157,7 +157,7 @@ index 4bf0984..3b5f65f 100644
        window.clearTimeout(settle)
        settle = window.setTimeout(() => {
          setLayoutZoom(layoutZoomFor(useStore.getState().viewport.zoom, MAX_ZOOM))
-@@ -407,6 +428,7 @@ export function Stage({
+@@ -410,6 +431,7 @@ export function Stage({
      return () => {
        unsub()
        window.clearTimeout(settle)
@@ -165,15 +165,15 @@ index 4bf0984..3b5f65f 100644
      }
    }, [])
  
-@@ -1379,7 +1401,7 @@ export function Stage({
-               ref={gridRef}
-             />
-             {/* the selected frame's size badge, in screen px (FrameLabelLayer) */}
+@@ -1381,7 +1403,7 @@ export function Stage({
+             </div>
+             {/* the selected frame's size badge, in screen px (FrameLabelLayer); after
+                 the world so no frame, however it stacks, covers it */}
 -            <div className="pointer-events-none absolute inset-0" ref={attachLabelLayer} />
 +            <div className="pointer-events-none absolute inset-0" data-stage-labels="" ref={attachLabelLayer} />
-             {/* `world` is likewise a behaviour hook: pan hit-testing checks
-             classList.contains('world') to tell background from frame */}
-             <div
+             {showRulers && <Rulers stage={ref} />}
+           </div>
+         </ContextMenuTrigger>
 diff --git a/src/lib/layoutZoom.ts b/src/lib/layoutZoom.ts
 index 680ec04..f1c257e 100644
 --- a/src/lib/layoutZoom.ts
@@ -241,10 +241,10 @@ index 0000000..81c6ee4
 +  })
 +})
 diff --git a/tests/liveFramesBrowser.test.ts b/tests/liveFramesBrowser.test.ts
-index de4ca1b..09e3da1 100644
+index 1c914e9..4eeffdb 100644
 --- a/tests/liveFramesBrowser.test.ts
 +++ b/tests/liveFramesBrowser.test.ts
-@@ -94,6 +94,29 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
+@@ -103,6 +103,29 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
      expect(n).toBeLessThanOrEqual(MAX_LIVE)
    }, 30_000)
  

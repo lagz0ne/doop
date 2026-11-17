@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 06:11:44 +0000
-Subject: [PATCH 44/52] fix(ui): no getting-started checklist in the reviewer
+Subject: [PATCH 44/55] fix(ui): no getting-started checklist in the reviewer
  UI, or before the canvas loads
 
 The getting-started checklist (connect an agent, give it a task) showed for
@@ -24,10 +24,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 8 insertions(+), 1 deletion(-)
 
 diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
-index 64e4637..f455070 100644
+index 6ee5311..42b5f5a 100644
 --- a/src/pages/CanvasPage.tsx
 +++ b/src/pages/CanvasPage.tsx
-@@ -1165,7 +1165,11 @@ export function CanvasPage({
+@@ -1179,7 +1179,11 @@ export function CanvasPage({
            {/* the presence pill in the bar already carries each agent's status
                line; this per-agent stack is only for windows too narrow for it */}
            {!reviewerLayout && <WorkingNow style={{ left: chrome.left }} className="min-[1180px]:hidden" />}
@@ -37,9 +37,9 @@ index 64e4637..f455070 100644
 +              loaded, since the role reads as edit until then and the card would
 +              show for a moment and vanish for a reviewer */}
 +          {FULL_UI && canvas && !readOnly && <Onboarding canvasId={canvasId} />}
+           <IosAppPrompt />
            <AccessBanner guest={guest} onSignUp={onSignUp} onSignIn={onSignIn} />
            {!isMobile &&
-             (layersOpen ? (
 diff --git a/tests/reviewerLayoutBrowser.test.ts b/tests/reviewerLayoutBrowser.test.ts
 index 68d6d38..26f05fb 100644
 --- a/tests/reviewerLayoutBrowser.test.ts

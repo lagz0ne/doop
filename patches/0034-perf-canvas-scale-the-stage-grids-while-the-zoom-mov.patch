@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 10:37:47 +0000
-Subject: [PATCH 34/52] perf(canvas): scale the stage grids while the zoom
+Subject: [PATCH 34/55] perf(canvas): scale the stage grids while the zoom
  moves, paint them at rest
 
 The dot grid is one composited layer the size of the view, a repeating
@@ -45,22 +45,22 @@ page, two rounds each, counts identical in both; load 10-19):
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- src/components/Stage.tsx       |  84 ++++++++++++--------
+ src/components/Stage.tsx       |  92 +++++++++++++--------
  src/lib/stageGrid.ts           |  63 +++++++++++++++
  tests/stageGrid.test.ts        |  96 ++++++++++++++++++++++
  tests/stageGridBrowser.test.ts | 141 +++++++++++++++++++++++++++++++++
- 4 files changed, 352 insertions(+), 32 deletions(-)
+ 4 files changed, 357 insertions(+), 35 deletions(-)
  create mode 100644 src/lib/stageGrid.ts
  create mode 100644 tests/stageGrid.test.ts
  create mode 100644 tests/stageGridBrowser.test.ts
 
 diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
-index d39b6c7..2f321ae 100644
+index 6af66c2..d64a2ab 100644
 --- a/src/components/Stage.tsx
 +++ b/src/components/Stage.tsx
-@@ -50,6 +50,7 @@ import { TOOLS, isDrawingTool, resolvePointerAction, toolForKey, type Tool } fro
- import { useCanvasDrawing } from './CanvasDrawing'
+@@ -51,6 +51,7 @@ import { useCanvasDrawing } from './CanvasDrawing'
  import { FrameLabelLayer } from './FrameLabelLayer'
+ import { pixelGridLines } from './PixelGrid'
  import { chromeZoomStale, layoutZoomFor } from '../lib/layoutZoom'
 +import { DOT_PERIOD, GRID_ZOOM_DRIFT, gridPaintZoom, gridStale, gridTransform } from '../lib/stageGrid'
  import { useT, type PlainMessageKey } from '../lib/i18n'
@@ -81,7 +81,7 @@ index d39b6c7..2f321ae 100644
    const zoomLabelRef = useRef<HTMLSpanElement>(null)
    const setViewport = useStore((s) => s.setViewport)
    const canvas = usePageCanvas()
-@@ -369,11 +372,48 @@ export function Stage({
+@@ -369,11 +372,53 @@ export function Stage({
        appliedZoom.current = zoom
        ref.current.style.setProperty('--zoom', String(zoom))
      }
@@ -106,9 +106,14 @@ index d39b6c7..2f321ae 100644
 +        /* hidden below the zoom where pixels show: then a pan writes nothing
 +           here, and the frame stays a compositor-only transform */
 +        if (pixels.hidden !== (opacity === 0)) pixels.hidden = opacity === 0
++        /* the frames' own grids read the same fade */
++        const fade = String(opacity)
++        const stage = ref.current
++        if (stage && stage.style.getPropertyValue('--pixel-grid') !== fade)
++          stage.style.setProperty('--pixel-grid', fade)
 +        if (opacity === 0) pixelZoom.current = null
 +        else {
-+          pixels.style.opacity = String(opacity)
++          pixels.style.opacity = fade
 +          if (exact ? pixelZoom.current !== vp.zoom : gridStale(pixelZoom.current, vp.zoom, GRID_ZOOM_DRIFT)) {
 +            pixelZoom.current = exact ? vp.zoom : gridPaintZoom(pixelZoom.current, vp.zoom, GRID_ZOOM_DRIFT)
 +            pixels.style.backgroundSize = `${pixelZoom.current}px ${pixelZoom.current}px`
@@ -132,7 +137,7 @@ index d39b6c7..2f321ae 100644
        world.style.transform = worldTransform(vp, layoutZoomRef.current)
        /* The camera's offset, for chrome drawn in screen px, goes on the label
           layer alone: it is the only reader (FrameLabelLayer), and a custom
-@@ -395,30 +435,7 @@ export function Stage({
+@@ -395,33 +440,7 @@ export function Stage({
           restyles the whole canvas: it follows a moving camera in steps and
           catches up when the camera rests (chromeZoomStale, layoutZoom.ts) */
        if (exact || chromeZoomStale(appliedZoom.current, vp.zoom)) writeChromeZoom(vp.zoom)
@@ -152,8 +157,11 @@ index d39b6c7..2f321ae 100644
 -        /* hidden below the zoom where pixels show: then a pan writes nothing
 -           here, and the frame stays a compositor-only transform */
 -        if (pixels.hidden !== (opacity === 0)) pixels.hidden = opacity === 0
+-        /* the frames' own grids read the same fade */
+-        const fade = String(opacity)
+-        if (stage.style.getPropertyValue('--pixel-grid') !== fade) stage.style.setProperty('--pixel-grid', fade)
 -        if (opacity !== 0) {
--          pixels.style.opacity = String(opacity)
+-          pixels.style.opacity = fade
 -          pixels.style.backgroundSize = `${vp.zoom}px ${vp.zoom}px`
 -          const px = (((vp.x % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
 -          const py = (((vp.y % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
@@ -164,7 +172,7 @@ index d39b6c7..2f321ae 100644
        /* replacing a text node repaints the pill even when it reads the same */
        const percent = `${Math.round(vp.zoom * 100)}%`
        if (zoomLabelRef.current && zoomLabelRef.current.textContent !== percent)
-@@ -436,8 +453,9 @@ export function Stage({
+@@ -439,8 +458,9 @@ export function Stage({
        apply(s.viewport)
        if (ref.current) sendViewport(s.viewport, ref.current)
        window.clearTimeout(chromeRest)
@@ -176,7 +184,7 @@ index d39b6c7..2f321ae 100644
        window.clearTimeout(settle)
        settle = window.setTimeout(() => {
          setLayoutZoom(layoutZoomFor(useStore.getState().viewport.zoom, MAX_ZOOM))
-@@ -1468,8 +1486,10 @@ export function Stage({
+@@ -1434,8 +1454,10 @@ export function Stage({
                bgAt.current = { x: e.clientX, y: e.clientY }
              }}
            >

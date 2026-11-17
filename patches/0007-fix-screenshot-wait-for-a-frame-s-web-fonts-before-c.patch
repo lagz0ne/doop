@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Thu, 12 Nov 2026 04:20:59 +0000
-Subject: [PATCH 07/52] fix(screenshot): wait for a frame's web fonts before
+Subject: [PATCH 07/55] fix(screenshot): wait for a frame's web fonts before
  capturing it
 
 A frame render waited for `load` plus 120 ms. That does not cover web
@@ -30,11 +30,11 @@ Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
  1 file changed, 20 insertions(+)
 
 diff --git a/server/screenshot.ts b/server/screenshot.ts
-index f7e5768..d3c3742 100644
+index a493238..1b8083e 100644
 --- a/server/screenshot.ts
 +++ b/server/screenshot.ts
-@@ -110,6 +110,25 @@ export async function openIsolatedPage(): Promise<IsolatedPage> {
-   }
+@@ -154,6 +154,25 @@ export function openIsolatedPage(options?: PageOptions): Promise<IsolatedPage> {
+   return renderer.openPage(options)
  }
  
 +/** How long a render waits for the frame's web fonts before it goes ahead
@@ -56,14 +56,14 @@ index f7e5768..d3c3742 100644
 +  await Promise.race([ready, timeout])
 +}
 +
- export async function loadFramePage(frame: Frame): Promise<IsolatedPage> {
-   const loaded = await openIsolatedPage()
-   const { page } = loaded
-@@ -148,6 +167,7 @@ export async function loadFramePage(frame: Frame): Promise<IsolatedPage> {
-       /* Slow external resources: inspect whatever has rendered. */
-     }
-     await new Promise((resolve) => setTimeout(resolve, 120))
-+    await webFontsSettled(page)
-     return loaded
-   } catch (error) {
-     await loaded.close()
+ export async function loadFramePage(frame: Frame, options?: PageOptions): Promise<IsolatedPage> {
+   const loaded = await openIsolatedPage(options)
+   try {
+@@ -200,6 +219,7 @@ async function loadFrameInto(page: Page, frame: Frame): Promise<void> {
+     /* Slow external resources: inspect whatever has rendered. */
+   }
+   await new Promise((resolve) => setTimeout(resolve, 120))
++  await webFontsSettled(page)
+ }
+ 
+ export interface FrameInspection {

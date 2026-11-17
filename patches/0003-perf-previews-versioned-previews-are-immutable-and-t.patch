@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 06:23:06 +0000
-Subject: [PATCH 03/52] perf(previews): versioned previews are immutable and
+Subject: [PATCH 03/55] perf(previews): versioned previews are immutable and
  their versions outlive a restart
 
 The editor's culled frames show /i/<id>.jpg?preview&v=<updatedAt>, hundreds
@@ -31,18 +31,18 @@ Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
  create mode 100644 tests/previewVersion.test.ts
 
 diff --git a/server/index.ts b/server/index.ts
-index 274d08e..86b4b8a 100644
+index d3abf7c..3abc943 100644
 --- a/server/index.ts
 +++ b/server/index.ts
-@@ -441,6 +441,7 @@ app.get('/i/:id.:ext', async (req, res) => {
-       quality: Math.min(100, Math.max(1, Number(req.query.quality) || 90)),
+@@ -563,6 +563,7 @@ app.get('/i/:id.:ext', async (req, res) => {
        /* ?preview — the dashboard-card variant; see previews.ts */
-       preview: req.query.preview !== undefined,
+       preview: !layer && req.query.preview !== undefined,
+       layer: layer ? layerSelector(layer) : undefined,
 +      ...(typeof req.query.v === 'string' && /^\d+$/.test(req.query.v) ? { version: Number(req.query.v) } : null),
        ip: req.ip ?? 'unknown',
        /* the render limit targets anonymous hotlink abuse — a logged-in user
           loading a dashboard of many canvases shouldn't hit it (and behind
-@@ -459,7 +460,14 @@ app.get('/i/:id.:ext', async (req, res) => {
+@@ -582,7 +583,14 @@ app.get('/i/:id.:ext', async (req, res) => {
    const { buf } = result
  
    res.set('Content-Type', ext === 'jpg' ? 'image/jpeg' : 'image/png')
@@ -57,15 +57,15 @@ index 274d08e..86b4b8a 100644
 +  res.set('Cache-Control', versioned ? 'public, max-age=31536000, immutable' : 'public, max-age=60')
    if (req.query.download !== undefined) {
      const safe = frame.name.replace(/[^\w\- ]+/g, '').trim() || 'frame'
-     res.set('Content-Disposition', `attachment; filename="${safe}${exportScaleSuffix(scale)}.${ext}"`)
+     const part = layer ? ` ${'elementId' in layer ? layer.elementId : 'layer'}` : ''
 diff --git a/server/previews.ts b/server/previews.ts
-index 8e9f6a4..5e3fad5 100644
+index e0e65f9..d219e4f 100644
 --- a/server/previews.ts
 +++ b/server/previews.ts
-@@ -40,12 +40,18 @@ export interface ImageRequest {
-    *  meaningful for jpg — a png?preview would serve jpeg bytes under an
-    *  image/png content-type, so the flag is ignored there. */
+@@ -43,12 +43,18 @@ export interface ImageRequest {
    preview: boolean
+   /** a layer export: the CSS selector of the element to cut the render to */
+   layer?: string
 +  /** the frame version the URL names (?v=), if any. The editor's culled
 +   *  frames ask for the current one and show nothing else until the next
 +   *  edit, so a thumbnail known to be older is not an answer to them. */
@@ -82,7 +82,7 @@ index 8e9f6a4..5e3fad5 100644
  
  /** May reject when the render itself fails — the caller owns the 500. */
  export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageResult> {
-@@ -58,11 +64,29 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
+@@ -61,11 +67,29 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
    /* previews first try the persisted thumbnail: survives redeploys, serves
       instantly even when stale (thumbs revalidates in the background), and
       costs no Chromium boot — so it isn't metered either */
@@ -114,7 +114,7 @@ index 8e9f6a4..5e3fad5 100644
      }
    }
  
-@@ -77,7 +101,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
+@@ -84,7 +108,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
      remember(key, pending, frame.updatedAt)
    }
  
@@ -122,12 +122,12 @@ index 8e9f6a4..5e3fad5 100644
 +  return { status: 'ok', buf: await pending, fresh }
  }
  
- function imageKey(id: string, ext: 'png' | 'jpg', scale: number, quality: number | '', preview: boolean): string {
+ function imageKey(
 diff --git a/server/thumbs.ts b/server/thumbs.ts
-index d805ec9..d52324c 100644
+index 3588390..4bb0c4c 100644
 --- a/server/thumbs.ts
 +++ b/server/thumbs.ts
-@@ -9,10 +9,13 @@ import * as storage from './storage.ts'
+@@ -10,10 +10,13 @@ import { store } from './store.ts'
   * cache — so a dashboard never shows blank tiles waiting on Chromium: a
   * possibly-stale thumbnail is served instantly and refreshed in the
   * background. The key is deliberately unversioned; freshness lives in the
@@ -145,7 +145,7 @@ index d805ec9..d52324c 100644
   */
  
  /** frame.updatedAt the stored thumb was rendered from; absent = unknown */
-@@ -27,6 +30,7 @@ const MIN_REVALIDATE_MS = 30_000
+@@ -28,6 +31,7 @@ const MIN_REVALIDATE_MS = 30_000
  const dead = new Set<string>()
  
  const keyFor = (frameId: string) => `thumb/${frameId}.jpg`
@@ -153,7 +153,7 @@ index d805ec9..d52324c 100644
  
  /* Global bound on concurrent preview renders. Per-frame dedupe caps repeat
     requests but not breadth: a post-restart dashboard of 50 stale canvases
-@@ -75,6 +79,7 @@ export function create(frame: Frame): Promise<Buffer> {
+@@ -79,6 +83,7 @@ export function create(frame: Frame): Promise<Buffer> {
          /* purge may have run during the put — its delete can land before
             our write finishes, so re-check and clean up our own orphan */
          if (dead.has(frame.id)) await storage.deleteObject(keyFor(frame.id))
@@ -161,7 +161,7 @@ index d805ec9..d52324c 100644
        }
      } catch (e) {
        console.error(`thumb persist failed for ${frame.id}:`, e)
-@@ -91,7 +96,7 @@ export function create(frame: Frame): Promise<Buffer> {
+@@ -95,7 +100,7 @@ export function create(frame: Frame): Promise<Buffer> {
   *  off (throttled, deduped, errors logged and swallowed) and the stored
   *  bytes are returned anyway: stale beats blank. Returns null when nothing
   *  is stored yet. */
@@ -170,7 +170,7 @@ index d805ec9..d52324c 100644
    let buf: Buffer | null
    try {
      buf = await storage.getObject(keyFor(frame.id))
-@@ -105,11 +110,18 @@ export async function getStored(frame: Frame): Promise<Buffer | null> {
+@@ -109,11 +114,18 @@ export async function getStored(frame: Frame): Promise<Buffer | null> {
      written.delete(frame.id)
      return null
    }
@@ -190,7 +190,7 @@ index d805ec9..d52324c 100644
  }
  
  /** Frame (or its whole canvas) is gone — drop the derived object too, so the
-@@ -119,4 +131,5 @@ export function purge(frameId: string): void {
+@@ -123,4 +135,5 @@ export function purge(frameId: string): void {
    written.delete(frameId)
    lastAttempt.delete(frameId)
    storage.deleteObject(keyFor(frameId)).catch(() => {})

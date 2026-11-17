@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 03:10:02 +0000
-Subject: [PATCH 41/52] fix(canvas): a frame keeps its picture through a zoom's
+Subject: [PATCH 41/55] fix(canvas): a frame keeps its picture through a zoom's
  settle
 
 When a zoom came to rest, frames changed how they are drawn: culled frames
@@ -49,10 +49,10 @@ frames around it, two runs per renderer, software GL:
  6 files changed, 281 insertions(+), 35 deletions(-)
 
 diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
-index a15c963..8da2c77 100644
+index f334380..7850132 100644
 --- a/src/components/FrameView.tsx
 +++ b/src/components/FrameView.tsx
-@@ -17,7 +17,7 @@ import { sendWs } from '../lib/ws'
+@@ -18,7 +18,7 @@ import { sendWs } from '../lib/ws'
  import { throttle } from '../lib/throttle'
  import { getIdentity } from '../lib/identity'
  import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
@@ -61,7 +61,7 @@ index a15c963..8da2c77 100644
  import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
  import { trackShell } from '../lib/shellCull'
  import { keepsDocument, registerZoomPicture, zoomPicturesEnabled } from '../lib/zoomPictures'
-@@ -241,11 +241,15 @@ export const FrameView = memo(function FrameView({
+@@ -266,11 +266,15 @@ export const FrameView = memo(function FrameView({
    frame,
    stack,
    layoutZoom,
@@ -77,7 +77,7 @@ index a15c963..8da2c77 100644
  }) {
    const t = useT()
    const [menuTarget, setMenuTarget] = useState<
-@@ -1146,6 +1150,34 @@ export const FrameView = memo(function FrameView({
+@@ -1309,6 +1313,34 @@ export const FrameView = memo(function FrameView({
    const pictureRef = useRef<HTMLDivElement>(null)
    const prototypeMode = useStore((s) => s.prototypeMode)
    const pictureStandby = zoomPictures && live && previews && documentShown && !stream
@@ -112,16 +112,16 @@ index a15c963..8da2c77 100644
    const keepDocument = keepsDocument({
      documentShown,
      canvasElement: isCanvasElement(frame.html),
-@@ -1776,6 +1808,8 @@ export const FrameView = memo(function FrameView({
+@@ -1968,6 +2000,8 @@ export const FrameView = memo(function FrameView({
                   an unselected frame's own stacking context a z-index here would
                   cover the frame's pins and hover outlines */
-               zIndex: selected ? stack : undefined,
+               zIndex: lifted ? stack : undefined,
 +              /* the GPU canvas or the shell draws the frame beneath until it has painted */
 +              opacity: handover && !shown ? 0 : undefined,
              }}
              onPointerDown={(e) => startDrag(e, 'move', true)}
              onDoubleClick={(e) => {
-@@ -1851,7 +1885,7 @@ export const FrameView = memo(function FrameView({
+@@ -2056,7 +2090,7 @@ export const FrameView = memo(function FrameView({
                     (zoomPictures.ts), which shows it by writing this style */
                  style={pictureStandby ? { visibility: 'hidden' } : undefined}
                >
@@ -129,8 +129,8 @@ index a15c963..8da2c77 100644
 +                <FramePreview frame={frame} onShown={() => setPictureShown(true)} />
                </div>
              )}
-             {!frame.html && (
-@@ -2244,14 +2278,39 @@ export const FrameView = memo(function FrameView({
+             {/* a standalone element is see-through: the paper's grid shows */}
+@@ -2450,14 +2484,39 @@ export const FrameView = memo(function FrameView({
  })
  
  const PREVIEW_RETRIES = 4
@@ -173,7 +173,7 @@ index a15c963..8da2c77 100644
    const element = isCanvasElement(frame.html)
    /* A preview that fails to load (a render that failed, an anonymous viewer
       past the render budget) is asked for again, a few times and less often
-@@ -2260,26 +2319,65 @@ function FramePreview({ frame }: { frame: Frame }) {
+@@ -2466,26 +2525,65 @@ function FramePreview({ frame }: { frame: Frame }) {
    const attempt = retry.version === frame.updatedAt ? retry.count : 0
    const timer = useRef(0)
    useEffect(() => () => window.clearTimeout(timer.current), [])
@@ -249,7 +249,7 @@ index a15c963..8da2c77 100644
            onError={() => {
              if (attempt >= PREVIEW_RETRIES) return
              window.clearTimeout(timer.current)
-@@ -2393,6 +2491,24 @@ export const FrameSlot = memo(function FrameSlot({
+@@ -2599,6 +2697,24 @@ export const FrameSlot = memo(function FrameSlot({
    const engaged = useStore((s) => s.selectedIds.includes(frame.id) || !!s.streams[frame.id])
    /* drawn on the Stage's GPU canvas (gpuPictures.ts): nothing of it in the DOM */
    const gpu = useGpuPicture(frame.id)

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 07:39:24 +0000
-Subject: [PATCH 26/52] feat(operator): a direct-only switch keeps the operator
+Subject: [PATCH 26/55] feat(operator): a direct-only switch keeps the operator
  API off the public edge
 
 The operator API is guarded by its bearer token alone. Keeping it off the
@@ -29,7 +29,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  4 files changed, 36 insertions(+)
 
 diff --git a/.env.example b/.env.example
-index cb2270a..2b2a735 100644
+index 75e0bb1..8bad5c8 100644
 --- a/.env.example
 +++ b/.env.example
 @@ -61,6 +61,12 @@
@@ -46,10 +46,10 @@ index cb2270a..2b2a735 100644
  # Embedded review panel: host apps (each with its own page origin) show doop's
  # review panel in an iframe and sign their users in with a short-lived HS256
 diff --git a/server/env.ts b/server/env.ts
-index caaf76a..95aadbf 100644
+index 737a690..dca7982 100644
 --- a/server/env.ts
 +++ b/server/env.ts
-@@ -126,6 +126,9 @@ const schema = {
+@@ -132,6 +132,9 @@ const schema = {
    ADMIN_EMAILS: list({ default: [] }),
    /* unset = the operator API (server/operator.ts) does not exist */
    DOOP_ADMIN_TOKEN: secret({ default: undefined }),

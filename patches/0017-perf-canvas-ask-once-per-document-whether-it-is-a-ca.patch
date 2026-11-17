@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 05:09:37 +0000
-Subject: [PATCH 17/52] perf(canvas): ask once per document whether it is a
+Subject: [PATCH 17/55] perf(canvas): ask once per document whether it is a
  canvas element
 
 isCanvasElement runs a regular expression over the frame's whole HTML (a
@@ -16,10 +16,10 @@ Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
  1 file changed, 13 insertions(+), 1 deletion(-)
 
 diff --git a/src/lib/drawing.ts b/src/lib/drawing.ts
-index 4e1cd16..11c4d30 100644
+index 8cf9931..2385458 100644
 --- a/src/lib/drawing.ts
 +++ b/src/lib/drawing.ts
-@@ -75,8 +75,20 @@ let pendingDrawing: Promise<void> = Promise.resolve()
+@@ -76,8 +76,20 @@ let pendingDrawing: Promise<void> = Promise.resolve()
  /** Standalone elements use the same persistence, layers and export as frames,
   *  with transparent chrome. The marker stays in HTML through undo and copying. */
  export function isCanvasElement(html: string): boolean {

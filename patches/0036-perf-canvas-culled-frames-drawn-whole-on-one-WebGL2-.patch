@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 08:11:44 +0000
-Subject: [PATCH 36/52] perf(canvas): culled frames drawn whole on one WebGL2
+Subject: [PATCH 36/55] perf(canvas): culled frames drawn whole on one WebGL2
  canvas, no DOM for them (experiment, doop:gpu)
 
 Every FrameShell is its own compositor layer, and Layerize and Commit run per
@@ -78,10 +78,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 tests/gpuPicturesBrowser.test.ts
 
 diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
-index d446223..a9f5b04 100644
+index 1576e9c..a050159 100644
 --- a/src/components/FrameView.tsx
 +++ b/src/components/FrameView.tsx
-@@ -17,6 +17,7 @@ import { sendWs } from '../lib/ws'
+@@ -18,6 +18,7 @@ import { sendWs } from '../lib/ws'
  import { throttle } from '../lib/throttle'
  import { getIdentity } from '../lib/identity'
  import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
@@ -89,7 +89,7 @@ index d446223..a9f5b04 100644
  import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
  import { trackShell } from '../lib/shellCull'
  import { keepsDocument, registerZoomPicture, zoomPicturesEnabled } from '../lib/zoomPictures'
-@@ -2390,9 +2391,8 @@ export const FrameSlot = memo(function FrameSlot({
+@@ -2596,9 +2597,8 @@ export const FrameSlot = memo(function FrameSlot({
  }) {
    const awake = useFrameAwake(frame.id)
    const engaged = useStore((s) => s.selectedIds.includes(frame.id) || !!s.streams[frame.id])
@@ -104,13 +104,13 @@ index d446223..a9f5b04 100644
 +  return gpu ? null : <FrameShell frame={frame} stack={stack} />
  })
 diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
-index 737d5b8..30164c6 100644
+index c4b5e4e..965c7d4 100644
 --- a/src/components/Stage.tsx
 +++ b/src/components/Stage.tsx
-@@ -49,6 +49,8 @@ import {
- import { TOOLS, isDrawingTool, resolvePointerAction, toolForKey, type Tool } from '../lib/tools'
+@@ -50,6 +50,8 @@ import { TOOLS, isDrawingTool, resolvePointerAction, toolForKey, type Tool } fro
  import { useCanvasDrawing } from './CanvasDrawing'
  import { FrameLabelLayer } from './FrameLabelLayer'
+ import { pixelGridLines } from './PixelGrid'
 +import { gpuFrameAt } from '../lib/gpuPictures'
 +import { StagePictures } from './StagePictures'
  import { chromeZoomStale, layoutZoomFor } from '../lib/layoutZoom'
@@ -125,7 +125,7 @@ index 737d5b8..30164c6 100644
  /* The world is laid out at CSS zoom k, the settled camera zoom, and its
     transform carries only what the camera has moved since. WebKit rasterizes a
     composited layer at its CSS size and stretches it under a scale transform,
-@@ -618,11 +622,12 @@ export function Stage({
+@@ -623,11 +627,12 @@ export function Stage({
    useEffect(() => {
      function onDown(e: PointerEvent) {
        const shell = e.target instanceof Element ? e.target.closest('[data-frame-shell]') : null
@@ -140,15 +140,15 @@ index 737d5b8..30164c6 100644
        e.stopImmediatePropagation()
        target.dispatchEvent(
          new PointerEvent('pointerdown', {
-@@ -1511,6 +1516,8 @@ export function Stage({
-               className="pointer-events-none absolute left-0 top-0 origin-top-left will-change-transform [background-image:radial-gradient(circle,var(--dot)_1.2px,transparent_1.2px)]"
-               ref={gridRef}
+@@ -1490,6 +1495,8 @@ export function Stage({
+               style={pixelGridLines(1)}
+               ref={pixelGridRef}
              />
 +            {/* culled frames drawn on the GPU, under the frame stack (doop:gpu) */}
 +            <StagePictures frames={canvas?.frames ?? NO_FRAMES} stage={ref} />
-             {/* the selected frame's size badge, in screen px (FrameLabelLayer) */}
-             <div className="pointer-events-none absolute inset-0" data-stage-labels="" ref={attachLabelLayer} />
              {/* `world` is likewise a behaviour hook: pan hit-testing checks
+             classList.contains('world') to tell background from frame */}
+             <div
 diff --git a/src/components/StagePictures.tsx b/src/components/StagePictures.tsx
 new file mode 100644
 index 0000000..70aa56b

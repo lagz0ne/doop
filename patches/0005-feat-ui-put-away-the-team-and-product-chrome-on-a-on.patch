@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Thu, 12 Nov 2026 04:40:02 +0000
-Subject: [PATCH 05/52] feat(ui): put away the team and product chrome on a
+Subject: [PATCH 05/55] feat(ui): put away the team and product chrome on a
  one-person instance
 
 This doop is used for the canvas (sign-up is closed; one person and their
@@ -28,30 +28,30 @@ and a reload bring the full UI back.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- src/components/AppRail.tsx   | 223 +++++++++++++++++++----------------
- src/components/DashShell.tsx |  51 ++++----
- src/components/SideRail.tsx  |  47 ++++----
- src/lib/fullUi.ts            |  21 ++++
+ src/components/AppRail.tsx   | 239 +++++++++++++++++++----------------
+ src/components/DashShell.tsx |  53 ++++----
+ src/components/SideRail.tsx  |  47 +++----
+ src/lib/fullUi.ts            |  21 +++
  src/pages/CanvasPage.tsx     |   5 +-
- src/pages/Home.tsx           |  45 ++++---
- src/pages/Settings.tsx       |  27 +++--
+ src/pages/Home.tsx           |  47 ++++---
+ src/pages/Settings.tsx       |  27 ++--
  tests/accountMenu.test.tsx   |  17 +++
- 8 files changed, 261 insertions(+), 175 deletions(-)
+ 8 files changed, 271 insertions(+), 185 deletions(-)
  create mode 100644 src/lib/fullUi.ts
 
 diff --git a/src/components/AppRail.tsx b/src/components/AppRail.tsx
-index 9719034..5b22667 100644
+index 568e223..b064d4a 100644
 --- a/src/components/AppRail.tsx
 +++ b/src/components/AppRail.tsx
-@@ -3,6 +3,7 @@ import type { CanvasMeta, WorkspaceSummary } from '../../shared/types'
- import { colorFor } from '../../shared/types'
+@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'r
+ import type { CanvasMeta, WorkspaceSummary } from '../../shared/types'
  import { api } from '../lib/api'
  import { authClient } from '../lib/auth'
 +import { FULL_UI } from '../lib/fullUi'
  import { navigate } from '../lib/navigate'
  import { useRailDrawer } from '../lib/railDrawer'
  import { timeAgo } from '../lib/time'
-@@ -293,12 +294,16 @@ export function AppRail({
+@@ -308,12 +309,16 @@ export function AppRail({
        <IconButton aria-label={t('rail.allCanvases')} on={active === 'all'} onClick={() => scope('all')}>
          <GridIcon size="rail" />
        </IconButton>
@@ -74,7 +74,7 @@ index 9719034..5b22667 100644
        <Rule />
        {spaces.map((w) => (
          <div key={w.id} className="contents">
-@@ -325,29 +330,37 @@ export function AppRail({
+@@ -340,29 +345,37 @@ export function AppRail({
        <IconButton aria-label={t('rail.newWorkspace')} onClick={createWorkspace}>
          <FolderPlusIcon size="rail" />
        </IconButton>
@@ -95,7 +95,7 @@ index 9719034..5b22667 100644
 -      <Rule />
 -      {agents.map((a) => (
 -        <span key={a.name} className="grid size-8 place-items-center" title={a.name}>
--          <AgentIcon name={a.name} size={14} color={colorFor(a.name)} />
+-          <AgentTile name={a.name} />
 -        </span>
 -      ))}
 -      <IconButton aria-label={t('rail.connectAgent')} onClick={connect}>
@@ -124,7 +124,7 @@ index 9719034..5b22667 100644
 +          <Rule />
 +          {agents.map((a) => (
 +            <span key={a.name} className="grid size-8 place-items-center" title={a.name}>
-+              <AgentIcon name={a.name} size={14} color={colorFor(a.name)} />
++              <AgentTile name={a.name} />
 +            </span>
 +          ))}
 +          <IconButton aria-label={t('rail.connectAgent')} onClick={connect}>
@@ -135,7 +135,7 @@ index 9719034..5b22667 100644
        {children ? (
          <>
            <Rule />
-@@ -398,22 +411,26 @@ export function AppRail({
+@@ -418,22 +431,26 @@ export function AppRail({
          >
            {t('rail.allCanvases')}
          </DashNavItem>
@@ -178,7 +178,7 @@ index 9719034..5b22667 100644
        </nav>
  
        <DashSectionLabel density="rail">{t('rail.workspaces')}</DashSectionLabel>
-@@ -467,37 +484,41 @@ export function AppRail({
+@@ -487,37 +504,41 @@ export function AppRail({
          </DashNavItem>
        </nav>
  
@@ -250,7 +250,7 @@ index 9719034..5b22667 100644
  
        {/* a page's own group keeps the drawer's contract: a pick puts it away */}
        <div
-@@ -509,30 +530,34 @@ export function AppRail({
+@@ -529,38 +550,42 @@ export function AppRail({
          {children}
        </div>
  
@@ -262,7 +262,7 @@ index 9719034..5b22667 100644
 -            as="div"
 -            density="rail"
 -            title={t('rail.agentCanvases', { count: a.canvases })}
--            icon={<AgentIcon name={a.name} size={14} color={colorFor(a.name)} />}
+-            icon={<AgentTile name={a.name} />}
 -            trailing={
 -              a.lastAt > 0 && now - a.lastAt < LIVE_WINDOW ? (
 -                <Dot size="sm" className="bg-success" title={t('rail.workingNow')} />
@@ -274,7 +274,15 @@ index 9719034..5b22667 100644
 -            {a.name}
 -          </DashNavItem>
 -        ))}
--        <DashNavItem density="rail" icon={<CirclePlusIcon size="rail" />} onClick={connect}>
+-        <DashNavItem
+-          density="rail"
+-          icon={
+-            <span className="grid size-[18px] flex-none place-items-center">
+-              <CirclePlusIcon size="rail" />
+-            </span>
+-          }
+-          onClick={connect}
+-        >
 -          {t('rail.connectAgent')}
 -        </DashNavItem>
 -      </div>
@@ -288,7 +296,7 @@ index 9719034..5b22667 100644
 +                as="div"
 +                density="rail"
 +                title={t('rail.agentCanvases', { count: a.canvases })}
-+                icon={<AgentIcon name={a.name} size={14} color={colorFor(a.name)} />}
++                icon={<AgentTile name={a.name} />}
 +                trailing={
 +                  a.lastAt > 0 && now - a.lastAt < LIVE_WINDOW ? (
 +                    <Dot size="sm" className="bg-success" title={t('rail.workingNow')} />
@@ -300,17 +308,25 @@ index 9719034..5b22667 100644
 +                {a.name}
 +              </DashNavItem>
 +            ))}
-+            <DashNavItem density="rail" icon={<CirclePlusIcon size="rail" />} onClick={connect}>
++            <DashNavItem
++              density="rail"
++              icon={
++                <span className="grid size-[18px] flex-none place-items-center">
++                  <CirclePlusIcon size="rail" />
++                </span>
++              }
++              onClick={connect}
++            >
 +              {t('rail.connectAgent')}
 +            </DashNavItem>
 +          </div>
 +        </>
 +      )}
  
-       <div className="mt-auto flex items-center gap-2.5 px-1 pt-4">
-         <AccountMenu face side="top" align="start" />
+       {/* the desktop app, on a computer's browser only; the phone drawer
+           leaves it to the App Store sheet */}
 diff --git a/src/components/DashShell.tsx b/src/components/DashShell.tsx
-index 982efe4..3295910 100644
+index 4f77eab..7d9ad00 100644
 --- a/src/components/DashShell.tsx
 +++ b/src/components/DashShell.tsx
 @@ -1,5 +1,6 @@
@@ -319,39 +335,41 @@ index 982efe4..3295910 100644
 +import { FULL_UI } from '../lib/fullUi'
  import { navigate } from '../App'
  import { posthog } from '../lib/posthog'
- import { useMe } from '../lib/me'
-@@ -96,17 +97,19 @@ export function AccountMenu({
+ import { offersUpgrade, useMe } from '../lib/me'
+@@ -98,18 +99,20 @@ export function AccountMenu({
          </DropdownMenuLabel>
          {/* the plan is a workspace thing; this line says which side of it the
-             account is on — a member of a live paid workspace is on Team */}
+             account is on — a member of a live paid workspace is on Pro */}
 -        <div className="mx-2.5 mb-2 flex items-center gap-[7px] text-caption text-ink-soft">
 -          {me?.plan === 'team' ? (
 -            <>
--              <Badge tone="accent">team</Badge> {t('shell.teamPlan')}
+-              <Badge tone="accent">pro</Badge> {t('plans.proPlan')}
 -            </>
 -          ) : (
 -            <>
--              <Badge>free</Badge> {t('shell.personalPlan')}
+-              <Badge>free</Badge> {t('plans.freePlan')}
 -            </>
 -          )}
 -        </div>
+-        {offersUpgrade(me) && (
 +        {FULL_UI && (
 +          <div className="mx-2.5 mb-2 flex items-center gap-[7px] text-caption text-ink-soft">
 +            {me?.plan === 'team' ? (
 +              <>
-+                <Badge tone="accent">team</Badge> {t('shell.teamPlan')}
++                <Badge tone="accent">pro</Badge> {t('plans.proPlan')}
 +              </>
 +            ) : (
 +              <>
-+                <Badge>free</Badge> {t('shell.personalPlan')}
++                <Badge>free</Badge> {t('plans.freePlan')}
 +              </>
 +            )}
 +          </div>
 +        )}
-         <DropdownMenuSeparator />
-         <DropdownMenuItem onSelect={() => navigate('/settings')}>
-           <GearIcon size="rail" /> {t('shell.settings')}
-@@ -123,18 +126,22 @@ export function AccountMenu({
++        {FULL_UI && offersUpgrade(me) && (
+           <DropdownMenuItem onSelect={() => openUpgrade({ source: 'account-menu' })}>
+             <RocketIcon size="rail" /> {t('plans.upgradeToPro')}
+           </DropdownMenuItem>
+@@ -137,18 +140,22 @@ export function AccountMenu({
          </DropdownMenuItem>
          {/* new tabs, which the desktop shell hands to the system browser
              (initDesktopShell); the desktop app has nothing to download */}
@@ -477,18 +495,18 @@ index 0000000..fbe9db5
 +
 +export const FULL_UI = readFullUi()
 diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
-index 4c4e7af..c03c4ea 100644
+index c758a7e..6049614 100644
 --- a/src/pages/CanvasPage.tsx
 +++ b/src/pages/CanvasPage.tsx
-@@ -85,6 +85,7 @@ import type { TextFormatCommand } from '../lib/richText'
+@@ -84,6 +84,7 @@ import { libraryResumeWaits } from '../lib/libraryResume'
  import { copyPicked, hasElementClip, pasteLayer } from '../lib/elementClipboard'
  import { isCanvasClipboard, writeCanvasClipboard } from '../lib/canvasClipboard'
  import { authClient } from '../lib/auth'
 +import { FULL_UI } from '../lib/fullUi'
  import { avatarUrl } from '../../shared/avatar'
- import { posthog } from '../lib/posthog'
+ import { openSupportChat, posthog } from '../lib/posthog'
  import { useIsMobile } from '../hooks/use-mobile'
-@@ -917,7 +918,7 @@ export function CanvasPage({
+@@ -930,7 +931,7 @@ export function CanvasPage({
              </BarPill>
            )}
            <BarPill>
@@ -497,7 +515,7 @@ index 4c4e7af..c03c4ea 100644
                <Button variant="bare" className={barPillBtn} onClick={() => setShowShare(true)}>
                  <ShareUpIcon className="size-3.5" />
                  {t('canvas.share')}
-@@ -1187,7 +1188,7 @@ export function CanvasPage({
+@@ -1201,7 +1202,7 @@ export function CanvasPage({
                      <ImportIcon /> {t('canvas.importWebsite')}
                    </Button>
                  )}
@@ -507,7 +525,7 @@ index 4c4e7af..c03c4ea 100644
                      variant="ghost"
                      className="h-11 justify-start gap-2.5 border-line bg-surface px-4"
 diff --git a/src/pages/Home.tsx b/src/pages/Home.tsx
-index 32857f0..257813a 100644
+index 6cd3e06..6d76348 100644
 --- a/src/pages/Home.tsx
 +++ b/src/pages/Home.tsx
 @@ -3,6 +3,7 @@ import type { Canvas, CanvasMeta, WorkspaceSummary } from '../../shared/types'
@@ -518,7 +536,7 @@ index 32857f0..257813a 100644
  import { useUserEvents } from '../hooks/use-user-events'
  import { navigate } from '../App'
  import { timeAgo } from '../lib/time'
-@@ -348,18 +349,20 @@ export function Home() {
+@@ -348,19 +349,21 @@ export function Home() {
          </DashHeader>
  
          <DashContent className="px-0 pt-0 md:px-0 md:pt-0">
@@ -532,6 +550,7 @@ index 32857f0..257813a 100644
 -              onConnectAgents: () => setShowConnect(true),
 -              onAutomations: () => navigate('/automations'),
 -              onIntegrations: () => navigate('/integrations'),
+-              onCommunity: () => navigate('/community'),
 -            }}
 -          />
 +          {FULL_UI && (
@@ -545,13 +564,14 @@ index 32857f0..257813a 100644
 +                onConnectAgents: () => setShowConnect(true),
 +                onAutomations: () => navigate('/automations'),
 +                onIntegrations: () => navigate('/integrations'),
++                onCommunity: () => navigate('/community'),
 +              }}
 +            />
 +          )}
  
            <div className="px-4 pt-8 md:px-8 md:pt-10">
              {currentWorkspace && !currentWorkspace.active && (
-@@ -454,7 +457,7 @@ export function Home() {
+@@ -455,7 +458,7 @@ export function Home() {
                              workspace={scopedWorkspace ? undefined : workspaceName(c.workspaceId)}
                            />
                          </div>
@@ -560,7 +580,7 @@ index 32857f0..257813a 100644
                        </TileBody>
                      </Pressable>
                      <CanvasActions
-@@ -496,9 +499,11 @@ export function Home() {
+@@ -497,9 +500,11 @@ export function Home() {
                        <span className="hidden w-[82px] flex-none text-caption text-ink-faint sm:block">
                          {t('home.frames', { count: c.frameCount })}
                        </span>
@@ -574,8 +594,8 @@ index 32857f0..257813a 100644
 +                      )}
                        <span className="hidden w-[62px] flex-none gap-[3px] xs:flex">
                          {(c.agents ?? []).slice(0, 3).map((a) => (
-                           <AgentIcon key={a.name} name={a.name} size={11} color={colorFor(a.name)} />
-@@ -726,9 +731,11 @@ function CanvasActions({
+                           <AgentTile key={a.name} name={a.name} size={14} />
+@@ -723,9 +728,11 @@ function CanvasActions({
          </IconButton>
        </DropdownMenuTrigger>
        <DropdownMenuContent width="md">
@@ -591,7 +611,7 @@ index 32857f0..257813a 100644
            <CopyIcon className="size-4" /> {duplicating ? t('home.duplicating') : t('home.duplicate')}
          </DropdownMenuItem>
 diff --git a/src/pages/Settings.tsx b/src/pages/Settings.tsx
-index 58d83f0..d66a5b8 100644
+index fc33ddc..6a44142 100644
 --- a/src/pages/Settings.tsx
 +++ b/src/pages/Settings.tsx
 @@ -1,5 +1,6 @@
@@ -601,7 +621,7 @@ index 58d83f0..d66a5b8 100644
  import { useT, type PlainMessageKey } from '../lib/i18n'
  import { ModelAccountPanel } from '../components/ModelAccount'
  import { ImageModelCard } from '../components/ImageModelCard'
-@@ -140,14 +141,16 @@ export function Settings() {
+@@ -161,14 +162,16 @@ export function Settings() {
            >
              {t('settings.keysTitle')}
            </DashNavItem>
@@ -625,8 +645,8 @@ index 58d83f0..d66a5b8 100644
 +          )}
            <DashNavItem
              density="rail"
-             icon={<UserIcon size="rail" />}
-@@ -204,9 +207,11 @@ export function Settings() {
+             icon={<TextIcon size="rail" />}
+@@ -217,9 +220,11 @@ export function Settings() {
                <TabsTrigger value="keys">
                  <KeyIcon size="rail" /> {t('settings.keysTitle')}
                </TabsTrigger>
@@ -642,7 +662,7 @@ index 58d83f0..d66a5b8 100644
                  <UserIcon size="rail" /> {t('settings.accountTab')}
                </TabsTrigger>
 diff --git a/tests/accountMenu.test.tsx b/tests/accountMenu.test.tsx
-index cf626d8..b44ba85 100644
+index 7a9b522..b216e7e 100644
 --- a/tests/accountMenu.test.tsx
 +++ b/tests/accountMenu.test.tsx
 @@ -3,11 +3,18 @@ import { act } from 'react'
@@ -654,7 +674,7 @@ index cf626d8..b44ba85 100644
  vi.mock('../src/lib/auth', () => ({
    authClient: { useSession: () => ({ data: { user: { id: 'alice', name: 'Alice Doe' } } }), signOut: vi.fn() },
  }))
- vi.mock('../src/lib/me', () => ({ useMe: () => null }))
+ vi.mock('../src/lib/me', () => ({ useMe: () => null, offersUpgrade: () => false }))
  vi.mock('../src/lib/shell', () => ({ isDesktopShell: () => shell.desktop }))
 +vi.mock('../src/lib/fullUi', () => ({
 +  get FULL_UI() {

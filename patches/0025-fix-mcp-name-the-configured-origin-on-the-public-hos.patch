@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 07:37:54 +0000
-Subject: [PATCH 25/52] fix(mcp): name the configured origin on the public
+Subject: [PATCH 25/55] fix(mcp): name the configured origin on the public
  host, not the proxy's scheme
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -33,18 +33,18 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 server/requestOrigin.ts
 
 diff --git a/server/index.ts b/server/index.ts
-index c0e9c3c..95945cb 100644
+index 4f66a2e..8f399d4 100644
 --- a/server/index.ts
 +++ b/server/index.ts
-@@ -46,6 +46,7 @@ import { auth, initAuth, syncAdmins, getUserName, loginProvidersConfig } from '.
+@@ -93,6 +93,7 @@ import { getInstanceSettings, hydrateInstanceSettings, loginPolicy } from './ins
  import { adminRouter } from './admin.ts'
  import { operatorRouter } from './operator.ts'
- import { frameHtmlByAgentKey, sendFrameHtml } from './frameHtml.ts'
+ import { frameHtmlByAgentKey, sendFrameHtml } from './frameHtmlRoute.ts'
 +import { requestOrigin } from './requestOrigin.ts'
  import {
    canvasForReviewer,
    embedGrantOf,
-@@ -2591,7 +2592,7 @@ app.all('/mcp', handleMcpRequest)
+@@ -3328,7 +3329,7 @@ app.all('/mcp', handleMcpRequest)
     handlers into Express) */
  function bridge(handler: (req: globalThis.Request) => Promise<globalThis.Response>) {
    return async (req: express.Request, res: express.Response) => {
@@ -53,7 +53,7 @@ index c0e9c3c..95945cb 100644
      res.status(out.status)
      out.headers.forEach((v, k) => res.setHeader(k, v))
      res.send(await out.text())
-@@ -2608,11 +2609,13 @@ app.get('/.well-known/openid-configuration', (req, res) => bridge(oAuthDiscovery
+@@ -3345,11 +3346,13 @@ app.get('/.well-known/openid-configuration', (req, res) => bridge(oAuthDiscovery
     that differs from the URL they called, so it is `<origin>/mcp`, never the bare
     origin), while the authorization server stays on the canonical origin. In dev
     the app may be reached via :4300, :4301 (vite port bump) or :4400 — all must
@@ -70,16 +70,18 @@ index c0e9c3c..95945cb 100644
      jwks_uri: `${env.BETTER_AUTH_URL}/api/auth/mcp/jwks`,
      scopes_supported: ['openid', 'profile', 'email', 'offline_access'],
 diff --git a/server/mcp.ts b/server/mcp.ts
-index e0f49ca..0b28080 100644
+index e3ccc46..e40b2f0 100644
 --- a/server/mcp.ts
 +++ b/server/mcp.ts
-@@ -1,4 +1,5 @@
- import { env } from './env.ts'
+@@ -2,6 +2,7 @@ import { env } from './env.ts'
+ import { resolveAgentBrand } from '../shared/agentBrand.ts'
+ import { MAX_DECISION_CHARS } from '../shared/designDecisions.ts'
+ import packageJson from '../package.json' with { type: 'json' }
 +import { requestOrigin } from './requestOrigin.ts'
  import { createHash } from 'node:crypto'
  import { eq } from 'drizzle-orm'
  import { db } from './db/index.ts'
-@@ -2411,7 +2412,7 @@ export async function handleMcpRequest(req: Request, res: Response) {
+@@ -2787,7 +2788,7 @@ export async function handleMcpRequest(req: Request, res: Response) {
       those two (and ping) answer anonymously; tools stay behind the gate. */
    const anonymous = !session && isAnonymousDiscovery(req.body)
    if (!session && !anonymous) {

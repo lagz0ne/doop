@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 06:23:06 +0000
-Subject: [PATCH 04/52] perf(canvas): culled frames are shells, a pan is one
+Subject: [PATCH 04/55] perf(canvas): culled frames are shells, a pan is one
  transform, documents boot in turn
 
 Profiled with Chrome traces on a 188-frame page of real screens
@@ -32,18 +32,18 @@ v0.12.0 -> this: pan at fit 2260 -> 245 ms (37 slow frames -> 0), zoom
 Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
 ---
  src/components/FrameContextMenu.tsx |   8 ++
- src/components/FrameView.tsx        | 167 +++++++++++++++++++---
- src/components/Stage.tsx            | 206 +++++++++++++++++++++-------
+ src/components/FrameView.tsx        | 168 ++++++++++++++++++++--
+ src/components/Stage.tsx            | 209 +++++++++++++++++++++-------
  src/lib/liveFrames.ts               |  48 ++++++-
  tests/liveFrames.test.ts            |  43 +++++-
- tests/liveFramesBrowser.test.ts     |  58 +++++++-
- 6 files changed, 461 insertions(+), 69 deletions(-)
+ tests/liveFramesBrowser.test.ts     |  57 ++++++++
+ 6 files changed, 465 insertions(+), 68 deletions(-)
 
 diff --git a/src/components/FrameContextMenu.tsx b/src/components/FrameContextMenu.tsx
-index 08300b3..331656e 100644
+index 8ad660e..38ac791 100644
 --- a/src/components/FrameContextMenu.tsx
 +++ b/src/components/FrameContextMenu.tsx
-@@ -43,6 +43,11 @@ export function FrameContextMenu({
+@@ -44,6 +44,11 @@ export function FrameContextMenu({
    const [exportFrames, setExportFrames] = useState<Frame[] | null>(null)
    const [historyOpen, setHistoryOpen] = useState(false)
    const [savingApproval, setSavingApproval] = useState(false)
@@ -55,7 +55,7 @@ index 08300b3..331656e 100644
    /* a right-click inside a multi-selection acts on the whole group */
    const selectedIds = useStore((s) => s.selectedIds)
    /* a view or comment link keeps the items that only read the frame */
-@@ -53,6 +58,7 @@ export function FrameContextMenu({
+@@ -54,6 +59,7 @@ export function FrameContextMenu({
    const streaming = useStore((s) => groupIds.some((id) => !!s.streams[id]))
    /* Hide/Show reads as one item: the group shows when every frame in it is hidden */
    const allHidden = useStore((s) => {
@@ -63,7 +63,7 @@ index 08300b3..331656e 100644
      const ids = s.selectedIds.includes(frame.id) ? s.selectedIds : [frame.id]
      return (s.canvas?.frames ?? []).filter((f) => ids.includes(f.id)).every((f) => !!f.hidden)
    })
-@@ -64,6 +70,7 @@ export function FrameContextMenu({
+@@ -65,6 +71,7 @@ export function FrameContextMenu({
    /* Lock reads as one state for the group: it unlocks only once every frame
       in it is locked, otherwise it locks the rest (as ⌘⇧L does) */
    const allLocked = useStore((s) => {
@@ -71,7 +71,7 @@ index 08300b3..331656e 100644
      const ids = s.selectedIds.includes(frame.id) ? s.selectedIds : [frame.id]
      const group = s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame]
      return group.every((f) => f.locked)
-@@ -73,6 +80,7 @@ export function FrameContextMenu({
+@@ -74,6 +81,7 @@ export function FrameContextMenu({
      deleteFramesTracked(groupFrames().filter((f) => !f.locked))
    }
    const allReady = useStore((s) => {
@@ -80,10 +80,10 @@ index 08300b3..331656e 100644
      const group = s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame]
      return group.every((f) => f.approval?.status === 'ready_for_dev')
 diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
-index 0300bc9..435f3d8 100644
+index 888e876..ed8776f 100644
 --- a/src/components/FrameView.tsx
 +++ b/src/components/FrameView.tsx
-@@ -16,7 +16,7 @@ import { copyElementLink } from '../lib/elementLink'
+@@ -17,7 +17,7 @@ import { copyElementLink } from '../lib/elementLink'
  import { sendWs } from '../lib/ws'
  import { throttle } from '../lib/throttle'
  import { getIdentity } from '../lib/identity'
@@ -92,7 +92,7 @@ index 0300bc9..435f3d8 100644
  import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
  import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
  import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
-@@ -360,10 +360,15 @@ export const FrameView = memo(function FrameView({
+@@ -389,10 +389,15 @@ export const FrameView = memo(function FrameView({
      // A new surface press supersedes the previous click, including an iframe
      // reply that is already in flight when the next layer starts moving.
      if (mode === 'move' && probeOnClick && !skipElement) cancelProbe()
@@ -108,30 +108,31 @@ index 0300bc9..435f3d8 100644
        elementMove.start(
          e,
          (press, move, released) => {
-@@ -1753,21 +1758,7 @@ export const FrameView = memo(function FrameView({
+@@ -1955,20 +1960,9 @@ export const FrameView = memo(function FrameView({
                  }}
                />
-             ) : (
--              <div
--                className={cn('block overflow-hidden', isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white')}
--                style={{ width: frame.width, height: frame.height }}
--                data-doop-frame-preview=""
--              >
--                {frame.html && !isCanvasElement(frame.html) && (
--                  <img
--                    src={previewSrc(frame.id, frame.updatedAt)}
--                    alt=""
--                    draggable={false}
--                    decoding="async"
--                    className="pointer-events-none block w-full select-none"
--                  />
--                )}
--              </div>
-+              <FramePreview frame={frame} />
-             )}
-             {!frame.html && (
-               <div className="absolute inset-0 grid place-items-center bg-[repeating-linear-gradient(45deg,transparent_0_10px,rgba(28,26,21,0.025)_10px_20px)] text-[13px] text-ink-faint">
-@@ -2157,3 +2148,147 @@ export const FrameView = memo(function FrameView({
+               ) : (
+-                <div
+-                  className={cn('block overflow-hidden', isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white')}
+-                  style={{ width: frame.width, height: frame.height, marginLeft: bleed, marginTop: bleed }}
+-                  data-doop-frame-preview=""
+-                >
+-                  {frame.html && !isCanvasElement(frame.html) && (
+-                    <img
+-                      src={previewSrc(frame.id, frame.updatedAt)}
+-                      alt=""
+-                      draggable={false}
+-                      decoding="async"
+-                      className="pointer-events-none block w-full select-none"
+-                    />
+-                  )}
++                /* back at the frame's box: the wrapper sits out by the bleed */
++                <div style={bleed ? { marginLeft: bleed, marginTop: bleed } : undefined}>
++                  <FramePreview frame={frame} />
+                 </div>
+               )}
+             </div>
+@@ -2361,3 +2355,147 @@ export const FrameView = memo(function FrameView({
      </ContextMenu>
    )
  })
@@ -280,7 +281,7 @@ index 0300bc9..435f3d8 100644
 +  )
 +})
 diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
-index 2a93edc..b81d485 100644
+index 0fb0308..3b2ca30 100644
 --- a/src/components/Stage.tsx
 +++ b/src/components/Stage.tsx
 @@ -7,7 +7,8 @@ import type { Frame } from '../../shared/types'
@@ -293,8 +294,8 @@ index 2a93edc..b81d485 100644
  import { CanvasComments, type CanvasComposeAt } from './CanvasComments'
  import { placeComposer } from '../lib/composerPlacement'
  import { isCanvasComment, type CanvasComment } from '../../shared/comments'
-@@ -54,7 +55,7 @@ import { spaceWouldScroll } from '../lib/spaceScroll'
- import { viewOptionForKey } from '../lib/viewOptions'
+@@ -54,7 +55,7 @@ import { NO_INSETS, fitBox, type StageInsets } from '../lib/viewFit'
+ import { spaceWouldScroll } from '../lib/spaceScroll'
  import { ZOOM_DRAG_MIN, ZOOM_TOOL_STEP, zoomAtPoint, zoomToBox } from '../lib/zoomTool'
  import { isCanvasElement } from '../lib/drawing'
 -import { computeLiveFrames, cullingEnabled, useLiveFrames, type FrameBox } from '../lib/liveFrames'
@@ -368,7 +369,7 @@ index 2a93edc..b81d485 100644
    const zoomLabelRef = useRef<HTMLSpanElement>(null)
    const setViewport = useStore((s) => s.setViewport)
    const canvas = usePageCanvas()
-@@ -304,28 +329,48 @@ export function Stage({
+@@ -304,30 +329,51 @@ export function Stage({
        const stage = ref.current
        if (!world || !grid || !stage) return
        world.style.transform = worldTransform(vp, layoutZoomRef.current)
@@ -408,15 +409,19 @@ index 2a93edc..b81d485 100644
          const opacity = useStore.getState().viewOptions.pixelGrid ? pixelGridOpacity(vp.zoom) : 0
 -        pixels.hidden = opacity === 0
 -        pixels.style.opacity = String(opacity)
++        /* hidden below the zoom where pixels show: then a pan writes nothing
++           here, and the frame stays a compositor-only transform */
++        if (pixels.hidden !== (opacity === 0)) pixels.hidden = opacity === 0
+         /* the frames' own grids read the same fade */
+-        stage.style.setProperty('--pixel-grid', String(opacity))
 -        pixels.style.backgroundSize = `${vp.zoom}px ${vp.zoom}px`
 -        const px = (((vp.x % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
 -        const py = (((vp.y % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
 -        pixels.style.transform = `translate(${px}px, ${py}px)`
-+        /* hidden below the zoom where pixels show: then a pan writes nothing
-+           here, and the frame stays a compositor-only transform */
-+        if (pixels.hidden !== (opacity === 0)) pixels.hidden = opacity === 0
++        const fade = String(opacity)
++        if (stage.style.getPropertyValue('--pixel-grid') !== fade) stage.style.setProperty('--pixel-grid', fade)
 +        if (opacity !== 0) {
-+          pixels.style.opacity = String(opacity)
++          pixels.style.opacity = fade
 +          pixels.style.backgroundSize = `${vp.zoom}px ${vp.zoom}px`
 +          const px = (((vp.x % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
 +          const py = (((vp.y % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
@@ -431,7 +436,7 @@ index 2a93edc..b81d485 100644
      }
      apply(useStore.getState().viewport)
      let settle = 0
-@@ -349,46 +394,115 @@ export function Stage({
+@@ -351,46 +397,115 @@ export function Stage({
    }, [])
  
    /* Viewport culling (liveFrames.ts): which frames keep a live document.
@@ -562,16 +567,16 @@ index 2a93edc..b81d485 100644
    /* a new layout zoom lands in the same commit as the frames' counter-zoom
       (FrameView), so no paint sees one without the other */
    useLayoutEffect(() => {
-@@ -1228,7 +1342,7 @@ export function Stage({
-               ref={gridRef}
-             />
-             {/* the selected frame's size badge, in screen px (FrameLabelLayer) */}
+@@ -1229,7 +1344,7 @@ export function Stage({
+             </div>
+             {/* the selected frame's size badge, in screen px (FrameLabelLayer); after
+                 the world so no frame, however it stacks, covers it */}
 -            <div className="pointer-events-none absolute inset-0" ref={setLabelLayer} />
 +            <div className="pointer-events-none absolute inset-0" ref={attachLabelLayer} />
-             {/* `world` is likewise a behaviour hook: pan hit-testing checks
-             classList.contains('world') to tell background from frame */}
-             <div
-@@ -1453,7 +1567,7 @@ function FrameStack({ frames, layoutZoom }: { frames: Frame[]; layoutZoom: numbe
+             {showRulers && <Rulers stage={ref} />}
+           </div>
+         </ContextMenuTrigger>
+@@ -1423,7 +1538,7 @@ function FrameStack({ frames, layoutZoom }: { frames: Frame[]; layoutZoom: numbe
          f.hidden ? (
            <HiddenFrameView key={f.id} frame={f} stack={rank.get(f.id)} />
          ) : (
@@ -739,18 +744,10 @@ index 6d62896..94c33a2 100644
 +  })
 +})
 diff --git a/tests/liveFramesBrowser.test.ts b/tests/liveFramesBrowser.test.ts
-index deddfe0..a25a255 100644
+index ef2cbb4..e8f7a8c 100644
 --- a/tests/liveFramesBrowser.test.ts
 +++ b/tests/liveFramesBrowser.test.ts
-@@ -14,7 +14,6 @@ import type { Canvas, Frame } from '../shared/types'
- declare global {
-   interface Window {
-     seedPages: (canvas: Canvas) => void
--    pageState: () => { viewport: { x: number; y: number; zoom: number }; selectedId: string }
-   }
- }
- 
-@@ -116,6 +115,63 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
+@@ -124,6 +124,63 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
      expect(await page.evaluate(() => !!document.querySelector('iframe[title="Frame 0"]'))).toBe(false)
    }, 30_000)
  

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 03:41:17 +0000
-Subject: [PATCH 21/52] feat(ui): phones get the reviewer layout, review first
+Subject: [PATCH 21/55] feat(ui): phones get the reviewer layout, review first
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -327,7 +327,7 @@ index 7c044b5..6c64f98 100644
            </DropdownMenuTrigger>
          </Tooltip>
 diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
-index 2c7cad2..844d710 100644
+index aef44ac..a0fd951 100644
 --- a/src/pages/CanvasPage.tsx
 +++ b/src/pages/CanvasPage.tsx
 @@ -1,6 +1,6 @@
@@ -335,10 +335,10 @@ index 2c7cad2..844d710 100644
  import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 -import { canEditOpenCanvas, pickedSelectors, roleOf, useStore } from '../lib/store'
 +import { canEditOpenCanvas, pickedSelectors, roleOf, useStore, type PanelTab } from '../lib/store'
- import {
-   MOD_KEY,
-   PRESENT_SHORTCUT_HINT,
-@@ -739,12 +739,14 @@ export function CanvasPage({
+ import { followPageInUrl } from '../lib/pageUrl'
+ import { MOD_KEY, PRESENT_SHORTCUT_HINT, isControlTarget, isTypingTarget } from '../lib/keys'
+ import { enterSelection, exitSelection, selectSibling } from '../lib/selectionKeys'
+@@ -752,12 +752,14 @@ export function CanvasPage({
    /* docked panels: the stage sits between the columns, under a solid bar */
    const docked = usePanelLayout() === 'docked' && !isMobile
    const panelSurface = docked ? 'docked' : 'floating'
@@ -359,7 +359,7 @@ index 2c7cad2..844d710 100644
    const [zoomSlot, setZoomSlot] = useState<HTMLElement | null>(null)
    useEffect(() => {
      if (reviewerLayout) useStore.getState().setTool('hand')
-@@ -812,18 +814,21 @@ export function CanvasPage({
+@@ -825,18 +827,21 @@ export function CanvasPage({
      /* what floats over the canvas (the zoom pill, toasts) keeps clear of a
         docked column's edge */
      '--chrome-left': `${chrome.left + (docked ? FLOAT_GAP : 0)}px`,
@@ -386,7 +386,7 @@ index 2c7cad2..844d710 100644
    /* docked, the stage is the gap between the bar and the columns; ⌘. gives
       it the whole window back */
    const stageBounds: StageInsets | undefined =
-@@ -881,6 +886,13 @@ export function CanvasPage({
+@@ -894,6 +899,13 @@ export function CanvasPage({
        </span>
      </Tooltip>
    )
@@ -400,7 +400,7 @@ index 2c7cad2..844d710 100644
    /* the right-hand panels end above the dock rather than under it */
    const belowDock: CSSProperties = reviewerLayout ? { bottom: DOCK_CLEAR } : {}
    /* the properties slot (frame Inspector, element panel or Page panel): the
-@@ -1055,7 +1067,8 @@ export function CanvasPage({
+@@ -1069,7 +1081,8 @@ export function CanvasPage({
            bounds={stageBounds}
            docked={docked}
            toolsElsewhere={reviewerLayout}
@@ -410,7 +410,7 @@ index 2c7cad2..844d710 100644
          />
          <div
            className={cn(
-@@ -1136,7 +1149,7 @@ export function CanvasPage({
+@@ -1151,7 +1164,7 @@ export function CanvasPage({
              ) : (
                <LayersRailToggle docked={docked} />
              ))}
@@ -419,7 +419,7 @@ index 2c7cad2..844d710 100644
              <MobilePanelTabs
                onOpen={(tab) => {
                  useStore.getState().setPanelTab(tab)
-@@ -1199,43 +1212,52 @@ export function CanvasPage({
+@@ -1213,43 +1226,52 @@ export function CanvasPage({
            )}
            {reviewerLayout && (
              <>
@@ -507,7 +507,7 @@ index 2c7cad2..844d710 100644
              </>
            )}
          </div>
-@@ -1249,24 +1271,32 @@ export function CanvasPage({
+@@ -1263,24 +1285,32 @@ export function CanvasPage({
                className="gap-0 rounded-t-2xl border-line bg-surface p-0 pb-[env(safe-area-inset-bottom)] shadow-pop"
              >
                <div className="border-b border-line-soft px-5 py-4 pr-14">
@@ -552,7 +552,7 @@ index 2c7cad2..844d710 100644
                  {!readOnly && (
                    <Button
                      variant="ghost"
-@@ -1291,20 +1321,61 @@ export function CanvasPage({
+@@ -1305,20 +1335,61 @@ export function CanvasPage({
                      <ShareIcon /> {t('canvas.shareCanvas')}
                    </Button>
                  )}
@@ -626,7 +626,7 @@ index 2c7cad2..844d710 100644
                    <Button
                      variant="ghost"
                      className="h-11 justify-start gap-2.5 px-4 text-ink-soft"
-@@ -1327,7 +1398,12 @@ export function CanvasPage({
+@@ -1341,7 +1412,12 @@ export function CanvasPage({
                className="max-h-[calc(100svh-56px)] gap-0 rounded-t-2xl border-line bg-surface p-0 shadow-pop data-[side=bottom]:h-[min(78svh,680px)]"
              >
                <SheetTitle className="sr-only">{t('canvas.layers')}</SheetTitle>

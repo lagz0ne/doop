@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 02:07:03 +0000
-Subject: [PATCH 10/52] feat(review): a review role, a changes-requested
+Subject: [PATCH 10/55] feat(review): a review role, a changes-requested
  verdict and its event
 
 Human reviewers should look, comment and give a verdict, approve or send a
@@ -35,8 +35,8 @@ verdict needed edit rights, and there was no way to say "not yet".
 - Each verdict emits a frame.approval canvas event: a webhook event of the
   same name ({ status, actor, frame }), listed in Settings (en, pt-BR).
 - Agents: MCP get_canvas filters approval_status=changes_requested, and the
-  MCP instructions, the guide and the resident agent's prompt say what it
-  means (read the comments, revise; the edit asks for another review).
+  guide and the resident agent's prompt say what it means (read the
+  comments, revise; the edit asks for another review).
 - Editor: the frame menu's verdict items (Mark ready for dev, and the new
   Request changes) need review, lock/delete still need edit; the Inspector
   has Request changes beside the approval switch; the badge reads "Changes
@@ -55,12 +55,12 @@ webhookRoutes, mcp-tools, i18n, shareLinkRoles, guestCanvas, access pass.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .context/TECHSTACK.md               |  18 ++++
- server/actions.ts                   |  92 ++++++++++++++---
+ server/actions.ts                   | 100 ++++++++++++++----
  server/db/persist.ts                |  17 +++-
  server/events.ts                    |   2 +
  server/guide.ts                     |   8 +-
  server/index.ts                     |  10 +-
- server/mcp.ts                       |   7 +-
+ server/mcp.ts                       |   4 +-
  server/resident.ts                  |   2 +-
  server/store.ts                     |   5 +-
  server/webhooks.ts                  |   6 ++
@@ -80,18 +80,22 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  tests/approvalAutomations.test.ts   |   6 +-
  tests/approvalHistory.test.ts       |  30 ++++++
  tests/canvasRole.test.ts            |   7 +-
+ tests/componentUsage.test.ts        |   4 +-
+ tests/components.test.ts            |   2 +-
+ tests/componentsCatchUp.test.ts     |   2 +-
  tests/frameApproval.test.ts         |  12 +++
  tests/frameApprovalControl.test.tsx |  73 +++++++++++++
+ tests/propagation.test.ts           |   2 +-
  tests/reviewVerdicts.test.ts        | 153 ++++++++++++++++++++++++++++
- 29 files changed, 541 insertions(+), 48 deletions(-)
+ 33 files changed, 547 insertions(+), 57 deletions(-)
  create mode 100644 tests/approvalHistory.test.ts
  create mode 100644 tests/reviewVerdicts.test.ts
 
 diff --git a/.context/TECHSTACK.md b/.context/TECHSTACK.md
-index 90e52e9..2f871de 100644
+index b9bbd82..125d250 100644
 --- a/.context/TECHSTACK.md
 +++ b/.context/TECHSTACK.md
-@@ -638,6 +638,24 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
+@@ -1044,6 +1044,24 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
    the WebSocket room and MCP gate reads, comments and writes on it separately; spec in
    `.context/specs/share-link-roles.md`.
  
@@ -117,19 +121,19 @@ index 90e52e9..2f871de 100644
  --frozen-lockfile` in CI.
  - Vite 8 (Rolldown-based) - frontend build tool (`vite build`), with `@vitejs/plugin-react` 6.
 diff --git a/server/actions.ts b/server/actions.ts
-index 09cbe20..f730456 100644
+index 5723f90..f28fa82 100644
 --- a/server/actions.ts
 +++ b/server/actions.ts
-@@ -2,7 +2,7 @@ import { nanoid } from 'nanoid'
+@@ -19,7 +19,7 @@ import { MAX_DECISION_CHARS } from '../shared/designDecisions.ts'
  import { MAX_PAGES, PageLimitError, store } from './store.ts'
  import * as persist from './db/persist.ts'
  import * as thumbs from './thumbs.ts'
 -import { colorFor } from '../shared/types.ts'
 +import { APPROVAL_HISTORY_MAX, colorFor } from '../shared/types.ts'
+ import type { AgentBrand } from '../shared/agentBrand.ts'
  import type { StackWrite } from '../shared/frameStack.ts'
- import { DEFAULT_ROLE_ID, mentionedRole, normalizePipeline, roleByAgentName, roleName } from '../shared/agents.ts'
- import { canvasPages } from '../shared/pages.ts'
-@@ -42,8 +42,10 @@ import type {
+ import {
+@@ -70,8 +70,10 @@ import type {
    AgentTask,
    CardScope,
    DesignDecision,
@@ -140,10 +144,21 @@ index 09cbe20..f730456 100644
    GuidelineDoc,
    MemoryProposal,
    MemoryReference,
-@@ -1949,32 +1951,96 @@ export function restackFrames(canvasId: string, writes: StackWrite[], actor: Act
+@@ -131,8 +133,8 @@ const stored = {
+     afterCommit(() => persist.saveDecision(canvasId, decision)),
+   saveProposal: (canvasId: string, proposal: MemoryProposal) =>
+     afterCommit(() => persist.saveProposal(canvasId, proposal)),
+-  saveFrameVersion: (version: Parameters<typeof persist.saveFrameVersion>[0]) =>
+-    afterCommit(() => persist.saveFrameVersion(version)),
++  saveFrameVersion: (...args: Parameters<typeof persist.saveFrameVersion>) =>
++    afterCommit(() => persist.saveFrameVersion(...args)),
+   saveGuidelineVersion: (...args: Parameters<typeof persist.saveGuidelineVersion>) =>
+     afterCommit(() => persist.saveGuidelineVersion(...args)),
  }
+@@ -2625,39 +2627,101 @@ export const restackFrames = atomic(function restackFrames(
+   return frames
+ })
  
- /** Sign-off is a human action, separate from ordinary frame editing. */
 +export type ApprovalVerdict = 'ready_for_dev' | 'changes_requested' | 'draft'
 +
 +/** File the state a verdict is given on as a design version, so the review
@@ -156,7 +171,7 @@ index 09cbe20..f730456 100644
 +  if (!frame.html) return undefined
 +  const id = nanoid(10)
 +  const author = bursts.get(frame.id)?.actor
-+  persist.saveFrameVersion(
++  stored.saveFrameVersion(
 +    {
 +      id,
 +      frameId: frame.id,
@@ -190,17 +205,21 @@ index 09cbe20..f730456 100644
 +  ]
 +}
 +
- export function setFrameApproval(
+ /** Sign-off is a human action, separate from ordinary frame editing. An agent may set it
+  *  for the person it works for: the approval stays theirs (`approvedBy`), with the agent
+  *  recorded as `approvedVia` and as the actor of the broadcast and activity line. */
+ export const setFrameApproval = atomic(function setFrameApproval(
    frameId: string,
 -  ready: boolean,
 +  status: ApprovalVerdict,
    user: { id: string; name: string },
+   agent?: Actor,
  ): Frame | undefined {
    const current = store.getFrame(frameId)
    if (!current) return undefined
 -  if (ready && current.approval?.status === 'ready_for_dev') return current
 +  if (status !== 'draft' && current.approval?.status === status) return current
-   const actor = resolveActor({ name: user.name, kind: 'user' })
+   const actor = agent ?? resolveActor({ name: user.name, kind: 'user' })
 -  const approval = ready
 -    ? {
 -        status: 'ready_for_dev' as const,
@@ -208,6 +227,7 @@ index 09cbe20..f730456 100644
 -        approvedByUserId: user.id,
 -        approvedAt: Math.max(Date.now(), current.updatedAt + 1),
 -        approvedFrameUpdatedAt: current.updatedAt,
+-        ...(agent ? { approvedVia: agent.name } : {}),
 -      }
 -    : null
 +  let approval: FrameApproval | null = null
@@ -229,31 +249,42 @@ index 09cbe20..f730456 100644
 +      approvedByUserId: user.id,
 +      approvedAt: at,
 +      approvedFrameUpdatedAt: current.updatedAt,
++      ...(agent ? { approvedVia: agent.name } : {}),
 +      history: [...priorVerdicts(current.approval), entry].slice(-APPROVAL_HISTORY_MAX),
 +    }
 +  }
-   const frame = store.updateFrame(frameId, { approval }, user.name)!
+   const frame = store.updateFrame(frameId, { approval }, actor.name)!
    broadcast(frame.canvasId, { type: 'frame:updated', frame, actor })
    logActivity(
      frame.canvasId,
      actor,
--    ready ? `marked “${frame.name}” ready for dev` : `moved “${frame.name}” back to draft`,
+-    ready
 +    status === 'ready_for_dev'
-+      ? `marked “${frame.name}” ready for dev`
+       ? `marked “${frame.name}” ready for dev${agent ? ` for ${user.name}` : ''}`
+-      : `moved “${frame.name}” back to draft`,
 +      : status === 'changes_requested'
 +        ? `requested changes on “${frame.name}”`
 +        : `moved “${frame.name}” back to draft`,
      frameId,
    )
-+  emitCanvasEvent(frame.canvasId, { type: 'frame.approval', frame, status, actor })
++  emitEvent(frame.canvasId, { type: 'frame.approval', frame, status, actor })
    return frame
+ })
+ 
+@@ -2672,7 +2736,7 @@ export function agentSetFrameApproval(
+   if (!current) return { ok: false, error: `no frame with id ${frameId}` }
+   if (status === 'ready_for_dev' && isFrameStreaming(frameId))
+     return { ok: false, error: 'the design is still streaming — wait for it to finish before approving it' }
+-  const frame = setFrameApproval(frameId, status === 'ready_for_dev', user, agent)
++  const frame = setFrameApproval(frameId, status, user, agent)
+   return frame ? { ok: true, frame } : { ok: false, error: `no frame with id ${frameId}` }
  }
  
 diff --git a/server/db/persist.ts b/server/db/persist.ts
-index 8bc3aa9..b77d72b 100644
+index 2db93b1..d7cbdbc 100644
 --- a/server/db/persist.ts
 +++ b/server/db/persist.ts
-@@ -457,8 +457,11 @@ function queueVersionWrite(frameId: string, canvasId: string, work: () => Promis
+@@ -717,8 +717,11 @@ function queueVersionWrite(frameId: string, canvasId: string, work: () => Promis
    swallow(queued.finally(() => versionWrites.get(frameId)?.queued === queued && versionWrites.delete(frameId)))
  }
  
@@ -267,7 +298,7 @@ index 8bc3aa9..b77d72b 100644
  }
  
  /** Settles once every queued version write the filter picks has landed. */
-@@ -467,7 +470,7 @@ function pendingVersionWrites(pick: (frameId: string, canvasId: string) => boole
+@@ -727,7 +730,7 @@ function pendingVersionWrites(pick: (frameId: string, canvasId: string) => boole
    return Promise.allSettled(queued)
  }
  
@@ -276,7 +307,7 @@ index 8bc3aa9..b77d72b 100644
    /* a burst that ended where it began (an edit typed and reverted) would
       snapshot the same state twice — the newest row already holds it. Size
       counts: the same document at another frame size is a state of its own */
-@@ -477,7 +480,13 @@ async function appendFrameVersion(version: FrameVersion) {
+@@ -737,7 +740,13 @@ async function appendFrameVersion(version: FrameVersion) {
      .where(eq(t.frameVersions.frameId, version.frameId))
      .orderBy(desc(t.frameVersions.savedAt))
      .limit(1)
@@ -292,7 +323,7 @@ index 8bc3aa9..b77d72b 100644
    await db.insert(t.frameVersions).values({
      id: version.id,
 diff --git a/server/events.ts b/server/events.ts
-index 3119476..10a0f89 100644
+index 75679a6..3845b19 100644
 --- a/server/events.ts
 +++ b/server/events.ts
 @@ -17,6 +17,8 @@ export type CanvasEvent =
@@ -305,29 +336,29 @@ index 3119476..10a0f89 100644
    | { type: 'task.completed'; task: AgentTask }
    | { type: 'task.failed'; task: AgentTask; reason: string }
 diff --git a/server/guide.ts b/server/guide.ts
-index 4ce85ed..cf5db04 100644
+index 5787118..9e5de8b 100644
 --- a/server/guide.ts
 +++ b/server/guide.ts
-@@ -218,9 +218,11 @@ Viewers watch designs assemble live. Stream with append_frame_html:
+@@ -407,9 +407,11 @@ Viewers watch designs assemble live. Stream with append_frame_html:
  ## Frames and HTML
  
  - Human sign-off: get_canvas and get_frame expose approvalStatus (draft, ready_for_dev,
 -  needs_review) and approval attribution. Filter get_canvas with approval_status="ready_for_dev"
 -  to find approved screens, then re-read get_frame before implementing. HTML and size edits
--  invalidate sign-off; needs_review requires another human approval. Approval alone does not
+-  move a ready_for_dev frame to needs_review, which requires another human approval. Renames,
 +  changes_requested, needs_review) and approval attribution. Filter get_canvas with
 +  approval_status="ready_for_dev" to find approved screens, then re-read get_frame before
 +  implementing. changes_requested is a reviewer sending the frame back: filter for it, read the
 +  frame's comments and revise. HTML and size edits after either verdict make it needs_review,
-+  which requires another human verdict. Approval alone does not
-   assign an implementation job — follow the human's request.
- - A frame renders a complete HTML document in a sandboxed iframe. Inline <style> and
-   <script> work; Google Fonts via <link> work.
++  which requires another human verdict. Renames,
+   moves (on its page or to another page), rotation, hiding and locking keep sign-off, and so
+   do Doop's own rewrites: a token change restyling the frame, a component it uses changing,
+   an element id stamped for a comment or link. Approval alone does not assign an
 diff --git a/server/index.ts b/server/index.ts
-index 8847358..cf00a3f 100644
+index 25a0a1f..5fe908b 100644
 --- a/server/index.ts
 +++ b/server/index.ts
-@@ -897,6 +897,7 @@ function checkRole(req: express.Request, res: express.Response, canvas: Canvas,
+@@ -1083,6 +1083,7 @@ function checkRole(req: express.Request, res: express.Response, canvas: Canvas,
  const ROLE_DENIED: Record<CanvasRole, string> = {
    view: 'this canvas is private — ask the owner for access',
    comment: 'you can view this canvas but not comment — ask the owner for access',
@@ -335,7 +366,7 @@ index 8847358..cf00a3f 100644
    edit: 'you can view this canvas but not edit it — ask the owner for edit access',
  }
  
-@@ -2075,16 +2076,17 @@ app.patch('/api/frames/:id', (req, res) => {
+@@ -2812,16 +2813,17 @@ app.patch('/api/frames/:id/instances', (req, res) => {
  })
  
  app.put('/api/frames/:id/approval', (req, res) => {
@@ -358,20 +389,10 @@ index 8847358..cf00a3f 100644
  
  app.post('/api/frames/:id/append', (req, res) => {
 diff --git a/server/mcp.ts b/server/mcp.ts
-index 441d02a..6134504 100644
+index ce49205..25a81a1 100644
 --- a/server/mcp.ts
 +++ b/server/mcp.ts
-@@ -90,7 +90,8 @@ const INSTRUCTIONS = `Doop is a shared multiplayer design canvas: humans and AI
- You MUST call get_guide({ topic: "doop-instructions" }) once before using other Doop tools. Call it again if a long conversation may have compressed or dropped the guide text.
- 
- - Context first: call get_canvas before adding or editing frames.
--- Implementation handoff: get_canvas and get_frame expose approvalStatus (draft, ready_for_dev, needs_review) and human approval attribution. Use get_canvas with approval_status="ready_for_dev" to find approved screens. Re-read get_frame before implementing; only ready_for_dev is current sign-off. HTML or size edits invalidate approval. Approval does not automatically start an implementation task; follow the human's implementation request.
-+- Implementation handoff: get_canvas and get_frame expose approvalStatus (draft, ready_for_dev, changes_requested, needs_review) and human approval attribution. Use get_canvas with approval_status="ready_for_dev" to find approved screens. Re-read get_frame before implementing; only ready_for_dev is current sign-off. HTML or size edits invalidate approval.
-+- Review verdicts: changes_requested means a reviewer sent the frame back; its comments say what to change. Find those frames with get_canvas approval_status="changes_requested", read the comments, and revise. Your edit moves the frame to needs_review for another look; do not approve it yourself. Approval does not automatically start an implementation task; follow the human's implementation request.
- - Element links: /c/<canvas_id>?frame=<frame_id>&element=<element_id> identifies one element: the one carrying data-doop-id="<element_id>" in that frame's HTML. Read get_canvas and get_frame and find that attribute before applying the feedback. If no element carries the id any more, ask for an updated reference.
- - Keep data-doop-* attributes on every element you rewrite: data-doop-id is how comments and links point at an element, data-doop-on / data-doop-action carry prototype wiring, data-doop-locked a layer lock. Drop one only together with its element.
- - Identity: pick an agent_name and reuse the SAME name on every call — your presence and edits are attributed live.
-@@ -529,13 +530,13 @@ export function buildMcpServer(
+@@ -600,13 +600,13 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
        title: 'Get a canvas and its frames',
        _meta: previewToolMeta('Reading the canvas…', 'Canvas loaded'),
        description:
@@ -388,23 +409,23 @@ index 441d02a..6134504 100644
      },
      async ({ canvas_id, agent_name, page_id, approval_status }) => {
 diff --git a/server/resident.ts b/server/resident.ts
-index b1a359a..10d0467 100644
+index 15ffd83..857fe4a 100644
 --- a/server/resident.ts
 +++ b/server/resident.ts
-@@ -135,7 +135,7 @@ Rules:
+@@ -193,7 +193,7 @@ Rules:
  - Queued cards are standalone work requests from the board. A card may be routed through several agents in turn — you own your stage of it and nothing else. If your specialty is to originate work: a new-asset card means create_frame sized for the job, a change request means editing the existing frame. One card, one deliverable.
  - Later stages inherit whatever earlier stages left. Read the frame as it is now; never undo a previous agent's work because you would have done it differently.
  - Resolve frame references against the numbered frame list in the request. A literal frame name wins; otherwise "Frame 1" means the first listed frame, and "the other frame" means the only remaining frame when there are two.
--- Each frame includes human approval metadata. Only ready_for_dev means the current design is approved for implementation; draft and needs_review are not approved. Content or size edits invalidate sign-off. Approval is context, not a new assignment: do only the requested work, and re-read the frame's approval before using it for implementation.
-+- Each frame includes human approval metadata. Only ready_for_dev means the current design is approved for implementation; draft, changes_requested (a reviewer sent it back; its comments say why) and needs_review are not approved. Content or size edits invalidate sign-off. Approval is context, not a new assignment: do only the requested work, and re-read the frame's approval before using it for implementation.
+-- Each frame includes human approval metadata. Only ready_for_dev means the current design is approved for implementation; draft and needs_review are not approved. Content or size edits invalidate sign-off. Approval is context, not a new assignment: do only the requested work, and re-read the frame's approval before using it for implementation. Mark a frame ready for dev (set_frame_approval) only when the person explicitly asks for that; never approve your own work unasked.
++- Each frame includes human approval metadata. Only ready_for_dev means the current design is approved for implementation; draft, changes_requested (a reviewer sent it back; its comments say why) and needs_review are not approved. Content or size edits invalidate sign-off. Approval is context, not a new assignment: do only the requested work, and re-read the frame's approval before using it for implementation. Mark a frame ready for dev (set_frame_approval) only when the person explicitly asks for that; never approve your own work unasked.
  - Choose a size-aware strategy. For documents over 60,000 characters, call inspect_frame before reading HTML. Use get_frame_html with a query or bounded range only when markup is needed.
  - For requests to copy, match, or borrow another frame's design: screenshot and inspect BOTH the target and reference before editing. Use the reference screenshot and computed design tokens as the source of visual truth. Read target HTML only when you need to preserve its content; do not load a large reference document just to learn its style. For a full redesign, use begin_frame_rewrite, append_frame_rewrite in chunks under 12,000 characters, and commit_frame_rewrite; then screenshot the changed frame.
  - Element comments are pinned to ONE element (you get its data-doop-id and an HTML excerpt at comment time). Change that element or its immediate context — never rework unrelated parts of the frame because of an element comment.
 diff --git a/server/store.ts b/server/store.ts
-index b2282e8..3b76c52 100644
+index f49cf86..191d57e 100644
 --- a/server/store.ts
 +++ b/server/store.ts
-@@ -873,7 +873,10 @@ class Store {
+@@ -1250,7 +1250,10 @@ class Store {
      Object.assign(frame, patch)
      if (patch.z !== undefined) c.frames.sort(byStack)
      // All writers (including streams, sync and restores) invalidate sign-off.
@@ -417,7 +438,7 @@ index b2282e8..3b76c52 100644
      }
      // Also serves as the optimistic-save version, including writes in the same millisecond.
 diff --git a/server/webhooks.ts b/server/webhooks.ts
-index 225d3d8..19877c5 100644
+index 55436dd..36e5b71 100644
 --- a/server/webhooks.ts
 +++ b/server/webhooks.ts
 @@ -338,6 +338,12 @@ export function payloadFor(event: CanvasEvent): Record<string, unknown> {
@@ -453,10 +474,10 @@ index 6d727d8..740e1a7 100644
  export function isLinkAccess(value: unknown): value is LinkAccess {
    return typeof value === 'string' && (LINK_ACCESS_LEVELS as readonly string[]).includes(value)
 diff --git a/shared/types.ts b/shared/types.ts
-index d3e5b8a..53aa179 100644
+index 13ccd84..e83b33d 100644
 --- a/shared/types.ts
 +++ b/shared/types.ts
-@@ -39,12 +39,37 @@ export interface Frame {
+@@ -42,7 +42,9 @@ export interface Frame {
  }
  
  export interface FrameApproval {
@@ -467,8 +488,10 @@ index d3e5b8a..53aa179 100644
    approvedBy: string
    approvedByUserId: string
    approvedAt: number
-   /** The frame revision the person reviewed before approving. */
+@@ -50,6 +52,29 @@ export interface FrameApproval {
    approvedFrameUpdatedAt: number
+   /** The agent that set this approval on the person's behalf, when an agent did. */
+   approvedVia?: string
 +  /** The last verdict given, which an edit does not erase (status turns
 +   *  needs_review, this stays). Unset on approvals older than verdicts:
 +   *  read it as ready_for_dev. */
@@ -516,10 +539,10 @@ index 8dcc03f..12b6a4d 100644
    'task.failed': 'An agent fails a board card',
  }
 diff --git a/src/components/FrameApproval.tsx b/src/components/FrameApproval.tsx
-index c23e853..e4608eb 100644
+index f80064d..4232abc 100644
 --- a/src/components/FrameApproval.tsx
 +++ b/src/components/FrameApproval.tsx
-@@ -1,19 +1,24 @@
+@@ -1,22 +1,27 @@
  import { useState } from 'react'
  import type { Frame } from '../../shared/types'
 -import { setFramesApproval } from '../lib/frameApproval'
@@ -534,10 +557,13 @@ index c23e853..e4608eb 100644
  import { Switch } from './ui/switch'
  import { Tooltip } from './ui/tooltip'
  
--/** Who signed the frame off, and when; "previously" once it changed since. */
-+/** Who gave the verdict, and when; "previously" once the design changed since. */
+-/** Who signed the frame off (and through which agent), and when; "previously" once it changed since. */
++/** Who gave the verdict (and through which agent), and when; "previously" once the design changed since. */
  function approvalLine(t: Translate, approval: NonNullable<Frame['approval']>): string {
-   const vars = { name: approval.approvedBy, date: new Date(approval.approvedAt).toLocaleString(getLocale()) }
+   const name = approval.approvedVia
+     ? t('stage.approverVia', { name: approval.approvedBy, agent: approval.approvedVia })
+     : approval.approvedBy
+   const vars = { name, date: new Date(approval.approvedAt).toLocaleString(getLocale()) }
 -  return approval.status === 'ready_for_dev' ? t('stage.approvedByOn', vars) : t('stage.previouslyApprovedByOn', vars)
 +  if (approval.status === 'ready_for_dev') return t('stage.approvedByOn', vars)
 +  if (approval.status === 'changes_requested') return t('stage.changesRequestedByOn', vars)
@@ -548,7 +574,7 @@ index c23e853..e4608eb 100644
  }
  
  export function FrameApprovalBadge({ frame, compact = false }: { frame: Frame; compact?: boolean }) {
-@@ -21,8 +26,9 @@ export function FrameApprovalBadge({ frame, compact = false }: { frame: Frame; c
+@@ -24,8 +29,9 @@ export function FrameApprovalBadge({ frame, compact = false }: { frame: Frame; c
    const approval = frame.approval
    if (!approval) return null
    const ready = approval.status === 'ready_for_dev'
@@ -560,7 +586,7 @@ index c23e853..e4608eb 100644
    return (
      <Badge
        tone={ready ? 'success' : 'banned'}
-@@ -49,7 +55,8 @@ export function FrameApprovalControl({
+@@ -52,7 +58,8 @@ export function FrameApprovalControl({
    const pendingSave = useFrameSaves((s) => !!s.pending[frame.id])
    const awaitingChanges = streaming || pendingSave || hasUnsavedChanges
    const ready = frame.approval?.status === 'ready_for_dev'
@@ -570,7 +596,7 @@ index c23e853..e4608eb 100644
      setSaving(true)
      try {
        await setFramesApproval([frame], status)
-@@ -79,7 +86,15 @@ export function FrameApprovalControl({
+@@ -82,7 +89,15 @@ export function FrameApprovalControl({
          </div>
        )}
        <p className="text-caption text-ink-faint">
@@ -587,7 +613,7 @@ index c23e853..e4608eb 100644
        </p>
        {saving && (
          <p role="status" className="text-caption text-ink-faint">
-@@ -87,6 +102,17 @@ export function FrameApprovalControl({
+@@ -90,6 +105,17 @@ export function FrameApprovalControl({
          </p>
        )}
        {!ready && awaitingChanges && <p className="text-caption text-ink-faint">{t('stage.approvalWait')}</p>}
@@ -606,7 +632,7 @@ index c23e853..e4608eb 100644
          <Button
            size="inline"
 diff --git a/src/components/FrameContextMenu.tsx b/src/components/FrameContextMenu.tsx
-index 331656e..d82dde3 100644
+index 38ac791..484444d 100644
 --- a/src/components/FrameContextMenu.tsx
 +++ b/src/components/FrameContextMenu.tsx
 @@ -6,7 +6,7 @@ import { writeCanvasClipboard } from '../lib/canvasClipboard'
@@ -618,7 +644,7 @@ index 331656e..d82dde3 100644
  import { setFramesApproval } from '../lib/frameApproval'
  import { useFrameSaves } from '../lib/frameSaves'
  import { MOD_KEY } from '../lib/keys'
-@@ -52,6 +52,8 @@ export function FrameContextMenu({
+@@ -53,6 +53,8 @@ export function FrameContextMenu({
    const selectedIds = useStore((s) => s.selectedIds)
    /* a view or comment link keeps the items that only read the frame */
    const readOnly = useStore((s) => !canEditOpenCanvas(s))
@@ -627,7 +653,7 @@ index 331656e..d82dde3 100644
    const groupIds = selectedIds.includes(frame.id) ? selectedIds : [frame.id]
    const groupSize = groupIds.length
    const pendingSave = useFrameSaves((s) => groupIds.some((id) => !!s.pending[id]))
-@@ -85,6 +87,20 @@ export function FrameContextMenu({
+@@ -86,6 +88,20 @@ export function FrameContextMenu({
      const group = s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame]
      return group.every((f) => f.approval?.status === 'ready_for_dev')
    })
@@ -648,7 +674,7 @@ index 331656e..d82dde3 100644
    async function changeApproval() {
      setSavingApproval(true)
      try {
-@@ -152,7 +168,7 @@ export function FrameContextMenu({
+@@ -160,7 +176,7 @@ export function FrameContextMenu({
          <ContextMenuItem onSelect={() => void copyImageUrl(frame)}>{t('stage.copyImageUrl')}</ContextMenuItem>
          <ContextMenuItem onSelect={() => setExportFrames(groupFrames())}>{t('stage.exportEllipsis')}</ContextMenuItem>
          <ContextMenuItem onSelect={() => setHistoryOpen(true)}>{t('stage.versionHistory')}</ContextMenuItem>
@@ -657,7 +683,7 @@ index 331656e..d82dde3 100644
            <>
              <ContextMenuSeparator />
              <ContextMenuItem
-@@ -162,6 +178,19 @@ export function FrameContextMenu({
+@@ -170,6 +186,19 @@ export function FrameContextMenu({
                {allReady ? t('stage.moveToDraft') : t('stage.markReadyForDev')}
                {groupSize > 1 && <MenuHint>{t('stage.framesCount', { count: groupSize })}</MenuHint>}
              </ContextMenuItem>
@@ -690,10 +716,10 @@ index 404629c..050532c 100644
    'task.failed': 'webhooks.eventTaskFailed',
  }
 diff --git a/src/lib/api.ts b/src/lib/api.ts
-index a100792..4f9a9a5 100644
+index 91aba3e..2840399 100644
 --- a/src/lib/api.ts
 +++ b/src/lib/api.ts
-@@ -519,7 +519,11 @@ export const api = {
+@@ -780,7 +780,11 @@ export const api = {
      req<Frame[]>(`/api/canvases/${canvasId}/stack`, { method: 'PUT', body: JSON.stringify({ frames }) }),
    deleteFrame: (frameId: string, expectedUpdatedAt?: number) =>
      req('/api/frames/' + frameId, { method: 'DELETE', body: JSON.stringify({ expectedUpdatedAt, actor: actor() }) }),
@@ -722,10 +748,10 @@ index 8605574..2d92f35 100644
    let failure: string | undefined
    for (const frame of frames) {
 diff --git a/src/lib/i18n/en/stage.ts b/src/lib/i18n/en/stage.ts
-index f5e008d..12e20b2 100644
+index b9e07d5..a8c34d7 100644
 --- a/src/lib/i18n/en/stage.ts
 +++ b/src/lib/i18n/en/stage.ts
-@@ -91,15 +91,22 @@ export const stage = {
+@@ -90,16 +90,23 @@ export const stage = {
    versionHistory: 'Version history…',
    markReadyForDev: 'Mark ready for dev',
    moveToDraft: 'Move to draft',
@@ -739,6 +765,7 @@ index f5e008d..12e20b2 100644
 +  changesRequestedEditedByOn: 'Changes requested by {name} on {date}; revised since',
    approvedByOn: 'Approved by {name} on {date}',
    previouslyApprovedByOn: 'Previously approved by {name} on {date}',
+   approverVia: '{name} via {agent}',
    markAsApproved: 'Mark as approved',
    approvalReady: 'Agents can see this screen is approved for implementation.',
    approvalChanged: 'This design changed after approval. Review it before marking it ready again.',
@@ -761,10 +788,10 @@ index 589e083..7daa89a 100644
    eventTaskFailed: 'An agent fails a board card',
  
 diff --git a/src/lib/i18n/pt-BR/stage.ts b/src/lib/i18n/pt-BR/stage.ts
-index b7a8810..762a29c 100644
+index 6fae83f..21ae581 100644
 --- a/src/lib/i18n/pt-BR/stage.ts
 +++ b/src/lib/i18n/pt-BR/stage.ts
-@@ -91,15 +91,22 @@ export const stage: Catalog['stage'] = {
+@@ -90,16 +90,23 @@ export const stage: Catalog['stage'] = {
    versionHistory: 'Histórico de versões…',
    markReadyForDev: 'Marcar como pronto para dev',
    moveToDraft: 'Voltar para rascunho',
@@ -778,6 +805,7 @@ index b7a8810..762a29c 100644
 +  changesRequestedEditedByOn: 'Alterações solicitadas por {name} em {date}; revisado desde então',
    approvedByOn: 'Aprovado por {name} em {date}',
    previouslyApprovedByOn: 'Aprovado anteriormente por {name} em {date}',
+   approverVia: '{name} via {agent}',
    markAsApproved: 'Marcar como aprovado',
    approvalReady: 'Os agentes podem ver que esta tela está aprovada para implementação.',
    approvalChanged: 'Este design mudou depois da aprovação. Revise-o antes de marcá-lo como pronto de novo.',
@@ -800,10 +828,10 @@ index 065fd2d..53b2ad0 100644
    eventTaskFailed: 'Um agente falha em um card do quadro',
  
 diff --git a/src/lib/store.ts b/src/lib/store.ts
-index c7b7c39..74faf08 100644
+index 7458228..9de49e9 100644
 --- a/src/lib/store.ts
 +++ b/src/lib/store.ts
-@@ -797,6 +797,11 @@ export function canEditOpenCanvas(s: Pick<State, 'canvas'>): boolean {
+@@ -833,6 +833,11 @@ export function canEditOpenCanvas(s: Pick<State, 'canvas'>): boolean {
  }
  
  /** May the caller comment on the open canvas? */
@@ -900,8 +928,56 @@ index 3bdb3cf..3125fdd 100644
      expect(roleAllows('edit', 'comment')).toBe(true)
      expect(roleAllows('comment', 'comment')).toBe(true)
      expect(roleAllows('comment', 'edit')).toBe(false)
+diff --git a/tests/componentUsage.test.ts b/tests/componentUsage.test.ts
+index 1cafacd..93a51f8 100644
+--- a/tests/componentUsage.test.ts
++++ b/tests/componentUsage.test.ts
+@@ -83,7 +83,7 @@ function fixture() {
+   const frames = Array.from({ length: 20 }, (_, index) => {
+     const frame = actions.createFrame(canvas.id, { name: `Page ${index}`, html: '' }, actor)!
+     actions.updateFrame(frame.id, { html: doc(bodies[index % bodies.length]!) }, actor)
+-    if (index % 4 === 0) actions.setFrameApproval(frame.id, true, { id: 'u', name: 'Reviewer' })
++    if (index % 4 === 0) actions.setFrameApproval(frame.id, 'ready_for_dev', { id: 'u', name: 'Reviewer' })
+     return frame
+   })
+   return { canvas, button, tag, card, row, unused, frames }
+@@ -102,7 +102,7 @@ describe('component usage', () => {
+     /* and again after a write, a rename, an approval and a delete */
+     actions.updateFrame(frames[4]!.id, { html: doc(`<doop-use component="Tag"></doop-use>`) }, actor)
+     actions.updateFrame(frames[0]!.id, { name: 'Renamed' }, actor)
+-    actions.setFrameApproval(frames[1]!.id, true, { id: 'u', name: 'Reviewer' })
++    actions.setFrameApproval(frames[1]!.id, 'ready_for_dev', { id: 'u', name: 'Reviewer' })
+     actions.deleteFrame(frames[2]!.id, actor)
+     for (const def of canvas.components ?? []) {
+       expect(usageOf(canvas, def.id)).toEqual(oldUsageOf(canvas, def.id))
+diff --git a/tests/components.test.ts b/tests/components.test.ts
+index 33d9f5c..ff66b22 100644
+--- a/tests/components.test.ts
++++ b/tests/components.test.ts
+@@ -194,7 +194,7 @@ describe('propagation', () => {
+   it('keeps sign-off on a frame that follows a component change', async () => {
+     const { mainFrame, page } = setup()
+     actions.updateFrame(page.id, { html: doc(`<doop-use component="Button"></doop-use>`) }, actor)
+-    actions.setFrameApproval(page.id, true, { id: 'u', name: 'Reviewer' })
++    actions.setFrameApproval(page.id, 'ready_for_dev', { id: 'u', name: 'Reviewer' })
+     actions.updateFrame(mainFrame.id, { html: framed(mainFrame.id).replace('Buy now', 'Buy today') }, actor)
+     await propagation.whenIdle()
+     expect(framed(page.id)).toContain('Buy today')
+diff --git a/tests/componentsCatchUp.test.ts b/tests/componentsCatchUp.test.ts
+index bad35a0..728a26b 100644
+--- a/tests/componentsCatchUp.test.ts
++++ b/tests/componentsCatchUp.test.ts
+@@ -38,7 +38,7 @@ describe('catching up instances behind', () => {
+       { name: 'Page', html: doc('<doop-use component="Badge"></doop-use>') },
+       actor,
+     )!
+-    actions.setFrameApproval(page.id, true, { id: 'u', name: 'Reviewer' })
++    actions.setFrameApproval(page.id, 'ready_for_dev', { id: 'u', name: 'Reviewer' })
+     const stale = store.getFrame(page.id)!.html
+     /* the component moves on while its propagation is lost: the frame keeps the old markup */
+     const main = store.getFrame(def.mainFrameId!)!
 diff --git a/tests/frameApproval.test.ts b/tests/frameApproval.test.ts
-index 502a5cb..d918f55 100644
+index 582c92c..789c303 100644
 --- a/tests/frameApproval.test.ts
 +++ b/tests/frameApproval.test.ts
 @@ -86,10 +86,22 @@ it('attributes approvals to the signed-in person, broadcasts them and records ac
@@ -1008,6 +1084,19 @@ index 543dccd..9deb1c1 100644
 +    'Changes requested by Reviewer',
 +  )
 +})
+diff --git a/tests/propagation.test.ts b/tests/propagation.test.ts
+index daab1f9..7e6d5aa 100644
+--- a/tests/propagation.test.ts
++++ b/tests/propagation.test.ts
+@@ -157,7 +157,7 @@ describe('the propagation queue', () => {
+   it('drains to the HTML the synchronous sweep produced', async () => {
+     const { canvas, button, buttonMain, frames } = library(12)
+     await propagation.whenIdle()
+-    actions.setFrameApproval(frames[1]!.id, true, { id: 'u', name: 'Reviewer' })
++    actions.setFrameApproval(frames[1]!.id, 'ready_for_dev', { id: 'u', name: 'Reviewer' })
+     /* an override on one instance, which both have to keep */
+     actions.updateFrame(
+       frames[4]!.id,
 diff --git a/tests/reviewVerdicts.test.ts b/tests/reviewVerdicts.test.ts
 new file mode 100644
 index 0000000..e3a841e

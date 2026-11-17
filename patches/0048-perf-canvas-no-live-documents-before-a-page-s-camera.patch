@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 07:35:58 +0000
-Subject: [PATCH 48/52] perf(canvas): no live documents before a page's camera
+Subject: [PATCH 48/55] perf(canvas): no live documents before a page's camera
  first rests
 
 Until a page's camera first rests it is about to be fitted or put back
@@ -21,10 +21,10 @@ first rest, and the load makes no iframe it throws away.
  1 file changed, 8 insertions(+), 1 deletion(-)
 
 diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
-index 0980804..d163ae4 100644
+index 2fa9bc9..62a5ec8 100644
 --- a/src/components/Stage.tsx
 +++ b/src/components/Stage.tsx
-@@ -575,7 +575,14 @@ export function Stage({
+@@ -580,7 +580,14 @@ export function Stage({
        const live = useLiveFrames.getState()
        const stage = measuredStage(el)
        if (rested) live.setPreviews(s.viewport.zoom * window.devicePixelRatio, sharpPreviews(frames, s.viewport, stage))

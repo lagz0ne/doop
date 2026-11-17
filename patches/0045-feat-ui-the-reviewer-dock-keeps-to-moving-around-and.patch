@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 06:26:52 +0000
-Subject: [PATCH 45/52] feat(ui): the reviewer dock keeps to moving around and
+Subject: [PATCH 45/55] feat(ui): the reviewer dock keeps to moving around and
  reviewing
 
 The reviewer layout's dock had grown to fifteen controls, and the pages
@@ -38,7 +38,7 @@ closing the comments from it; phoneReviewBrowser checks the picker.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/components/CanvasDock.tsx       | 261 +++++++++++++++++++++-------
- src/components/LayersPanel.tsx      |  63 +++----
+ src/components/LayersPanel.tsx      |  83 ++++-----
  src/components/PagesPanel.tsx       |  40 +----
  src/components/ZoomControls.tsx     |  12 +-
  src/lib/i18n/en/canvas.ts           |   6 +
@@ -46,7 +46,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  src/pages/CanvasPage.tsx            |  37 ++--
  tests/phoneReviewBrowser.test.ts    |   2 +
  tests/reviewerLayoutBrowser.test.ts |  75 +++++---
- 9 files changed, 319 insertions(+), 182 deletions(-)
+ 9 files changed, 329 insertions(+), 192 deletions(-)
 
 diff --git a/src/components/CanvasDock.tsx b/src/components/CanvasDock.tsx
 index fa86666..2dc5212 100644
@@ -384,10 +384,10 @@ index fa86666..2dc5212 100644
   *  the current one, and Prototype mode while it is on, each pressed, so the
   *  canvas's mode is always in view; a click on either goes back to the Hand
 diff --git a/src/components/LayersPanel.tsx b/src/components/LayersPanel.tsx
-index d1a635b..61e995c 100644
+index 061eb46..37b8744 100644
 --- a/src/components/LayersPanel.tsx
 +++ b/src/components/LayersPanel.tsx
-@@ -220,7 +220,6 @@ export function LayersPanel({
+@@ -227,7 +227,6 @@ export function LayersPanel({
    surface = 'floating',
    onClose,
    resize,
@@ -395,7 +395,7 @@ index d1a635b..61e995c 100644
  }: {
    onAddFrame: () => void
    /* 'inline' when the panel is filling a mobile Sheet rather than floating */
-@@ -228,17 +227,12 @@ export function LayersPanel({
+@@ -235,17 +234,12 @@ export function LayersPanel({
    /** inline only: the sheet's close, in the collapse control's place */
    onClose?: () => void
    resize?: PanelResize
@@ -414,7 +414,7 @@ index d1a635b..61e995c 100644
    const setTab = useStore((s) => s.setLayersTab)
    /* view and comment links browse the tree; nothing in it moves or changes */
    const readOnly = useStore((s) => !canEditOpenCanvas(s))
-@@ -545,14 +539,6 @@ export function LayersPanel({
+@@ -571,14 +565,6 @@ export function LayersPanel({
      surface === 'docked' && 'left-0 w-[264px] border-r',
    )
  
@@ -429,7 +429,7 @@ index d1a635b..61e995c 100644
    return (
      <Panel surface={surface} resize={resize} className={panelClass}>
        {/* the panel's two faces as icon tabs, the collapse control at the far end */}
-@@ -680,7 +666,7 @@ export function LayersPanel({
+@@ -707,7 +693,7 @@ export function LayersPanel({
  
  /** The collapsed rail: a narrow column at the panel's spot with the expand
   *  control and the Layers mark. The frame count lives in the tooltip only. */
@@ -438,7 +438,7 @@ index d1a635b..61e995c 100644
    const setLayersOpen = useStore((s) => s.setLayersOpen)
    const count = usePageCanvas()?.frames.length ?? 0
    const t = useT()
-@@ -698,31 +684,26 @@ export function LayersRailToggle({ docked = false, pagesOnly = false }: { docked
+@@ -725,41 +711,36 @@ export function LayersRailToggle({ docked = false, pagesOnly = false }: { docked
        <ToolbarControl label={t('panels.layersExpandPanel')} side="right" onClick={() => setLayersOpen(true)}>
          <PanelExpandIcon />
        </ToolbarControl>
@@ -454,6 +454,16 @@ index d1a635b..61e995c 100644
 -            }}
 -          >
 -            <LayersIcon />
+-          </ToolbarControl>
+-          <ToolbarControl
+-            label={t('components.title')}
+-            side="right"
+-            onClick={() => {
+-              useStore.getState().setLayersTab('components')
+-              setLayersOpen(true)
+-            }}
+-          >
+-            <ComponentIcon />
 -          </ToolbarControl>
 -          <ToolbarControl
 -            label={t('panels.layersTabTokens')}
@@ -478,6 +488,16 @@ index d1a635b..61e995c 100644
 +        <LayersIcon />
 +      </ToolbarControl>
 +      <ToolbarControl
++        label={t('components.title')}
++        side="right"
++        onClick={() => {
++          useStore.getState().setLayersTab('components')
++          setLayersOpen(true)
++        }}
++      >
++        <ComponentIcon />
++      </ToolbarControl>
++      <ToolbarControl
 +        label={t('panels.layersTabTokens')}
 +        side="right"
 +        onClick={() => {
@@ -491,7 +511,7 @@ index d1a635b..61e995c 100644
    )
  }
 diff --git a/src/components/PagesPanel.tsx b/src/components/PagesPanel.tsx
-index ecb2cf2..b183dd0 100644
+index 64c570c..4e0876d 100644
 --- a/src/components/PagesPanel.tsx
 +++ b/src/components/PagesPanel.tsx
 @@ -1,4 +1,4 @@
@@ -500,7 +520,7 @@ index ecb2cf2..b183dd0 100644
  import { nanoid } from 'nanoid'
  import { canvasPages } from '../../shared/pages'
  import type { CanvasPageInfo } from '../../shared/types'
-@@ -18,15 +18,7 @@ import { useT } from '@/lib/i18n'
+@@ -19,15 +19,7 @@ import { useT } from '@/lib/i18n'
  export const sectionHeading = 'text-[11px] font-normal text-ink-faint'
  const sectionBtn = 'size-5 rounded-[5px] text-ink-faint hover:bg-paper-deep hover:text-ink'
  
@@ -517,7 +537,7 @@ index ecb2cf2..b183dd0 100644
    const canvas = useStore((s) => s.canvas)
    const activePageId = useStore((s) => s.activePageId)
    const selectedIds = useStore((s) => s.selectedIds)
-@@ -268,29 +260,13 @@ export function PagesPanel({
+@@ -321,29 +313,13 @@ export function PagesPanel({
  
    return (
      <div className={cn('flex flex-none flex-col', fill && 'min-h-0 flex-1')}>
@@ -584,11 +604,11 @@ index 8e34b15..674cbe4 100644
        </DropdownMenu>
        {steps && (
 diff --git a/src/lib/i18n/en/canvas.ts b/src/lib/i18n/en/canvas.ts
-index b6c84ae..5db2728 100644
+index 2609b40..643b32c 100644
 --- a/src/lib/i18n/en/canvas.ts
 +++ b/src/lib/i18n/en/canvas.ts
 @@ -105,6 +105,12 @@ export const canvas = {
-   agentsWorking: 'Agents · {working} working · ⌘K to ask the Doop Agent',
+   agentsWorking: 'Agents · {working} working · ⌘/ to ask the Doop Agent',
    comments: 'Comments',
    commentsOpen: 'Comments · {open} open',
 +  /* the reviewer dock (CanvasDock.tsx): the page picker and the one menu for the rest */
@@ -601,11 +621,11 @@ index b6c84ae..5db2728 100644
    memory: 'Memory',
    memorySuggestion: 'Memory · suggestion to review',
 diff --git a/src/lib/i18n/pt-BR/canvas.ts b/src/lib/i18n/pt-BR/canvas.ts
-index fd0774e..46f2c5a 100644
+index 1a20ca2..ebf2650 100644
 --- a/src/lib/i18n/pt-BR/canvas.ts
 +++ b/src/lib/i18n/pt-BR/canvas.ts
 @@ -105,6 +105,11 @@ export const canvas: Catalog['canvas'] = {
-   agentsWorking: 'Agentes · {working} trabalhando · ⌘K para pedir ao Doop Agent',
+   agentsWorking: 'Agentes · {working} trabalhando · ⌘/ para pedir ao Doop Agent',
    comments: 'Comentários',
    commentsOpen: 'Comentários · {open} abertos',
 +  pagePicker: 'Página: {page}',
@@ -617,10 +637,10 @@ index fd0774e..46f2c5a 100644
    memory: 'Memória',
    memorySuggestion: 'Memória · sugestão para revisar',
 diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
-index f455070..42bcabc 100644
+index 42b5f5a..449e85a 100644
 --- a/src/pages/CanvasPage.tsx
 +++ b/src/pages/CanvasPage.tsx
-@@ -205,6 +205,7 @@ function chromeLayout({
+@@ -195,6 +195,7 @@ function chromeLayout({
    layersWidth,
    agentsWidth,
    docked,
@@ -628,7 +648,7 @@ index f455070..42bcabc 100644
  }: {
    layersOpen: boolean
    propertiesShown: boolean
-@@ -212,6 +213,8 @@ function chromeLayout({
+@@ -202,6 +203,8 @@ function chromeLayout({
    layersWidth: number
    agentsWidth: number
    docked: boolean
@@ -637,7 +657,7 @@ index f455070..42bcabc 100644
  }) {
    if (docked) {
      const toolRail = layersOpen ? layersWidth : RAIL_W
-@@ -219,10 +222,11 @@ function chromeLayout({
+@@ -209,10 +212,11 @@ function chromeLayout({
      const island = propertiesShown ? properties + INSPECTOR_W : properties
      return { toolRail, properties, island, left: toolRail + RAIL_W, right: island + RAIL_W }
    }
@@ -651,7 +671,7 @@ index f455070..42bcabc 100644
  }
  
  const STARTER_HTML = `<!doctype html>
-@@ -742,9 +746,10 @@ export function CanvasPage({
+@@ -755,9 +759,10 @@ export function CanvasPage({
    const docked = usePanelLayout() === 'docked' && !isMobile
    const panelSurface = docked ? 'docked' : 'floating'
    /* The reviewer layout (FULL_UI off, floating panels): no top bar, no tool
@@ -665,7 +685,7 @@ index f455070..42bcabc 100644
       agents' chrome (AI activity, Connect AI, memory, the composer) stays in
       the full layout: agents work over MCP. Present stays at the top right. A
       phone gets the same with its dock as the one control on screen, the zoom
-@@ -786,8 +791,11 @@ export function CanvasPage({
+@@ -799,8 +804,11 @@ export function CanvasPage({
    const rulerInset = rulersShown && !docked ? RULER_PX : 0
    const hasSelection = useStore((s) => s.selectedIds.length > 0)
  
@@ -678,7 +698,7 @@ index f455070..42bcabc 100644
      propertiesShown,
      agentsOpen: showActivity,
      layersWidth: 0,
-@@ -799,13 +807,14 @@ export function CanvasPage({
+@@ -812,13 +820,14 @@ export function CanvasPage({
      viewport: viewportWidth,
      /* docked, the panels squeeze the stage itself, so it keeps a usable width */
      reserved: fixedChrome.left + fixedChrome.right + rulerInset + (docked ? DOCKED_STAGE_MIN : 0),
@@ -695,8 +715,8 @@ index f455070..42bcabc 100644
      propertiesShown,
      agentsOpen: showActivity,
      layersWidth,
-@@ -1172,11 +1181,11 @@ export function CanvasPage({
-           {FULL_UI && canvas && !readOnly && <Onboarding canvasId={canvasId} />}
+@@ -1187,11 +1196,11 @@ export function CanvasPage({
+           <IosAppPrompt />
            <AccessBanner guest={guest} onSignUp={onSignUp} onSignIn={onSignIn} />
            {!isMobile &&
 +            !reviewerLayout &&
@@ -708,7 +728,7 @@ index f455070..42bcabc 100644
                  resize={{
                    label: t('canvas.resizeLayers'),
                    edge: 'right',
-@@ -1190,7 +1199,7 @@ export function CanvasPage({
+@@ -1205,7 +1214,7 @@ export function CanvasPage({
                  }}
                />
              ) : (
@@ -717,7 +737,7 @@ index f455070..42bcabc 100644
              ))}
            {isMobile && !reviewerLayout && !showActivity && !guest && (
              <MobilePanelTabs
-@@ -1270,7 +1279,6 @@ export function CanvasPage({
+@@ -1284,7 +1293,6 @@ export function CanvasPage({
                    panelTab={panelTab}
                    panelOpen={showActivity}
                    onPanel={guest ? null : openPanel}
@@ -725,7 +745,7 @@ index f455070..42bcabc 100644
                    onMore={() => setShowMobileActions(true)}
                  />
                ) : (
-@@ -1443,12 +1451,7 @@ export function CanvasPage({
+@@ -1457,12 +1465,7 @@ export function CanvasPage({
                className="max-h-[calc(100svh-56px)] gap-0 rounded-t-2xl border-line bg-surface p-0 shadow-pop data-[side=bottom]:h-[min(78svh,680px)]"
              >
                <SheetTitle className="sr-only">{t('canvas.layers')}</SheetTitle>

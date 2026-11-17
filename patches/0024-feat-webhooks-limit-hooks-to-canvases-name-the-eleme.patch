@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 08:13:22 +0000
-Subject: [PATCH 24/52] feat(webhooks): limit hooks to canvases, name the
+Subject: [PATCH 24/55] feat(webhooks): limit hooks to canvases, name the
  element, manage them from the operator API
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -32,9 +32,9 @@ elementId and snippet; disable, test, widen, delete).
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- .../db/migrations/0051_webhook_canvases.sql   |    1 +
- server/db/migrations/meta/0051_snapshot.json  | 4432 +++++++++++++++++
- server/db/migrations/meta/_journal.json       |    9 +-
+ .../db/migrations/0062_webhook_canvases.sql   |    1 +
+ server/db/migrations/meta/0062_snapshot.json  | 5044 +++++++++++++++++
+ server/db/migrations/meta/_journal.json       |    7 +
  server/db/schema.ts                           |    2 +
  server/operator.ts                            |   77 +-
  server/webhookRoutes.ts                       |   18 +-
@@ -43,27 +43,27 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  tests/confirmDialogs.test.tsx                 |    1 +
  tests/operator.test.ts                        |  137 +-
  tests/webhooks.test.ts                        |   67 +-
- 11 files changed, 4790 insertions(+), 24 deletions(-)
- create mode 100644 server/db/migrations/0051_webhook_canvases.sql
- create mode 100644 server/db/migrations/meta/0051_snapshot.json
+ 11 files changed, 5401 insertions(+), 23 deletions(-)
+ create mode 100644 server/db/migrations/0062_webhook_canvases.sql
+ create mode 100644 server/db/migrations/meta/0062_snapshot.json
 
-diff --git a/server/db/migrations/0051_webhook_canvases.sql b/server/db/migrations/0051_webhook_canvases.sql
+diff --git a/server/db/migrations/0062_webhook_canvases.sql b/server/db/migrations/0062_webhook_canvases.sql
 new file mode 100644
 index 0000000..93d8b7f
 --- /dev/null
-+++ b/server/db/migrations/0051_webhook_canvases.sql
++++ b/server/db/migrations/0062_webhook_canvases.sql
 @@ -0,0 +1 @@
 +ALTER TABLE "webhooks" ADD COLUMN IF NOT EXISTS "canvas_ids" jsonb DEFAULT '[]'::jsonb NOT NULL;
 \ No newline at end of file
-diff --git a/server/db/migrations/meta/0051_snapshot.json b/server/db/migrations/meta/0051_snapshot.json
+diff --git a/server/db/migrations/meta/0062_snapshot.json b/server/db/migrations/meta/0062_snapshot.json
 new file mode 100644
-index 0000000..b3cfafb
+index 0000000..4af7fde
 --- /dev/null
-+++ b/server/db/migrations/meta/0051_snapshot.json
-@@ -0,0 +1,4432 @@
++++ b/server/db/migrations/meta/0062_snapshot.json
+@@ -0,0 +1,5044 @@
 +{
-+  "id": "4fcfcdfa-d012-4623-9d97-224efd1cf4d4",
-+  "prevId": "ae73854f-626b-4f20-ba6f-4e53f80cf65b",
++  "id": "3471e36b-698d-4d7f-ada4-d139c970cfb5",
++  "prevId": "d683df81-01ff-4d51-97de-e95fb60efe04",
 +  "version": "7",
 +  "dialect": "postgresql",
 +  "tables": {
@@ -356,6 +356,79 @@ index 0000000..b3cfafb
 +      "checkConstraints": {},
 +      "isRLSEnabled": false
 +    },
++    "public.agent_overrides": {
++      "name": "agent_overrides",
++      "schema": "",
++      "columns": {
++        "scope": {
++          "name": "scope",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "role_id": {
++          "name": "role_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "disabled": {
++          "name": "disabled",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "color": {
++          "name": "color",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "blurb": {
++          "name": "blurb",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "brief": {
++          "name": "brief",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "reviewer": {
++          "name": "reviewer",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "updated_by": {
++          "name": "updated_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {
++        "agent_overrides_scope_role_id_pk": {
++          "name": "agent_overrides_scope_role_id_pk",
++          "columns": ["scope", "role_id"]
++        }
++      },
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
 +    "public.asset_refs": {
 +      "name": "asset_refs",
 +      "schema": "",
@@ -453,6 +526,43 @@ index 0000000..b3cfafb
 +          "type": "bigint",
 +          "primaryKey": false,
 +          "notNull": true
++        },
++        "description": {
++          "name": "description",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "described_at": {
++          "name": "described_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "described_by": {
++          "name": "described_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "describe_attempts": {
++          "name": "describe_attempts",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 0
++        },
++        "describe_payer_id": {
++          "name": "describe_payer_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "describe_provider": {
++          "name": "describe_provider",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
 +        }
 +      },
 +      "indexes": {
@@ -1159,6 +1269,274 @@ index 0000000..b3cfafb
 +      "checkConstraints": {},
 +      "isRLSEnabled": false
 +    },
++    "public.components": {
++      "name": "components",
++      "schema": "",
++      "columns": {
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "description": {
++          "name": "description",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "template": {
++          "name": "template",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "css": {
++          "name": "css",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "raw_css": {
++          "name": "raw_css",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "head": {
++          "name": "head",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "props": {
++          "name": "props",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "slots": {
++          "name": "slots",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "rev": {
++          "name": "rev",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "main_frame_id": {
++          "name": "main_frame_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "code": {
++          "name": "code",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "source": {
++          "name": "source",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "history": {
++          "name": "history",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "status": {
++          "name": "status",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'active'"
++        },
++        "deleted_at": {
++          "name": "deleted_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "deleted_by": {
++          "name": "deleted_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_by": {
++          "name": "updated_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {
++        "components_canvas_id_id_pk": {
++          "name": "components_canvas_id_id_pk",
++          "columns": ["canvas_id", "id"]
++        }
++      },
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.custom_agents": {
++      "name": "custom_agents",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "scope": {
++          "name": "scope",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "handle": {
++          "name": "handle",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "color": {
++          "name": "color",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "blurb": {
++          "name": "blurb",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "brief": {
++          "name": "brief",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "reviewer": {
++          "name": "reviewer",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "created_by": {
++          "name": "created_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "custom_agents_scope_handle_idx": {
++          "name": "custom_agents_scope_handle_idx",
++          "columns": [
++            {
++              "expression": "scope",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "handle",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "custom_agents_scope_name_idx": {
++          "name": "custom_agents_scope_name_idx",
++          "columns": [
++            {
++              "expression": "scope",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "name",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
 +    "public.decisions": {
 +      "name": "decisions",
 +      "schema": "",
@@ -1390,6 +1768,12 @@ index 0000000..b3cfafb
 +          "primaryKey": false,
 +          "notNull": false
 +        },
++        "claimed_by_resident": {
++          "name": "claimed_by_resident",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": false
++        },
 +        "completed_at": {
 +          "name": "completed_at",
 +          "type": "bigint",
@@ -1410,6 +1794,12 @@ index 0000000..b3cfafb
 +        },
 +        "runner": {
 +          "name": "runner",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "reply": {
++          "name": "reply",
 +          "type": "text",
 +          "primaryKey": false,
 +          "notNull": false
@@ -2022,6 +2412,38 @@ index 0000000..b3cfafb
 +      "checkConstraints": {},
 +      "isRLSEnabled": false
 +    },
++    "public.image_description_prefs": {
++      "name": "image_description_prefs",
++      "schema": "",
++      "columns": {
++        "user_id": {
++          "name": "user_id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "mode": {
++          "name": "mode",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'account'"
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
 +    "public.image_prefs": {
 +      "name": "image_prefs",
 +      "schema": "",
@@ -2043,6 +2465,57 @@ index 0000000..b3cfafb
 +          "type": "bigint",
 +          "primaryKey": false,
 +          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.instance_settings": {
++      "name": "instance_settings",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "email_password_signup": {
++          "name": "email_password_signup",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": true
++        },
++        "sso_auto_redirect": {
++          "name": "sso_auto_redirect",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "default_workspace_id": {
++          "name": "default_workspace_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_by": {
++          "name": "updated_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
 +        }
 +      },
 +      "indexes": {},
@@ -2137,6 +2610,114 @@ index 0000000..b3cfafb
 +      },
 +      "foreignKeys": {},
 +      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.library_components": {
++      "name": "library_components",
++      "schema": "",
++      "columns": {
++        "canvas_id": {
++          "name": "canvas_id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "id": {
++          "name": "id",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "description": {
++          "name": "description",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "template": {
++          "name": "template",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "css": {
++          "name": "css",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "raw_css": {
++          "name": "raw_css",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "head": {
++          "name": "head",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "props": {
++          "name": "props",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "slots": {
++          "name": "slots",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "code": {
++          "name": "code",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "nested": {
++          "name": "nested",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "rev": {
++          "name": "rev",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "published_at": {
++          "name": "published_at",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "published_by": {
++          "name": "published_by",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {
++        "library_components_canvas_id_id_pk": {
++          "name": "library_components_canvas_id_id_pk",
++          "columns": ["canvas_id", "id"]
++        }
++      },
 +      "uniqueConstraints": {},
 +      "policies": {},
 +      "checkConstraints": {},
@@ -2789,6 +3370,18 @@ index 0000000..b3cfafb
 +        },
 +        "reasoning_effort": {
 +          "name": "reasoning_effort",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "custom": {
++          "name": "custom",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "custom_headers": {
++          "name": "custom_headers",
 +          "type": "text",
 +          "primaryKey": false,
 +          "notNull": false
@@ -3511,6 +4104,12 @@ index 0000000..b3cfafb
 +          "type": "text",
 +          "primaryKey": false,
 +          "notNull": false
++        },
++        "reply": {
++          "name": "reply",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
 +        }
 +      },
 +      "indexes": {
@@ -3839,6 +4438,13 @@ index 0000000..b3cfafb
 +          "notNull": true,
 +          "default": 0
 +        },
++        "seats_bought": {
++          "name": "seats_bought",
++          "type": "integer",
++          "primaryKey": false,
++          "notNull": true,
++          "default": 1
++        },
 +        "stripe_customer_id": {
 +          "name": "stripe_customer_id",
 +          "type": "text",
@@ -3867,6 +4473,12 @@ index 0000000..b3cfafb
 +        "billing_event_at": {
 +          "name": "billing_event_at",
 +          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "library_publish": {
++          "name": "library_publish",
++          "type": "text",
 +          "primaryKey": false,
 +          "notNull": false
 +        },
@@ -4494,30 +5106,28 @@ index 0000000..b3cfafb
 +  }
 +}
 diff --git a/server/db/migrations/meta/_journal.json b/server/db/migrations/meta/_journal.json
-index c00750a..421fdb3 100644
+index c5784ed..4b6ca37 100644
 --- a/server/db/migrations/meta/_journal.json
 +++ b/server/db/migrations/meta/_journal.json
-@@ -351,6 +351,13 @@
+@@ -428,6 +428,13 @@
        "when": 1794546908531,
-       "tag": "0050_share_link_password",
+       "tag": "0061_share_link_password",
        "breakpoints": true
 +    },
 +    {
-+      "idx": 51,
++      "idx": 62,
 +      "version": "7",
 +      "when": 1794643680290,
-+      "tag": "0051_webhook_canvases",
++      "tag": "0062_webhook_canvases",
 +      "breakpoints": true
      }
    ]
--}
-\ No newline at end of file
-+}
+ }
 diff --git a/server/db/schema.ts b/server/db/schema.ts
-index f45380b..4630251 100644
+index 6c4de83..b7e3bfb 100644
 --- a/server/db/schema.ts
 +++ b/server/db/schema.ts
-@@ -794,6 +794,8 @@ export const webhooks = pgTable(
+@@ -946,6 +946,8 @@ export const webhooks = pgTable(
      secret: sealedText('secret').notNull(),
      /** subscribed event names (shared/webhooks.ts WEBHOOK_EVENTS) */
      events: jsonb('events').$type<string[]>().notNull(),
@@ -4664,7 +5274,7 @@ index 6f2950e..b7b90af 100644
  /** User-input problems become a 400 with the message; everything else is a 500. */
  type Req = Request<{ id: string }>
 diff --git a/server/webhooks.ts b/server/webhooks.ts
-index 19877c5..213164e 100644
+index 36e5b71..267cb1e 100644
 --- a/server/webhooks.ts
 +++ b/server/webhooks.ts
 @@ -23,7 +23,8 @@ import type { AgentTask, Canvas, ElementComment, Frame } from '../shared/types.t
@@ -4804,7 +5414,7 @@ index 19877c5..213164e 100644
      pageId: c.pageId ?? null,
      x: c.x ?? null,
      y: c.y ?? null,
-@@ -447,6 +480,12 @@ function record(hook: WebhookRecord, ticket: number, result: WebhookDeliveryResu
+@@ -450,6 +483,12 @@ function record(hook: WebhookRecord, ticket: number, result: WebhookDeliveryResu
    )
  }
  
@@ -4817,7 +5427,7 @@ index 19877c5..213164e 100644
  /** Whether an event on this canvas is still this hook's to receive: not
   *  deleted or paused meanwhile, and its owner can still open the canvas.
   *  Asked right before every POST, first attempt included, and before every
-@@ -454,7 +493,7 @@ function record(hook: WebhookRecord, ticket: number, result: WebhookDeliveryResu
+@@ -457,7 +496,7 @@ function record(hook: WebhookRecord, ticket: number, result: WebhookDeliveryResu
  function stillDeliverable(hook: WebhookRecord, canvasId: string): boolean {
    if (hooks.get(hook.id) !== hook || !hook.enabled) return false
    const canvas = store.getCanvas(canvasId)
@@ -4826,7 +5436,7 @@ index 19877c5..213164e 100644
  }
  
  async function send(
-@@ -476,13 +515,14 @@ async function send(
+@@ -479,13 +518,14 @@ async function send(
  }
  
  /** The canvas event bus listener: fan an event out to every hook that
@@ -4834,7 +5444,7 @@ index 19877c5..213164e 100644
 + *  subscribed to it, covers the canvas, and whose owner durably has access
 + *  to it. */
  export function onCanvasEvent(canvasId: string, event: CanvasEvent): void {
-   if (!hooks.size) return
+   if (!hooks.size || event.type === 'asset.stored') return
    const canvas = store.getCanvas(canvasId)
    if (!canvas) return
    const targets = [...hooks.values()].filter(

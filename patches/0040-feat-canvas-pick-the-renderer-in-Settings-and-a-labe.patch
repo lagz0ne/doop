@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 02:00:13 +0000
-Subject: [PATCH 40/52] feat(canvas): pick the renderer in Settings, and a
+Subject: [PATCH 40/55] feat(canvas): pick the renderer in Settings, and a
  label that names it
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -426,7 +426,7 @@ index 888f416..d0940c4 100644
  
  /** True when the canvas draws this frame: it has no element of its own. */
 diff --git a/src/lib/i18n/en/canvas.ts b/src/lib/i18n/en/canvas.ts
-index 1aa6298..b36e719 100644
+index 28e162c..c2bd5df 100644
 --- a/src/lib/i18n/en/canvas.ts
 +++ b/src/lib/i18n/en/canvas.ts
 @@ -132,6 +132,37 @@ export const canvas = {
@@ -468,10 +468,10 @@ index 1aa6298..b36e719 100644
    /* onboarding */
    gettingStarted: 'Getting started',
 diff --git a/src/lib/i18n/en/settings.ts b/src/lib/i18n/en/settings.ts
-index fdb72a9..c1e28d2 100644
+index 9638a04..cd8d401 100644
 --- a/src/lib/i18n/en/settings.ts
 +++ b/src/lib/i18n/en/settings.ts
-@@ -62,4 +62,18 @@ export const settings = {
+@@ -85,4 +85,18 @@ export const settings = {
    panelsDocked: 'Docked',
    panelsFloatingNote: 'Panels float over the canvas.',
    panelsDockedNote: 'Panels are docked to the edges.',
@@ -491,7 +491,7 @@ index fdb72a9..c1e28d2 100644
 +  rendererReloadNow: 'Reload now',
  } as const
 diff --git a/src/lib/i18n/pt-BR/canvas.ts b/src/lib/i18n/pt-BR/canvas.ts
-index 5eafd8b..bdc946d 100644
+index 7c8af7f..a738d25 100644
 --- a/src/lib/i18n/pt-BR/canvas.ts
 +++ b/src/lib/i18n/pt-BR/canvas.ts
 @@ -130,6 +130,36 @@ export const canvas: Catalog['canvas'] = {
@@ -532,10 +532,10 @@ index 5eafd8b..bdc946d 100644
    gettingStarted: 'Primeiros passos',
    gettingStartedDescription: 'Dois passos para trazer seu próprio agente para o canvas.',
 diff --git a/src/lib/i18n/pt-BR/settings.ts b/src/lib/i18n/pt-BR/settings.ts
-index 8793e73..caf48b9 100644
+index 9703332..1d337c2 100644
 --- a/src/lib/i18n/pt-BR/settings.ts
 +++ b/src/lib/i18n/pt-BR/settings.ts
-@@ -67,4 +67,18 @@ export const settings: Catalog['settings'] = {
+@@ -90,4 +90,18 @@ export const settings: Catalog['settings'] = {
    panelsDocked: 'Fixos',
    panelsFloatingNote: 'Os painéis flutuam sobre o canvas.',
    panelsDockedNote: 'Os painéis estão fixos nas bordas.',
@@ -712,11 +712,11 @@ index 0000000..4fb709d
 +  }
 +}
 diff --git a/src/lib/viewOptions.ts b/src/lib/viewOptions.ts
-index dd5ccbb..799bdb7 100644
+index 4b0fa2a..eb09e69 100644
 --- a/src/lib/viewOptions.ts
 +++ b/src/lib/viewOptions.ts
-@@ -2,17 +2,25 @@
-    menu or its shortcut, and remembered per browser:
+@@ -3,17 +3,25 @@
+    browser:
     - pixelGrid (⇧'): the hairline grid that fades in from 300%
     - cursors (⌘⌥\ / Ctrl+Alt+\): everyone else's pointer
 -   - comments (⇧C): the comment pins; the Comment tool still shows them */
@@ -858,10 +858,10 @@ index 0000000..48a86e0
 +  })
 +})
 diff --git a/tests/viewOptions.test.ts b/tests/viewOptions.test.ts
-index b1cc4bd..545db54 100644
+index 7e1a786..a22878e 100644
 --- a/tests/viewOptions.test.ts
 +++ b/tests/viewOptions.test.ts
-@@ -39,18 +39,19 @@ describe('viewOptionForKey', () => {
+@@ -11,18 +11,19 @@ import { DEFAULT_VIEW_OPTIONS, parseZoomPercent, readViewOptions, writeViewOptio
  describe('readViewOptions / writeViewOptions', () => {
    afterEach(() => localStorage.clear())
  

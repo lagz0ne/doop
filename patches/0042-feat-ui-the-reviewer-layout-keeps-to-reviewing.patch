@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 04:59:34 +0000
-Subject: [PATCH 42/52] feat(ui): the reviewer layout keeps to reviewing
+Subject: [PATCH 42/55] feat(ui): the reviewer layout keeps to reviewing
 
 A review of the reviewer layout's controls, state by state, asked for less:
 only the Hand and Comment in the dock, nothing of the agents, no design
@@ -38,7 +38,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/components/ActivityPanel.tsx    |  11 +-
  src/components/CanvasDock.tsx       | 192 +++++++++-------------------
- src/components/LayersPanel.tsx      | 170 ++++++++++--------------
+ src/components/LayersPanel.tsx      | 190 +++++++++++----------------
  src/components/PagesPanel.tsx       |  40 ++++--
  src/components/ZoomControls.tsx     |  19 ++-
  src/lib/i18n/en/canvas.ts           |   1 +
@@ -48,13 +48,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  src/pages/CanvasPage.tsx            | 143 +++++++++++----------
  tests/phoneReviewBrowser.test.ts    |  11 ++
  tests/reviewerLayoutBrowser.test.ts |  61 +++++----
- 12 files changed, 306 insertions(+), 347 deletions(-)
+ 12 files changed, 316 insertions(+), 357 deletions(-)
 
 diff --git a/src/components/ActivityPanel.tsx b/src/components/ActivityPanel.tsx
-index 8540f35..56934af 100644
+index 61b8941..c1b6432 100644
 --- a/src/components/ActivityPanel.tsx
 +++ b/src/components/ActivityPanel.tsx
-@@ -58,9 +58,13 @@ export function ActivityPanel({
+@@ -61,9 +61,13 @@ export function ActivityPanel({
    className,
    style,
    resize,
@@ -68,7 +68,7 @@ index 8540f35..56934af 100644
    /* 'inline' when the panel is filling a mobile Sheet rather than floating */
    surface?: PanelSurface
    className?: string
-@@ -71,7 +75,8 @@ export function ActivityPanel({
+@@ -74,7 +78,8 @@ export function ActivityPanel({
    const setTab = useStore((s) => s.setPanelTab)
    const canEdit = useStore(canEditOpenCanvas)
    /* someone who cannot edit sees the comments only (PanelTabButtons) */
@@ -78,7 +78,7 @@ index 8540f35..56934af 100644
    const [, tick] = useState(0)
    const openThreads = useOpenThreadCount()
    const working = useStore((s) => s.tasks.filter((t) => t.agentName && !t.endedAt && !t.failedAt).length)
-@@ -97,7 +102,7 @@ export function ActivityPanel({
+@@ -101,7 +106,7 @@ export function ActivityPanel({
        <PanelTabsRoot value={tab} onValueChange={(next) => setTab(next as typeof tab)}>
          <PanelHeader className="pl-2">
            <PanelTabs aria-label={t('panels.activityPanelAria')}>
@@ -87,7 +87,7 @@ index 8540f35..56934af 100644
                <PanelIconTab value="tasks" icon={<SparkIcon />} title={t('panels.activityAgents')}>
                  {t('panels.activityAgents')}
                  {working > 0 && (
-@@ -124,7 +129,7 @@ export function ActivityPanel({
+@@ -128,7 +133,7 @@ export function ActivityPanel({
              >
                {t('panels.activityComments')}
              </PanelIconTab>
@@ -400,10 +400,10 @@ index 26d551c..fa86666 100644
      </>
    )
 diff --git a/src/components/LayersPanel.tsx b/src/components/LayersPanel.tsx
-index 69b320e..d1a635b 100644
+index 503857c..061eb46 100644
 --- a/src/components/LayersPanel.tsx
 +++ b/src/components/LayersPanel.tsx
-@@ -215,23 +215,12 @@ function visibleRows(frames: Frame[], query: string, expanded: Set<string>): Vis
+@@ -222,23 +222,12 @@ function visibleRows(frames: Frame[], query: string, expanded: Set<string>): Vis
  /** The Layers rail: every frame on the canvas, opening into the element tree
   *  of its HTML. Selection runs both ways — a row selects the element in the
   *  frame, a click in the frame highlights its row. */
@@ -428,7 +428,7 @@ index 69b320e..d1a635b 100644
  }: {
    onAddFrame: () => void
    /* 'inline' when the panel is filling a mobile Sheet rather than floating */
-@@ -239,27 +228,17 @@ export function LayersPanel({
+@@ -246,27 +235,17 @@ export function LayersPanel({
    /** inline only: the sheet's close, in the collapse control's place */
    onClose?: () => void
    resize?: PanelResize
@@ -462,7 +462,7 @@ index 69b320e..d1a635b 100644
    const setTab = useStore((s) => s.setLayersTab)
    /* view and comment links browse the tree; nothing in it moves or changes */
    const readOnly = useStore((s) => !canEditOpenCanvas(s))
-@@ -545,17 +524,37 @@ export function LayersPanel({
+@@ -571,17 +550,37 @@ export function LayersPanel({
      e.stopPropagation()
    }
  
@@ -510,7 +510,7 @@ index 69b320e..d1a635b 100644
        {/* the panel's two faces as icon tabs, the collapse control at the far end */}
        <PanelTabsRoot value={tab} onValueChange={(next) => setTab(next as typeof tab)} className="flex-none">
          <PanelHeader className="h-10 pl-2">
-@@ -567,21 +566,7 @@ export function LayersPanel({
+@@ -605,21 +604,7 @@ export function LayersPanel({
                {t('panels.layersTabTokens')}
              </PanelIconTab>
            </PanelTabs>
@@ -532,8 +532,8 @@ index 69b320e..d1a635b 100644
 +          {collapse}
          </PanelHeader>
        </PanelTabsRoot>
-       {tab === 'tokens' && (
-@@ -594,38 +579,8 @@ export function LayersPanel({
+       {tab === 'components' && <ComponentsPanel />}
+@@ -633,38 +618,8 @@ export function LayersPanel({
            {/* Figma's order: the pages at the top, the frames of the active page
            under them, the search at the bottom within thumb's reach */}
            <PagesPanel />
@@ -573,7 +573,7 @@ index 69b320e..d1a635b 100644
                {t('panels.layersTitle')}
              </span>
              <span className="flex gap-1">
-@@ -725,7 +680,7 @@ export function LayersPanel({
+@@ -752,7 +707,7 @@ export function LayersPanel({
  
  /** The collapsed rail: a narrow column at the panel's spot with the expand
   *  control and the Layers mark. The frame count lives in the tooltip only. */
@@ -582,7 +582,7 @@ index 69b320e..d1a635b 100644
    const setLayersOpen = useStore((s) => s.setLayersOpen)
    const count = usePageCanvas()?.frames.length ?? 0
    const t = useT()
-@@ -743,26 +698,31 @@ export function LayersRailToggle({ docked = false }: { docked?: boolean }) {
+@@ -770,36 +725,41 @@ export function LayersRailToggle({ docked = false }: { docked?: boolean }) {
        <ToolbarControl label={t('panels.layersExpandPanel')} side="right" onClick={() => setLayersOpen(true)}>
          <PanelExpandIcon />
        </ToolbarControl>
@@ -595,6 +595,16 @@ index 69b320e..d1a635b 100644
 -        }}
 -      >
 -        <LayersIcon />
+-      </ToolbarControl>
+-      <ToolbarControl
+-        label={t('components.title')}
+-        side="right"
+-        onClick={() => {
+-          useStore.getState().setLayersTab('components')
+-          setLayersOpen(true)
+-        }}
+-      >
+-        <ComponentIcon />
 -      </ToolbarControl>
 -      <ToolbarControl
 -        label={t('panels.layersTabTokens')}
@@ -620,6 +630,16 @@ index 69b320e..d1a635b 100644
 +            <LayersIcon />
 +          </ToolbarControl>
 +          <ToolbarControl
++            label={t('components.title')}
++            side="right"
++            onClick={() => {
++              useStore.getState().setLayersTab('components')
++              setLayersOpen(true)
++            }}
++          >
++            <ComponentIcon />
++          </ToolbarControl>
++          <ToolbarControl
 +            label={t('panels.layersTabTokens')}
 +            side="right"
 +            onClick={() => {
@@ -635,7 +655,7 @@ index 69b320e..d1a635b 100644
    )
  }
 diff --git a/src/components/PagesPanel.tsx b/src/components/PagesPanel.tsx
-index b183dd0..ecb2cf2 100644
+index 4e0876d..64c570c 100644
 --- a/src/components/PagesPanel.tsx
 +++ b/src/components/PagesPanel.tsx
 @@ -1,4 +1,4 @@
@@ -644,7 +664,7 @@ index b183dd0..ecb2cf2 100644
  import { nanoid } from 'nanoid'
  import { canvasPages } from '../../shared/pages'
  import type { CanvasPageInfo } from '../../shared/types'
-@@ -18,7 +18,15 @@ import { useT } from '@/lib/i18n'
+@@ -19,7 +19,15 @@ import { useT } from '@/lib/i18n'
  export const sectionHeading = 'text-[11px] font-normal text-ink-faint'
  const sectionBtn = 'size-5 rounded-[5px] text-ink-faint hover:bg-paper-deep hover:text-ink'
  
@@ -661,7 +681,7 @@ index b183dd0..ecb2cf2 100644
    const canvas = useStore((s) => s.canvas)
    const activePageId = useStore((s) => s.activePageId)
    const selectedIds = useStore((s) => s.selectedIds)
-@@ -260,13 +268,29 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
+@@ -313,13 +321,29 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
  
    return (
      <div className={cn('flex flex-none flex-col', fill && 'min-h-0 flex-1')}>
@@ -742,7 +762,7 @@ index 77f0d7d..8e34b15 100644
    )
  }
 diff --git a/src/lib/i18n/en/canvas.ts b/src/lib/i18n/en/canvas.ts
-index b36e719..b6c84ae 100644
+index c2bd5df..2609b40 100644
 --- a/src/lib/i18n/en/canvas.ts
 +++ b/src/lib/i18n/en/canvas.ts
 @@ -82,6 +82,7 @@ export const canvas = {
@@ -754,7 +774,7 @@ index b36e719..b6c84ae 100644
    layers: 'Layers',
    importWebsite: 'Import website',
 diff --git a/src/lib/i18n/en/panels.ts b/src/lib/i18n/en/panels.ts
-index 5e0aec8..df003e7 100644
+index ea43b31..3ea7a9d 100644
 --- a/src/lib/i18n/en/panels.ts
 +++ b/src/lib/i18n/en/panels.ts
 @@ -3,8 +3,6 @@
@@ -767,7 +787,7 @@ index 5e0aec8..df003e7 100644
    layersCollapseAll: 'Collapse all',
    layersNewFrame: 'New frame',
 diff --git a/src/lib/i18n/pt-BR/canvas.ts b/src/lib/i18n/pt-BR/canvas.ts
-index bdc946d..fd0774e 100644
+index a738d25..1a20ca2 100644
 --- a/src/lib/i18n/pt-BR/canvas.ts
 +++ b/src/lib/i18n/pt-BR/canvas.ts
 @@ -82,6 +82,7 @@ export const canvas: Catalog['canvas'] = {
@@ -779,7 +799,7 @@ index bdc946d..fd0774e 100644
      'Camadas, importar, exportar, compartilhar, modo Protótipo ou as configurações da sua conta.',
    layers: 'Camadas',
 diff --git a/src/lib/i18n/pt-BR/panels.ts b/src/lib/i18n/pt-BR/panels.ts
-index bb768d9..1548d8c 100644
+index 3d582b7..b769f4a 100644
 --- a/src/lib/i18n/pt-BR/panels.ts
 +++ b/src/lib/i18n/pt-BR/panels.ts
 @@ -3,8 +3,6 @@ import type { Catalog } from '..'
@@ -792,10 +812,10 @@ index bb768d9..1548d8c 100644
    layersCollapseAll: 'Recolher tudo',
    layersNewFrame: 'Novo frame',
 diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
-index d599a6d..64e4637 100644
+index b63d56b..6ee5311 100644
 --- a/src/pages/CanvasPage.tsx
 +++ b/src/pages/CanvasPage.tsx
-@@ -139,7 +139,7 @@ import { AGENTS_MIN, LAYERS_MIN, fitPanelWidths } from '../lib/panelWidths'
+@@ -137,7 +137,7 @@ import { AGENTS_MIN, LAYERS_MIN, fitPanelWidths } from '../lib/panelWidths'
  import { loadCanvasFonts } from '../lib/customFonts'
  import { t as translate, useT } from '../lib/i18n'
  import { NO_INSETS, type StageInsets } from '../lib/viewFit'
@@ -804,16 +824,16 @@ index d599a6d..64e4637 100644
  
  /* The floating chrome's geometry, in px from the canvas area's edges. The
     panels sit 14px in from the edge; on the right the resizable Agents panel
-@@ -409,6 +409,8 @@ export function CanvasPage({
-         /* the composer is an editor's: readers (and guests) have none */
-         const state = useStore.getState()
-         if (guest || !state.canvas || !canEditOpenCanvas(state)) return
-+        /* the reviewer layout's panel is the comments alone (CanvasDock.tsx) */
-+        if (!FULL_UI && getPanelLayout() !== 'docked') return
-         setShowActivity(true)
-         if (useStore.getState().uiHidden) useStore.getState().toggleUiHidden()
-         useStore.getState().setPanelTab('tasks')
-@@ -740,11 +742,14 @@ export function CanvasPage({
+@@ -616,6 +616,8 @@ export function CanvasPage({
+     const state = useStore.getState()
+     /* the composer is an editor's: readers (and guests) have none */
+     if (guest || !state.canvas || !canEditOpenCanvas(state)) return
++    /* the reviewer layout's panel is the comments alone (CanvasDock.tsx) */
++    if (!FULL_UI && getPanelLayout() !== 'docked') return
+     setShowActivity(true)
+     if (state.uiHidden) state.toggleUiHidden()
+     state.setPanelTab('tasks')
+@@ -753,11 +755,14 @@ export function CanvasPage({
    const docked = usePanelLayout() === 'docked' && !isMobile
    const panelSurface = docked ? 'docked' : 'floating'
    /* The reviewer layout (FULL_UI off, floating panels): no top bar, no tool
@@ -833,7 +853,7 @@ index d599a6d..64e4637 100644
    const reviewerLayout = !FULL_UI && !docked
    const deskReview = reviewerLayout && !isMobile
    const [zoomSlot, setZoomSlot] = useState<HTMLElement | null>(null)
-@@ -1098,8 +1103,8 @@ export function CanvasPage({
+@@ -1112,8 +1117,8 @@ export function CanvasPage({
            bounds={stageBounds}
            docked={docked}
            toolsElsewhere={reviewerLayout}
@@ -844,7 +864,7 @@ index d599a6d..64e4637 100644
          />
          <div
            className={cn(
-@@ -1111,31 +1116,34 @@ export function CanvasPage({
+@@ -1125,31 +1130,34 @@ export function CanvasPage({
            style={rulerInset || docked || reviewerLayout ? { top: 'var(--chrome-top)', left: rulerInset } : undefined}
          >
            <div className="pointer-events-none absolute top-3.5 right-[var(--chrome-right)] z-30 flex flex-col items-end gap-2 transition-[right] duration-150 [&>*]:pointer-events-auto max-md:top-[56px] max-md:right-2 max-md:left-2">
@@ -904,16 +924,16 @@ index d599a6d..64e4637 100644
                <Button
                  variant="bare"
                  className="max-w-full items-center gap-2.5 whitespace-normal rounded-[12px] bg-surface px-3.5 py-2.5 text-left font-normal shadow-pop transition-shadow hover:bg-surface hover:shadow-ring-hover sm:max-w-[320px] [&_svg]:text-ink-soft"
-@@ -1156,7 +1164,7 @@ export function CanvasPage({
+@@ -1170,7 +1178,7 @@ export function CanvasPage({
            </div>
            {/* the presence pill in the bar already carries each agent's status
                line; this per-agent stack is only for windows too narrow for it */}
 -          <WorkingNow style={{ left: chrome.left }} className="min-[1180px]:hidden" />
 +          {!reviewerLayout && <WorkingNow style={{ left: chrome.left }} className="min-[1180px]:hidden" />}
            {!readOnly && <Onboarding canvasId={canvasId} />}
+           <IosAppPrompt />
            <AccessBanner guest={guest} onSignUp={onSignUp} onSignIn={onSignIn} />
-           {!isMobile &&
-@@ -1164,7 +1172,7 @@ export function CanvasPage({
+@@ -1179,7 +1187,7 @@ export function CanvasPage({
                <LayersPanel
                  onAddFrame={addFrame}
                  surface={panelSurface}
@@ -922,7 +942,7 @@ index d599a6d..64e4637 100644
                  resize={{
                    label: t('canvas.resizeLayers'),
                    edge: 'right',
-@@ -1178,7 +1186,7 @@ export function CanvasPage({
+@@ -1193,7 +1201,7 @@ export function CanvasPage({
                  }}
                />
              ) : (
@@ -931,7 +951,7 @@ index d599a6d..64e4637 100644
              ))}
            {isMobile && !reviewerLayout && !showActivity && !guest && (
              <MobilePanelTabs
-@@ -1213,6 +1221,7 @@ export function CanvasPage({
+@@ -1227,6 +1235,7 @@ export function CanvasPage({
              <ActivityPanel
                canvasId={canvasId}
                onClose={() => setShowActivity(false)}
@@ -939,7 +959,7 @@ index d599a6d..64e4637 100644
                surface={panelSurface}
                style={{ right: docked ? 0 : EDGE, ...belowDock }}
                resize={{
-@@ -1243,18 +1252,17 @@ export function CanvasPage({
+@@ -1257,18 +1266,17 @@ export function CanvasPage({
            )}
            {reviewerLayout && (
              <>
@@ -965,7 +985,7 @@ index d599a6d..64e4637 100644
                    panelTab={panelTab}
                    panelOpen={showActivity}
                    onPanel={guest ? null : openPanel}
-@@ -1275,7 +1283,6 @@ export function CanvasPage({
+@@ -1289,7 +1297,6 @@ export function CanvasPage({
                    panelTab={panelTab}
                    panelOpen={showActivity}
                    onPanel={guest ? null : openPanel}
@@ -973,7 +993,7 @@ index d599a6d..64e4637 100644
                    inspector={
                      readOnly
                        ? null
-@@ -1308,16 +1315,30 @@ export function CanvasPage({
+@@ -1322,16 +1329,30 @@ export function CanvasPage({
                    {reviewerLayout ? canvas?.name || t('canvas.canvasActions') : t('canvas.canvasActions')}
                  </SheetTitle>
                  <SheetDescription className="mt-1 text-xs text-ink-soft">
@@ -1009,7 +1029,7 @@ index d599a6d..64e4637 100644
                  {!reviewerLayout && (
                    <Button
                      variant="ghost"
-@@ -1366,19 +1387,6 @@ export function CanvasPage({
+@@ -1380,19 +1401,6 @@ export function CanvasPage({
                      <ExportIcon /> {t('canvas.export')}
                    </Button>
                  )}
@@ -1029,7 +1049,7 @@ index d599a6d..64e4637 100644
                  {/* the phone's tool strip has no room for the Edit / Prototype
                      switch, so Prototype mode toggles here */}
                  {!reviewerLayout && (
-@@ -1434,7 +1442,7 @@ export function CanvasPage({
+@@ -1448,7 +1456,7 @@ export function CanvasPage({
                <LayersPanel
                  onAddFrame={addFrame}
                  surface="inline"
@@ -1038,7 +1058,7 @@ index d599a6d..64e4637 100644
                  onClose={() => setShowMobileLayers(false)}
                />
              </SheetContent>
-@@ -1464,7 +1472,12 @@ export function CanvasPage({
+@@ -1478,7 +1486,12 @@ export function CanvasPage({
                className="max-h-[calc(100svh-56px)] gap-0 rounded-t-2xl border-line bg-surface p-0 shadow-pop data-[side=bottom]:h-[min(78svh,680px)]"
              >
                <SheetTitle className="sr-only">{t('canvas.canvasActivity')}</SheetTitle>

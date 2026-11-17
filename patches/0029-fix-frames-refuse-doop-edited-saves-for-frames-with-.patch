@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jim Keeney <jim.keeney@ttalks.show>
 Date: Sun, 15 Nov 2026 05:53:04 +0000
-Subject: [PATCH 29/52] fix(frames): refuse doop:edited saves for frames with
+Subject: [PATCH 29/55] fix(frames): refuse doop:edited saves for frames with
  executable content
 
 A script inside a frame can post the same message the editing runtime posts,
@@ -13,14 +13,14 @@ rendered. Matches canEdit.
 
 Carried unchanged from kgoedecke/doop#505 (ce15a82) until upstream releases it.
 ---
- src/components/FrameView.tsx | 15 +++++++++++++++
- 1 file changed, 15 insertions(+)
+ src/components/FrameView.tsx | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
 
 diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
-index 8cee3b3..756845c 100644
+index a070351..f6f9605 100644
 --- a/src/components/FrameView.tsx
 +++ b/src/components/FrameView.tsx
-@@ -18,6 +18,11 @@ import { throttle } from '../lib/throttle'
+@@ -19,6 +19,11 @@ import { throttle } from '../lib/throttle'
  import { getIdentity } from '../lib/identity'
  import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
  import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
@@ -32,20 +32,21 @@ index 8cee3b3..756845c 100644
  import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
  import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
  import { snapFrame } from '../lib/snap'
-@@ -1421,6 +1426,16 @@ export const FrameView = memo(function FrameView({
-     function onMsg(ev: MessageEvent) {
-       if (ev.source !== iframeRef.current?.contentWindow) return
-       if (ev.data?.type === 'doop:edited' && typeof ev.data.html === 'string') {
-+        /* A script inside the frame can post this message too (the runtime's
-+           own guard only filters messages going INTO the frame), and the save
-+           below would then store frame-authored HTML under the viewer's name.
-+           Only a document without executable content can be an edit session
-+           this panel started, so a frame that carries script, inline handlers
-+           or javascript: URLs, before or after the edit, is never saved from
-+           here; it is still rendered. Matches canEdit, which already refuses
-+           inline editing of script frames. */
-+        const stored = useStore.getState().canvas?.frames.find((f) => f.id === frame.id)?.html ?? ''
-+        if (hasExecutableContent(stored) || hasExecutableContent(ev.data.html)) return
-         // The runtime already has this document. Echoing it through the HTML
-         // throttle can overwrite a newer style edit still waiting to save.
-         localHtml.current = ev.data.html
+@@ -1596,6 +1601,17 @@ export const FrameView = memo(function FrameView({
+   /* serialized edits stream out of the iframe; save through the human path */
+   useEffect(() => {
+     function saveEdited(edited: string, discrete: boolean) {
++      /* A script inside the frame can post doop:edited too (the runtime's
++         own guard only filters messages going INTO the frame), and the save
++         below would then store frame-authored HTML under the viewer's name.
++         Only a document without executable content can be an edit session
++         this panel started, so a frame that carries script, inline handlers
++         or javascript: URLs, before or after the edit, is never saved from
++         here (by message or over the key port); it is still rendered.
++         Matches canEdit, which already refuses inline editing of script
++         frames. */
++      const stored = useStore.getState().canvas?.frames.find((f) => f.id === frame.id)?.html ?? ''
++      if (hasExecutableContent(stored) || hasExecutableContent(edited)) return
+       // The runtime already has this document. Echoing it through the HTML
+       // throttle can overwrite a newer style edit still waiting to save.
+       localHtml.current = edited

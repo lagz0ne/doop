@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 04:35:50 +0000
-Subject: [PATCH 50/52] feat(mcp): agents see where the people on a canvas are
+Subject: [PATCH 50/55] feat(mcp): agents see where the people on a canvas are
  looking
 
 An agent connected over MCP could read any frame it named, but not the
@@ -37,22 +37,22 @@ read back over MCP; another account sees nothing), the parity list.
 ---
  .context/TECHSTACK.md         |   9 +++
  server/index.ts               |   9 +++
- server/mcp.ts                 |  53 ++++++++++++-
+ server/mcp.ts                 |  54 ++++++++++++-
  server/roomFocus.ts           | 119 ++++++++++++++++++++++++++++
  tests/agentToolParity.test.ts |   1 +
  tests/mcpFocus.test.ts        | 145 ++++++++++++++++++++++++++++++++++
- 6 files changed, 335 insertions(+), 1 deletion(-)
+ 6 files changed, 335 insertions(+), 2 deletions(-)
  create mode 100644 server/roomFocus.ts
  create mode 100644 tests/mcpFocus.test.ts
 
 diff --git a/.context/TECHSTACK.md b/.context/TECHSTACK.md
-index f7c4f3a..7558b4b 100644
+index 508bdd8..a0113a4 100644
 --- a/.context/TECHSTACK.md
 +++ b/.context/TECHSTACK.md
-@@ -132,6 +132,15 @@
-   `server/pageTools.ts`, its kickoff lists the pages and each frame's page and position, and a
-   run whose only work was arranging counts as delivered (`arrangeWrites`). Tests: the page cases
-   in `mcp-tools.test.ts`, `residentPageTools.test.ts`.
+@@ -239,6 +239,15 @@
+   with posthog-js: every export and Copy as PNG through `src/lib/exportEvents.ts` (`frames_exported`
+   with `source` and `target`, `png_copied`), `prototype_played`, `prototype_interactions_saved`,
+   `text_formatted`, `svg_imported`, `pdf_imported`.
 +- Where people are looking, over MCP (`server/roomFocus.ts`): `get_focus` gives an agent each
 +  person on a canvas now (people with a live room socket; never silent sessions or agents), the
 +  frame they selected (`activeFrameId`, editors only), the page and world rect of their camera
@@ -66,18 +66,18 @@ index f7c4f3a..7558b4b 100644
    activity feed) over one room per canvas.
  - Custom fonts (`shared/fonts.ts`, `server/fonts.ts`, `server/fontFile.ts`): font libraries, one
 diff --git a/server/index.ts b/server/index.ts
-index 9b26aaf..5d69100 100644
+index 43c53bb..d9a7b68 100644
 --- a/server/index.ts
 +++ b/server/index.ts
-@@ -113,6 +113,7 @@ import { isPeerViewport } from '../shared/viewport.ts'
+@@ -172,6 +172,7 @@ import { isPeerViewport } from '../shared/viewport.ts'
  import { exportScaleSuffix, fitExportScale, parseExportScale } from '../shared/exportScale.ts'
  import { emailShare } from './canvasShares.ts'
  import * as userEvents from './userEvents.ts'
 +import { registerRoomReader } from './roomFocus.ts'
- import type { Canvas, ClientMessage, Presence, ServerMessage } from '../shared/types.ts'
+ import type { Actor, Canvas, ClientMessage, Presence, ServerMessage } from '../shared/types.ts'
  
  const PORT = env.PORT
-@@ -254,6 +255,14 @@ function room(canvasId: string): Conn[] {
+@@ -315,6 +316,14 @@ function room(canvasId: string): Conn[] {
    return [...conns.values()].filter((c) => c.canvasId === canvasId)
  }
  
@@ -93,10 +93,10 @@ index 9b26aaf..5d69100 100644
   *  presence is re-announced with the new face (a join for a known clientId
   *  is an update on the client). */
 diff --git a/server/mcp.ts b/server/mcp.ts
-index 502258d..1a67e36 100644
+index 3a1bb68..089fc13 100644
 --- a/server/mcp.ts
 +++ b/server/mcp.ts
-@@ -79,6 +79,7 @@ import { previewOf, previewToolMeta, registerFramePreview, type CanvasPreview }
+@@ -92,6 +92,7 @@ import { previewOf, previewToolMeta, registerFramePreview, type CanvasPreview }
  import * as persist from './db/persist.ts'
  import type { FrameApproval } from '../shared/types.ts'
  import { recordAgentFeedback } from './agentFeedback.ts'
@@ -104,24 +104,25 @@ index 502258d..1a67e36 100644
  import {
    AGENT_IDEA_CATEGORIES,
    AGENT_ISSUE_CATEGORIES,
-@@ -96,6 +97,7 @@ You MUST call get_guide({ topic: "doop-instructions" }) once before using other
- - Review verdicts: changes_requested means a reviewer sent the frame back; its comments say what to change. Find those frames with get_canvas approval_status="changes_requested", read the comments, and revise. Your edit moves the frame to needs_review for another look; do not approve it yourself. Approval does not automatically start an implementation task; follow the human's implementation request.
- - Element links: /c/<canvas_id>?frame=<frame_id>&element=<element_id> identifies one element: the one carrying data-doop-id="<element_id>" in that frame's HTML. Read get_canvas and get_frame and find that attribute before applying the feedback. If no element carries the id any more, ask for an updated reference.
- - Keep data-doop-* attributes on every element you rewrite: data-doop-id is how comments and links point at an element, data-doop-on / data-doop-action carry prototype wiring, data-doop-locked a layer lock. Drop one only together with its element.
-+- Where people are looking: when a human says "this frame", "the one I'm on" or "here" without an id, call get_focus. It names each person on the canvas, the frame they selected and the frames on their screen; without canvas_id it lists the canvases people are on now. get_canvas carries the same as people.
- - Identity: pick an agent_name and reuse the SAME name on every call — your presence and edits are attributed live.
- - Narrate: call set_status with a one-line summary when you start a task and whenever your focus shifts — people watching the canvas see it live next to your name.
- - Creating: create_frame, then stream the design with append_frame_html one complete section at a time (~1–4 KB chunks; start=true on the first, done=true on the last). Each chunk renders the moment it arrives — viewers watch you work.
-@@ -138,7 +140,7 @@ function textWithNudge(data: unknown, nudge: string) {
+@@ -128,7 +129,7 @@ export const INSTRUCTIONS = `Doop is a shared multiplayer design canvas: humans
+ 
+ You MUST call get_guide({ topic: "doop-instructions" }) before using other Doop tools, and again if a long conversation may have dropped it. It lists further topics (images, components, prototypes, redesigns…) to load when a task needs one.
+ 
+-- Call get_canvas before adding or editing frames. Pick one agent_name and pass it on every call; set_status says what you are working on.
++- Call get_canvas before adding or editing frames (get_focus: what people see). Pick one agent_name and pass it on every call; set_status says what you are working on.
+ - HUMAN FEEDBACK blocks in tool results are requests from people on the canvas: handle them before your own plan.
+ - Tokens: colours, fonts and sizes are var(--name) from the canvas's design tokens. No tokens yet: create_tokens before the first frame. Never a palette on a frame's :root.
+ - Components: before the first screen, set up the canvas's component system with create_components (primitives like Button and Input, patterns like nav and card), then compose screens from it. Anything get_canvas lists goes in as <doop-use component="Name" …>, never redrawn.
+@@ -167,7 +168,7 @@ function textWithNudge(data: unknown, nudge: string) {
  const REVIEW_NUDGE =
    'You have not seen this design yet. Call get_frame_screenshot on it now, judge it against the review checkpoints (fit, spacing, hierarchy, contrast, alignment, realism), and fix any issues before moving on.'
  
 -import type { Actor, Frame } from '../shared/types.ts'
 +import type { Actor, Canvas, Frame } from '../shared/types.ts'
+ import { loadToolTargets } from './toolLoads.ts'
  
  /** Reaches agents whose session predates set_status (or who skipped the guide). */
- type ToolContent = { content: { type: 'text' | 'image'; [k: string]: unknown }[] }
-@@ -333,6 +335,13 @@ export function buildMcpServer(
+@@ -399,6 +400,13 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
    const noCanvas = (id: string) => err(`no canvas with id ${id} accessible to this account${readOnlyNote(id)}`)
    const noFrame = (id: string) =>
      err(`no frame with id ${id} accessible to this account${readOnlyNote(store.getFrame(id)?.canvasId)}`)
@@ -135,7 +136,7 @@ index 502258d..1a67e36 100644
    /* Feedback is claimed, and set_status nudged, only for agents that may
       act on it: claiming assigns a human's request to this agent, which a
       read-only agent could never carry out. */
-@@ -526,6 +535,46 @@ export function buildMcpServer(
+@@ -596,6 +604,46 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
      },
    )
  
@@ -182,7 +183,7 @@ index 502258d..1a67e36 100644
    server.registerTool(
      'get_canvas',
      {
-@@ -584,12 +633,14 @@ export function buildMcpServer(
+@@ -674,12 +722,14 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
              ]
            : []),
        ]
@@ -194,7 +195,7 @@ index 502258d..1a67e36 100644
              name: c.name,
              pages: canvasPages(c),
 +            ...(people.length ? { people } : {}),
-             frames: shown.map(frameSummary),
+             frames: shown.map((f) => frameSummary(f, images.get(f.id))),
              guidelines: docs.map((d) => ({
                name: d.name,
 diff --git a/server/roomFocus.ts b/server/roomFocus.ts
@@ -323,10 +324,10 @@ index 0000000..d7d13fa
 +  return [...new Set(readRoom().map((r) => r.canvasId))]
 +}
 diff --git a/tests/agentToolParity.test.ts b/tests/agentToolParity.test.ts
-index 7d97b44..4bb8e3a 100644
+index 3f4f9f8..c58189e 100644
 --- a/tests/agentToolParity.test.ts
 +++ b/tests/agentToolParity.test.ts
-@@ -28,6 +28,7 @@ const BY_CONTEXT = [
+@@ -29,6 +29,7 @@ const BY_CONTEXT = [
    'list_canvases', // a resident run is scoped to its canvas
    'create_canvas',
    'get_profile',
