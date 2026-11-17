@@ -34,7 +34,8 @@ import {
 } from '../shared/designTokens.ts'
 import { webFontFamilies, webFontsBrief } from '../shared/webFonts.ts'
 import * as actions from './actions.ts'
-import { elementSnippet, hasElementId } from './elementIds.ts'
+import { elementMarkup, elementSnippet, hasElementId } from './elementIds.ts'
+import { readFrameHtml } from './frameHtmlRead.ts'
 import { canvasRole } from './access.ts'
 import { roleAllows, type CanvasRole } from '../shared/canvasRole.ts'
 import { isAgentKeySecret, verifyAgentKey } from './agentKeys.ts'
@@ -43,7 +44,7 @@ import { auth, getUserName, isBanned } from './auth.ts'
 import { capture, captureThrottled } from './analytics.ts'
 import { captureFeature, captureTokenResults } from './featureEvents.ts'
 import { renderedHeight } from './renderLimits.ts'
-import { renderFrame, renderFrameRegion, type FrameCrop, type FrameRegion } from './screenshot.ts'
+import { inspectFrame, renderFrame, renderFrameRegion, type FrameCrop, type FrameRegion } from './screenshot.ts'
 import { imagesForFrames } from './assets.ts'
 import type { FrameImage } from '../shared/imageDescriptions.ts'
 import {
@@ -1675,7 +1676,7 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
     {
       title: 'Get a frame and its HTML',
       description:
-        'Get a frame including its HTML. Component instances come back as <doop-use> (see the Components section of the guide), and `instances` lists each with its id, props and overridden parts. Write them back the same way. A script holding an agent key can read the same HTML without MCP: GET /api/frames/<frame_id>/html with Authorization: Bearer dpk_… (read-only, needs view access).',
+        "Get a frame including its HTML. Component instances come back as <doop-use> (see the Components section of the guide), and `instances` lists each with its id, props and overridden parts. Write them back the same way. A frame's HTML often runs to 10-40 KB (inlined CSS, fonts, tokens); to edit one part, read only that part: element_id returns the source of the element carrying that data-doop-id, query returns up to five snippets around a literal text, offset/limit pages through the source (limit 1,000-30,000 chars). inspect_frame gives the rendered outline to find what to read. A script holding an agent key can read the same HTML without MCP: GET /api/frames/<frame_id>/html with Authorization: Bearer dpk_… (read-only, needs view access).",
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         frame_id: z.string(),
@@ -1683,24 +1684,93 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
           .boolean()
           .optional()
           .describe('true = every instance written out in full, for when you must read what is rendered'),
+        element_id: z
+          .string()
+          .optional()
+          .describe('Only the source of the element carrying this data-doop-id, children included'),
+        query: z
+          .string()
+          .optional()
+          .describe('Only snippets around this literal text (case-insensitive, up to five matches)'),
+        offset: z.number().int().min(0).optional().describe('Only the source from this character on'),
+        limit: z
+          .number()
+          .int()
+          .min(1000)
+          .max(30_000)
+          .optional()
+          .describe('Characters for query or offset reads (default 20,000)'),
         agent_name: agentName.optional(),
       },
     },
-    async ({ frame_id, expand_components, agent_name }) => {
+    async ({ frame_id, expand_components, element_id, query, offset, limit, agent_name }) => {
       const f = frameFor(frame_id, 'view')
       if (!f) return noFrame(frame_id)
       arrive(f.canvasId, agent_name)
+      const actor = agent_name ? actorFrom(agent_name) : undefined
+      if (element_id && (query || offset !== undefined)) return err('pass element_id, or query / offset, not both')
       const images = (await imagesForFrames([f.id])).get(f.id)
+      /* every read is of the source an agent writes back: instances as
+         <doop-use> unless expand_components asks for them in full */
+      const source = expand_components ? f.html : compactFrameHtml(f)
+      if (element_id) {
+        const markup = elementMarkup(source, element_id)
+        if (markup === undefined)
+          return err(
+            `no element with data-doop-id="${element_id}" in this frame's HTML (it may be made by a script, or sit inside a component instance: pass expand_components)`,
+          )
+        return withFeedbackNotice(
+          text({ ...frameSummary(f, images), elementId: element_id, elementHtml: markup }),
+          f.canvasId,
+          actor,
+        )
+      }
+      if (query || offset !== undefined || limit !== undefined) {
+        const read = readFrameHtml(source, { query, offset, limit })
+        if (!read.ok) return err(read.error)
+        return withFeedbackNotice(text({ ...frameSummary(f, images), htmlRead: read.text }), f.canvasId, actor)
+      }
       const instances = f.html.includes(INSTANCE_ATTR) ? instancesIn(f) : []
       return withFeedbackNotice(
         text({
           ...frameSummary(f, images),
-          html: expand_components ? f.html : compactFrameHtml(f),
+          html: source,
           ...(instances.length ? { instances } : {}),
         }),
         f.canvasId,
-        agent_name ? actorFrom(agent_name) : undefined,
+        actor,
       )
+    },
+  )
+
+  server.registerTool(
+    'inspect_frame',
+    {
+      title: 'Outline a rendered frame',
+      description:
+        "Render a frame and return a compact outline of it instead of its HTML: up to 64 semantic elements (sections, headings, buttons, links, text, images) with their selector (a data-doop-id when the element has one), tag, visible text, box in design px and computed colour and font, plus the frame's palette, fonts, sizes, radii, shadows and CSS variables. A few thousand tokens whatever the HTML's size. Use it to find the part of a large frame to read (get_frame with element_id or query) or to crop (get_frame_screenshot with element_id or region), and to lift a reference frame's look.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: { frame_id: z.string(), agent_name: agentName.optional() },
+    },
+    async ({ frame_id, agent_name }) => {
+      const f = frameFor(frame_id, 'view')
+      if (!f) return noFrame(frame_id)
+      arrive(f.canvasId, agent_name)
+      try {
+        const inspection = await inspectFrame({ ...f })
+        return withFeedbackNotice(
+          text({
+            id: f.id,
+            name: f.name,
+            approvalStatus: f.approval?.status ?? 'draft',
+            ...inspection,
+          }),
+          f.canvasId,
+          agent_name ? actorFrom(agent_name) : undefined,
+        )
+      } catch (e) {
+        return err(`inspect failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
     },
   )
 

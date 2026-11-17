@@ -23,6 +23,7 @@ import { RESIDENT_TASK_LIMIT } from './allowance.ts'
 import * as actions from './actions.ts'
 import { captureFeature, captureTokenResults } from './featureEvents.ts'
 import { inspectFrame, renderFrame } from './screenshot.ts'
+import { MAX_HTML_READ_CHARS, readFrameHtml } from './frameHtmlRead.ts'
 import { AGENT_ROLES, DEFAULT_ROLE_ID, roleById, roleByAgentName, roleName, withoutMentions } from '../shared/agents.ts'
 import type { AgentRole, Roster } from '../shared/agents.ts'
 import { runnerKey } from '../shared/agentRunner.ts'
@@ -118,7 +119,6 @@ const CAPPED_SUMMARY = 'Done. The step limit came before my write-up, so look at
    against a card that somehow keeps requeueing itself */
 const MAX_SWEEP_RUNS = 24
 const LARGE_HTML_CHARS = 60_000
-const MAX_HTML_READ_CHARS = 30_000
 const MAX_REWRITE_CHUNK_CHARS = 12_000
 const MAX_REWRITE_CHARS = 100_000
 
@@ -1971,36 +1971,11 @@ async function runResidentTool(
         const raw = block.input as { query?: string; offset?: number; limit?: number }
         const approval = `Approval: ${JSON.stringify(f.approval ?? { status: 'draft' })}`
         /* instances read as <doop-use>: a long way down from their full markup */
-        const source = compactFrameHtml(f)
-        const query = String(raw.query || '').trim()
-        const limit = Math.max(1000, Math.min(Number(raw.limit) || 20_000, MAX_HTML_READ_CHARS))
-        if (query) {
-          const haystack = source.toLowerCase()
-          const needle = query.toLowerCase()
-          const matches: number[] = []
-          let cursor = 0
-          while (matches.length < 5) {
-            const index = haystack.indexOf(needle, cursor)
-            if (index < 0) break
-            matches.push(index)
-            cursor = index + Math.max(needle.length, 1)
-          }
-          if (matches.length === 0) return fail(`query not found in frame HTML: ${query}`)
-          const perMatch = Math.max(1000, Math.floor(limit / matches.length))
-          const snippets = matches.map((index, match) => {
-            const start = Math.max(0, index - Math.floor(perMatch / 2))
-            const end = Math.min(source.length, start + perMatch)
-            return `--- match ${match + 1} at ${index}, chars ${start}-${end} ---\n${source.slice(start, end)}`
-          })
-          return ok(
-            `Frame HTML: ${source.length} characters; ${matches.length} match(es) for "${query}".\n${approval}\n${snippets.join('\n')}`,
-          )
-        }
-        const offset = Math.max(0, Math.min(Number(raw.offset) || 0, source.length))
-        const end = Math.min(source.length, offset + limit)
-        return ok(
-          `Frame HTML: ${source.length} characters. Returning chars ${offset}-${end}.${end < source.length ? ` Continue with offset=${end}, or use query for a targeted snippet.` : ''}\n${approval}\n\n${source.slice(offset, end)}`,
-        )
+        const read = readFrameHtml(compactFrameHtml(f), raw)
+        if (!read.ok) return fail(read.error)
+        /* the approval line goes under the first line, where it always sat */
+        const [head, ...rest] = read.text.split('\n')
+        return ok([head, approval, ...rest].join('\n'))
       }
       case 'edit_frame_html': {
         const f = store.getFrame(input.frame_id)
