@@ -132,6 +132,15 @@
   `server/pageTools.ts`, its kickoff lists the pages and each frame's page and position, and a
   run whose only work was arranging counts as delivered (`arrangeWrites`). Tests: the page cases
   in `mcp-tools.test.ts`, `residentPageTools.test.ts`.
+- Where people are looking, over MCP (`server/roomFocus.ts`): `get_focus` gives an agent each
+  person on a canvas now (people with a live room socket; never silent sessions or agents), the
+  frame they selected (`activeFrameId`, editors only), the page and world rect of their camera
+  (`viewport`), the frames in it ranked by how much of the screen each fills (up to 12, with the
+  share of each on screen), the frame under their pointer, and `focus` (the selection, else the
+  frame filling the screen most); `you` marks the agent's own account. Without `canvas_id` it lists
+  the readable canvases with people on them. `get_canvas` carries the same as `people`. The room
+  registers the reader at startup (`registerRoomReader`), so the MCP server never imports the
+  room. Tests: `mcpFocus.test.ts`.
 - `ws` 8.18.0 - WebSocket server for realtime multiplayer (cursors, presence, frame edits,
   activity feed) over one room per canvas.
 - Custom fonts (`shared/fonts.ts`, `server/fonts.ts`, `server/fontFile.ts`): font libraries, one

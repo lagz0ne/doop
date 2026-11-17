@@ -79,6 +79,7 @@ import { previewOf, previewToolMeta, registerFramePreview, type CanvasPreview } 
 import * as persist from './db/persist.ts'
 import type { FrameApproval } from '../shared/types.ts'
 import { recordAgentFeedback } from './agentFeedback.ts'
+import { canvasFocus, occupiedCanvasIds } from './roomFocus.ts'
 import {
   AGENT_IDEA_CATEGORIES,
   AGENT_ISSUE_CATEGORIES,
@@ -96,6 +97,7 @@ You MUST call get_guide({ topic: "doop-instructions" }) once before using other 
 - Review verdicts: changes_requested means a reviewer sent the frame back; its comments say what to change. Find those frames with get_canvas approval_status="changes_requested", read the comments, and revise. Your edit moves the frame to needs_review for another look; do not approve it yourself. Approval does not automatically start an implementation task; follow the human's implementation request.
 - Element links: /c/<canvas_id>?frame=<frame_id>&element=<element_id> identifies one element: the one carrying data-doop-id="<element_id>" in that frame's HTML. Read get_canvas and get_frame and find that attribute before applying the feedback. If no element carries the id any more, ask for an updated reference.
 - Keep data-doop-* attributes on every element you rewrite: data-doop-id is how comments and links point at an element, data-doop-on / data-doop-action carry prototype wiring, data-doop-locked a layer lock. Drop one only together with its element.
+- Where people are looking: when a human says "this frame", "the one I'm on" or "here" without an id, call get_focus. It names each person on the canvas, the frame they selected and the frames on their screen; without canvas_id it lists the canvases people are on now. get_canvas carries the same as people.
 - Identity: pick an agent_name and reuse the SAME name on every call — your presence and edits are attributed live.
 - Narrate: call set_status with a one-line summary when you start a task and whenever your focus shifts — people watching the canvas see it live next to your name.
 - Creating: create_frame, then stream the design with append_frame_html one complete section at a time (~1–4 KB chunks; start=true on the first, done=true on the last). Each chunk renders the moment it arrives — viewers watch you work.
@@ -138,7 +140,7 @@ function textWithNudge(data: unknown, nudge: string) {
 const REVIEW_NUDGE =
   'You have not seen this design yet. Call get_frame_screenshot on it now, judge it against the review checkpoints (fit, spacing, hierarchy, contrast, alignment, realism), and fix any issues before moving on.'
 
-import type { Actor, Frame } from '../shared/types.ts'
+import type { Actor, Canvas, Frame } from '../shared/types.ts'
 
 /** Reaches agents whose session predates set_status (or who skipped the guide). */
 type ToolContent = { content: { type: 'text' | 'image'; [k: string]: unknown }[] }
@@ -333,6 +335,13 @@ export function buildMcpServer(
   const noCanvas = (id: string) => err(`no canvas with id ${id} accessible to this account${readOnlyNote(id)}`)
   const noFrame = (id: string) =>
     err(`no frame with id ${id} accessible to this account${readOnlyNote(store.getFrame(id)?.canvasId)}`)
+  /* the people on a canvas now and what they look at; "you" marks the
+     account this agent acts for, who is most likely the one asking */
+  const focusOf = (canvas: Canvas) =>
+    canvasFocus(canvas).map(({ userId, ...focus }) => ({
+      ...focus,
+      ...(ownerId && userId === ownerId ? { you: true } : {}),
+    }))
   /* Feedback is claimed, and set_status nudged, only for agents that may
      act on it: claiming assigns a human's request to this agent, which a
      read-only agent could never carry out. */
@@ -527,6 +536,46 @@ export function buildMcpServer(
   )
 
   server.registerTool(
+    'get_focus',
+    {
+      title: 'See what people are looking at',
+      description:
+        'Where the people on a canvas are right now: for each person, the frame they selected (selectedFrame), the page and world rect on their screen (view), the frames in view with the share of each on screen (framesInView, the most visible first), the frame under their pointer (pointerFrame), and focus, the frame to take as theirs (the selection, else what fills their screen). you: true marks the account you act for. Call it when a human points at a frame without naming it ("this one", "the frame I am on"); then get_frame_screenshot or get_frame on focus.id. Without canvas_id it lists the canvases you can read that have people on them now. Empty when nobody has the canvas open.',
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        canvas_id: z
+          .string()
+          .optional()
+          .describe('The canvas to look at; omit to find canvases with people on them now'),
+        agent_name: agentName.optional(),
+      },
+    },
+    async ({ canvas_id, agent_name }) => {
+      if (!canvas_id) {
+        const open = occupiedCanvasIds().flatMap((id) => {
+          const canvas = canvasFor(id, 'view')
+          return canvas ? [{ id: canvas.id, name: canvas.name, people: focusOf(canvas) }] : []
+        })
+        return text(
+          open.length
+            ? { canvases: open }
+            : { canvases: [], note: 'Nobody has a canvas you can read open right now. Ask for a frame link or id.' },
+        )
+      }
+      const c = canvasFor(canvas_id, 'view')
+      if (!c) return noCanvas(canvas_id)
+      arrive(canvas_id, agent_name)
+      const people = focusOf(c)
+      return text({
+        id: c.id,
+        name: c.name,
+        people,
+        ...(people.length ? {} : { note: 'Nobody has this canvas open right now. Ask for a frame link or id.' }),
+      })
+    },
+  )
+
+  server.registerTool(
     'get_canvas',
     {
       title: 'Get a canvas and its frames',
@@ -584,12 +633,14 @@ export function buildMcpServer(
             ]
           : []),
       ]
+      const people = focusOf(c)
       return withPreview(
         withFeedbackNotice(
           text({
             id: c.id,
             name: c.name,
             pages: canvasPages(c),
+            ...(people.length ? { people } : {}),
             frames: shown.map(frameSummary),
             guidelines: docs.map((d) => ({
               name: d.name,

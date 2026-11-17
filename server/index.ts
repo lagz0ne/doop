@@ -113,6 +113,7 @@ import { isPeerViewport } from '../shared/viewport.ts'
 import { exportScaleSuffix, fitExportScale, parseExportScale } from '../shared/exportScale.ts'
 import { emailShare } from './canvasShares.ts'
 import * as userEvents from './userEvents.ts'
+import { registerRoomReader } from './roomFocus.ts'
 import type { Canvas, ClientMessage, Presence, ServerMessage } from '../shared/types.ts'
 
 const PORT = env.PORT
@@ -253,6 +254,14 @@ const conns = new Map<WebSocket, Conn>()
 function room(canvasId: string): Conn[] {
   return [...conns.values()].filter((c) => c.canvasId === canvasId)
 }
+
+/* MCP agents read where people are looking (server/roomFocus.ts): people
+   only, never a silent session (view-as, a signed-out guest) */
+registerRoomReader((canvasId) =>
+  [...conns.values()]
+    .filter((c) => !c.silent && c.presence.kind === 'user' && (!canvasId || c.canvasId === canvasId))
+    .map((c) => ({ canvasId: c.canvasId, presence: c.presence })),
+)
 
 /** A changed profile photo reaches every room the person is in: their
  *  presence is re-announced with the new face (a join for a known clientId
