@@ -29,6 +29,7 @@ const BY_CONTEXT = [
   'list_canvases', // a resident run is scoped to its canvas
   'create_canvas',
   'get_profile',
+  'get_focus', // a card carries the selection its person made (scope)
 ]
 
 /** Real gaps: MCP agents can do these and resident agents cannot yet. */

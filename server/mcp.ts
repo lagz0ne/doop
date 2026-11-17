@@ -92,6 +92,7 @@ import { previewOf, previewToolMeta, registerFramePreview, type CanvasPreview } 
 import * as persist from './db/persist.ts'
 import type { FrameApproval } from '../shared/types.ts'
 import { recordAgentFeedback } from './agentFeedback.ts'
+import { canvasFocus, occupiedCanvasIds } from './roomFocus.ts'
 import {
   AGENT_IDEA_CATEGORIES,
   AGENT_ISSUE_CATEGORIES,
@@ -128,7 +129,7 @@ export const INSTRUCTIONS = `Doop is a shared multiplayer design canvas: humans 
 
 You MUST call get_guide({ topic: "doop-instructions" }) before using other Doop tools, and again if a long conversation may have dropped it. It lists further topics (images, components, prototypes, redesigns…) to load when a task needs one.
 
-- Call get_canvas before adding or editing frames. Pick one agent_name and pass it on every call; set_status says what you are working on.
+- Call get_canvas before adding or editing frames (get_focus: what people see). Pick one agent_name and pass it on every call; set_status says what you are working on.
 - HUMAN FEEDBACK blocks in tool results are requests from people on the canvas: handle them before your own plan.
 - Tokens: colours, fonts and sizes are var(--name) from the canvas's design tokens. No tokens yet: create_tokens before the first frame. Never a palette on a frame's :root.
 - Components: before the first screen, set up the canvas's component system with create_components (primitives like Button and Input, patterns like nav and card), then compose screens from it. Anything get_canvas lists goes in as <doop-use component="Name" …>, never redrawn.
@@ -167,7 +168,7 @@ function textWithNudge(data: unknown, nudge: string) {
 const REVIEW_NUDGE =
   'You have not seen this design yet. Call get_frame_screenshot on it now, judge it against the review checkpoints (fit, spacing, hierarchy, contrast, alignment, realism), and fix any issues before moving on.'
 
-import type { Actor, Frame } from '../shared/types.ts'
+import type { Actor, Canvas, Frame } from '../shared/types.ts'
 import { loadToolTargets } from './toolLoads.ts'
 
 /** Reaches agents whose session predates set_status (or who skipped the guide). */
@@ -399,6 +400,13 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
   const noCanvas = (id: string) => err(`no canvas with id ${id} accessible to this account${readOnlyNote(id)}`)
   const noFrame = (id: string) =>
     err(`no frame with id ${id} accessible to this account${readOnlyNote(store.getFrame(id)?.canvasId)}`)
+  /* the people on a canvas now and what they look at; "you" marks the
+     account this agent acts for, who is most likely the one asking */
+  const focusOf = (canvas: Canvas) =>
+    canvasFocus(canvas).map(({ userId, ...focus }) => ({
+      ...focus,
+      ...(ownerId && userId === ownerId ? { you: true } : {}),
+    }))
   /* Feedback is claimed, and set_status nudged, only for agents that may
      act on it: claiming assigns a human's request to this agent, which a
      read-only agent could never carry out. */
@@ -597,6 +605,46 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
   )
 
   server.registerTool(
+    'get_focus',
+    {
+      title: 'See what people are looking at',
+      description:
+        'Where the people on a canvas are right now: for each person, the frame they selected (selectedFrame), the page and world rect on their screen (view), the frames in view with the share of each on screen (framesInView, the most visible first), the frame under their pointer (pointerFrame), and focus, the frame to take as theirs (the selection, else what fills their screen). you: true marks the account you act for. Call it when a human points at a frame without naming it ("this one", "the frame I am on"); then get_frame_screenshot or get_frame on focus.id. Without canvas_id it lists the canvases you can read that have people on them now. Empty when nobody has the canvas open.',
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        canvas_id: z
+          .string()
+          .optional()
+          .describe('The canvas to look at; omit to find canvases with people on them now'),
+        agent_name: agentName.optional(),
+      },
+    },
+    async ({ canvas_id, agent_name }) => {
+      if (!canvas_id) {
+        const open = occupiedCanvasIds().flatMap((id) => {
+          const canvas = canvasFor(id, 'view')
+          return canvas ? [{ id: canvas.id, name: canvas.name, people: focusOf(canvas) }] : []
+        })
+        return text(
+          open.length
+            ? { canvases: open }
+            : { canvases: [], note: 'Nobody has a canvas you can read open right now. Ask for a frame link or id.' },
+        )
+      }
+      const c = canvasFor(canvas_id, 'view')
+      if (!c) return noCanvas(canvas_id)
+      arrive(canvas_id, agent_name)
+      const people = focusOf(c)
+      return text({
+        id: c.id,
+        name: c.name,
+        people,
+        ...(people.length ? {} : { note: 'Nobody has this canvas open right now. Ask for a frame link or id.' }),
+      })
+    },
+  )
+
+  server.registerTool(
     'get_canvas',
     {
       title: 'Get a canvas and its frames',
@@ -674,12 +722,14 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
             ]
           : []),
       ]
+      const people = focusOf(c)
       return withPreview(
         withFeedbackNotice(
           text({
             id: c.id,
             name: c.name,
             pages: canvasPages(c),
+            ...(people.length ? { people } : {}),
             frames: shown.map((f) => frameSummary(f, images.get(f.id))),
             guidelines: docs.map((d) => ({
               name: d.name,
