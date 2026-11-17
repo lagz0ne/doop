@@ -399,31 +399,82 @@ export async function inspectFrame(frame: Frame): Promise<FrameInspection> {
   }
 }
 
+/** A part of a frame in design px, as get_frame_screenshot crops it. */
+export interface FrameRegion {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** What to cut out of a frame's render: a region, or the box of the element
+ *  carrying this data-doop-id with `padding` px around it. */
+export type FrameCrop = { region: FrameRegion } | { elementId: string; padding?: number }
+
+/** A crop that names nothing in the frame: the caller's mistake, said as is.
+ *  Told apart by name, so code importing this module's mocks needs no class. */
+export class CropError extends Error {
+  override name = 'CropError'
+}
+
+/** The crop's box, kept inside the frame: the canvas clips a frame to its
+ *  own size, so nothing outside it is part of the design. */
+async function cropBox(page: Page, frame: Frame, crop: FrameCrop): Promise<FrameRegion> {
+  let box: FrameRegion | null
+  if ('region' in crop) box = crop.region
+  else {
+    const id = crop.elementId
+    box = await page.evaluate((id: string) => {
+      const el = document.querySelector(`[data-doop-id="${CSS.escape(id)}"]`)
+      if (!el) return null
+      const r = el.getBoundingClientRect()
+      return { x: r.left + scrollX, y: r.top + scrollY, width: r.width, height: r.height }
+    }, id)
+    if (!box) throw new CropError(`no element with data-doop-id="${id}" in this frame`)
+    const pad = Math.max(0, crop.padding ?? 0)
+    box = { x: box.x - pad, y: box.y - pad, width: box.width + 2 * pad, height: box.height + 2 * pad }
+  }
+  const x = Math.max(0, Math.floor(box.x))
+  const y = Math.max(0, Math.floor(box.y))
+  const right = Math.min(Math.round(frame.width), Math.ceil(box.x + box.width))
+  const bottom = Math.min(Math.round(frame.height), Math.ceil(box.y + box.height))
+  if (right - x < 1 || bottom - y < 1) throw new CropError('the crop is outside the frame or empty')
+  return { x, y, width: right - x, height: bottom - y }
+}
+
 export async function renderFrame(
   frame: Frame,
   /* output pixel density — fractional values downscale huge frames */
   scale: number = 1,
-  opts: { type?: 'png' | 'jpeg' | 'webp'; quality?: number; maxHeight?: number } = {},
+  opts: { type?: 'png' | 'jpeg' | 'webp'; quality?: number; maxHeight?: number; crop?: FrameCrop } = {},
 ): Promise<Buffer> {
+  return (await renderFrameRegion(frame, scale, opts)).image
+}
+
+/** renderFrame, also saying which part of the frame the image shows. */
+export async function renderFrameRegion(
+  frame: Frame,
+  scale: number = 1,
+  opts: { type?: 'png' | 'jpeg' | 'webp'; quality?: number; maxHeight?: number; crop?: FrameCrop } = {},
+): Promise<{ image: Buffer; region: FrameRegion }> {
   const loaded = await loadFramePage(frame)
   const { page } = loaded
   try {
-    await page.setViewport({
-      width: Math.max(1, Math.round(frame.width)),
-      height: Math.max(1, Math.round(frame.height)),
-      deviceScaleFactor: scale,
-    })
+    const width = Math.max(1, Math.round(frame.width))
+    const height = Math.max(1, Math.round(frame.height))
+    await page.setViewport({ width, height, deviceScaleFactor: scale })
     const type = opts.type ?? 'png'
-    const clip =
-      opts.maxHeight && frame.height > opts.maxHeight
-        ? { x: 0, y: 0, width: Math.round(frame.width), height: Math.round(opts.maxHeight) }
+    const clip = opts.crop
+      ? await cropBox(page, frame, opts.crop)
+      : opts.maxHeight && frame.height > opts.maxHeight
+        ? { x: 0, y: 0, width, height: Math.round(opts.maxHeight) }
         : undefined
     const buf = await page.screenshot({
       type,
       ...(type === 'png' ? {} : { quality: opts.quality ?? 90 }),
       ...(clip ? { clip } : {}),
     })
-    return Buffer.from(buf)
+    return { image: Buffer.from(buf), region: clip ?? { x: 0, y: 0, width, height } }
   } finally {
     await loaded.close()
   }
