@@ -1,0 +1,475 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 06:47:30 +0000
+Subject: [PATCH 54/55] test: browser tests reach app modules through the
+ fixture page, and follow v0.15's frame markup
+
+v0.15 serves the browser fixtures as a production build (vite preview), so a
+page can no longer import('/src/...') itself. The fixtures now list the app
+modules our tests drive (store, liveFrames, gpuPictures, gpuLabels,
+renderTrialClient) and expose them as window.testImport(path): the same
+module instances the page uses.
+
+The rest follow upstream's markup and our own first load:
+- a frame's iframe now sits in a bleed wrapper, so its picture is found
+  from the grandparent (zoomPictures, liveFrames);
+- the paper grid is [data-pixel-grid="paper"] (stageGrid);
+- the first load mounts a frame's document only after the labels (0048),
+  so pageCanvas waits for the iframe before counting;
+- frameEdge zooms to 0.1-0.29, where culling shows pictures: it turns
+  culling off to look at live documents.
+---
+ tests/fixtures/canvasClipboard.html | 11 ++++++++++
+ tests/fixtures/pages.html           | 11 ++++++++++
+ tests/frameEdgeBrowser.test.ts      |  3 +++
+ tests/gpuPicturesBrowser.test.ts    | 34 +++++++++++++++--------------
+ tests/liveFramesBrowser.test.ts     | 12 +++++-----
+ tests/pageCanvasBrowser.test.ts     |  7 +++++-
+ tests/phoneReviewBrowser.test.ts    |  6 +++--
+ tests/renderTrialBrowser.test.ts    |  6 ++---
+ tests/reviewerLayoutBrowser.test.ts |  4 +++-
+ tests/shellCullBrowser.test.ts      |  9 ++++----
+ tests/stageGridBrowser.test.ts      |  8 ++++---
+ tests/zoomPicturesBrowser.test.ts   | 10 +++++----
+ 12 files changed, 81 insertions(+), 40 deletions(-)
+
+diff --git a/tests/fixtures/canvasClipboard.html b/tests/fixtures/canvasClipboard.html
+index 8ba273a..6729f62 100644
+--- a/tests/fixtures/canvasClipboard.html
++++ b/tests/fixtures/canvasClipboard.html
+@@ -13,6 +13,17 @@
+       import { pickedSelectors, useStore } from '/src/lib/store.ts'
+       import { clearHistory, undo } from '/src/lib/history.ts'
+       import '/src/styles.css'
++      /* the app modules a test reaches from the page (page.evaluate): the
++         fixtures are a production build, so a test cannot import /src itself.
++         Each is the same instance the page uses. */
++      const testModules = {
++        '/src/lib/store.ts': () => import('/src/lib/store.ts'),
++        '/src/lib/liveFrames.ts': () => import('/src/lib/liveFrames.ts'),
++        '/src/lib/gpuPictures.ts': () => import('/src/lib/gpuPictures.ts'),
++        '/src/lib/gpuLabels.ts': () => import('/src/lib/gpuLabels.ts'),
++        '/src/lib/renderTrialClient.ts': () => import('/src/lib/renderTrialClient.ts'),
++      }
++      window.testImport = (path) => testModules[path]()
+ 
+       window.canvasClipboardHarness = {
+         seed: (frames, role = 'edit') => {
+diff --git a/tests/fixtures/pages.html b/tests/fixtures/pages.html
+index afb1f07..bd156a8 100644
+--- a/tests/fixtures/pages.html
++++ b/tests/fixtures/pages.html
+@@ -21,6 +21,17 @@
+       import { useStore } from '/src/lib/store.ts'
+       import { TooltipProvider } from '/src/components/ui/tooltip.tsx'
+       import '/src/styles.css'
++      /* the app modules a test reaches from the page (page.evaluate): the
++         fixtures are a production build, so a test cannot import /src itself.
++         Each is the same instance the page uses. */
++      const testModules = {
++        '/src/lib/store.ts': () => import('/src/lib/store.ts'),
++        '/src/lib/liveFrames.ts': () => import('/src/lib/liveFrames.ts'),
++        '/src/lib/gpuPictures.ts': () => import('/src/lib/gpuPictures.ts'),
++        '/src/lib/gpuLabels.ts': () => import('/src/lib/gpuLabels.ts'),
++        '/src/lib/renderTrialClient.ts': () => import('/src/lib/renderTrialClient.ts'),
++      }
++      window.testImport = (path) => testModules[path]()
+       window.seedPages = (canvas) => useStore.getState().setCanvas(canvas)
+       window.openPage = (id) => useStore.getState().setActivePage(id)
+       window.pickElement = (frameId, selector) => useStore.getState().pickElement({ frameId, selector })
+diff --git a/tests/frameEdgeBrowser.test.ts b/tests/frameEdgeBrowser.test.ts
+index 2a9e2af..44b8abf 100644
+--- a/tests/frameEdgeBrowser.test.ts
++++ b/tests/frameEdgeBrowser.test.ts
+@@ -82,6 +82,9 @@ describe.skipIf(!findBrowserPath())('frame edge', { timeout: 60_000 }, () => {
+   beforeEach(async () => {
+     page = await pages.open()
+     await page.setViewport({ width: 1200, height: 800, deviceScaleFactor: 1 })
++    /* the edge of a live document, at zooms where culling would show the
++       frame's picture instead */
++    await page.evaluateOnNewDocument(() => localStorage.setItem('doop:cull', 'off'))
+     await page.goto(fixtureUrl('rulers.html'))
+     await page.waitForFunction(() => !!(window as unknown as { rulersHarness?: unknown }).rulersHarness)
+     await page.evaluate(() => document.documentElement.classList.add('dark'))
+diff --git a/tests/gpuPicturesBrowser.test.ts b/tests/gpuPicturesBrowser.test.ts
+index 67a2ed2..561ff65 100644
+--- a/tests/gpuPicturesBrowser.test.ts
++++ b/tests/gpuPicturesBrowser.test.ts
+@@ -45,15 +45,15 @@ const canvas: Canvas = {
+ const PICTURE = [200, 220, 255]
+ 
+ const store = (page: Page, call: string) =>
+-  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
++  page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
+ const drawn = (page: Page) =>
+   page.evaluate(
+-    `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => [...useGpuPictures.getState().drawn].sort())`,
++    `window.testImport('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => [...useGpuPictures.getState().drawn].sort())`,
+   ) as Promise<string[]>
+ const selected = (page: Page) =>
+-  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().selectedIds)`) as Promise<
+-    string[]
+-  >
++  page.evaluate(
++    `window.testImport('/src/lib/store.ts').then(({ useStore }) => useStore.getState().selectedIds)`,
++  ) as Promise<string[]>
+ const previews = (page: Page) => page.evaluate(() => document.querySelectorAll('[data-doop-frame-preview]').length)
+ const shells = (page: Page) => page.evaluate(() => document.querySelectorAll('[data-frame-shell]').length)
+ const shellIds = (page: Page) =>
+@@ -137,7 +137,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
+     })
+     if (webgl)
+       await page.waitForFunction(
+-        `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.size === ${FRAMES})`,
++        `window.testImport('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.size === ${FRAMES})`,
+         { timeout: 30_000 },
+       )
+     await sleep(200)
+@@ -225,7 +225,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
+     await page.mouse.up()
+     await sleep(200)
+     const moved = (await page.evaluate(
+-      `import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().canvas.frames.find((f) => f.id === 'f13'))`,
++      `window.testImport('/src/lib/store.ts').then(({ useStore }) => useStore.getState().canvas.frames.find((f) => f.id === 'f13'))`,
+     )) as { x: number; y: number }
+     expect(moved.x).toBeGreaterThan(5 * 1600 + 300)
+     expect(moved.y).toBeGreaterThan(1100 + 150)
+@@ -257,7 +257,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
+     if (!webgl) ctx.skip()
+     const before = { drawn: await drawn(page), shells: await shells(page) }
+     const woken = (await page.evaluate(
+-      `import('/src/lib/liveFrames.ts').then(({ useLiveFrames }) => useLiveFrames.getState().woken.length)`,
++      `window.testImport('/src/lib/liveFrames.ts').then(({ useLiveFrames }) => useLiveFrames.getState().woken.length)`,
+     )) as number
+     await page.evaluate(() => {
+       const gl = document.querySelector<HTMLCanvasElement>('canvas[data-stage-pictures]')!.getContext('webgl2')!
+@@ -272,7 +272,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
+     expect(await previews(page)).toBeGreaterThanOrEqual(FRAMES - woken)
+     await page.evaluate(() => (window as unknown as { lose: WEBGL_lose_context }).lose.restoreContext())
+     await page.waitForFunction(
+-      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.size === ${before.drawn.length})`,
++      `window.testImport('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.size === ${before.drawn.length})`,
+       { timeout: 15_000 },
+     )
+     expect(await drawn(page)).toEqual(before.drawn)
+@@ -335,7 +335,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
+       `upsertFrame({ ...useStore.getState().canvas.frames.find((f) => f.id === 'f3'), id: 'f40', x: 0, y: 5500 })`,
+     )
+     await page.waitForFunction(
+-      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.has('f40'))`,
++      `window.testImport('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.has('f40'))`,
+       { timeout: 10_000 },
+     )
+     expect(await centre(40)).toEqual(PICTURE)
+@@ -351,7 +351,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
+     await store(page, `upsertFrame(${JSON.stringify(frame('f6'))})`)
+     await store(page, `upsertFrame(${JSON.stringify(frame('f7'))})`)
+     await page.waitForFunction(
+-      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => ['f6', 'f7'].every((id) => useGpuPictures.getState().drawn.has(id)))`,
++      `window.testImport('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => ['f6', 'f7'].every((id) => useGpuPictures.getState().drawn.has(id)))`,
+       { timeout: 10_000 },
+     )
+   }, 30_000)
+@@ -405,7 +405,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
+       await nudge()
+     }
+     await page.waitForFunction(
+-      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.has('f24'))`,
++      `window.testImport('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.has('f24'))`,
+       { timeout: 15_000 },
+     )
+     expect((await backing()).width).toBe(1600)
+@@ -432,7 +432,7 @@ describe.skipIf(!findBrowserPath())('GPU picture names', () => {
+       const page = await browser.newPage()
+       await page.setViewport({ width: 800, height: 600, deviceScaleFactor: dpr })
+       await page.goto(fixtureUrl('pages.html'))
+-      const r = (await page.evaluate(`import('/src/lib/gpuLabels.ts').then(({ NameAtlas }) => {
++      const r = (await page.evaluate(`window.testImport('/src/lib/gpuLabels.ts').then(({ NameAtlas }) => {
+         const names = ['Frame 1', 'Checkout, step 2 of 3', 'Linh joined (Linh)', 'Onboarding / Welcome back, Ana', 'WWW iii lll 0123456789']
+         const span = document.createElement('span')
+         span.style.cssText = 'position:absolute;left:0;top:0;white-space:nowrap;font:600 12px sans-serif'
+@@ -463,7 +463,9 @@ describe.skipIf(!findBrowserPath())('GPU pictures on a phone', () => {
+   let stage = { left: 0, top: 0 }
+   const menuOpen = () => page.evaluate(() => !!document.querySelector('[role="menu"]'))
+   const viewport = () =>
+-    page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().viewport)`) as Promise<{
++    page.evaluate(
++      `window.testImport('/src/lib/store.ts').then(({ useStore }) => useStore.getState().viewport)`,
++    ) as Promise<{
+       x: number
+       y: number
+     }>
+@@ -497,7 +499,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures on a phone', () => {
+     const frames = canvas.frames.map(({ pageId: _page, ...frame }) => frame)
+     await page.evaluate((list) => (window as unknown as Harness).canvasClipboardHarness.seed(list), frames)
+     await page.evaluate(
+-      `import('/src/lib/store.ts').then(({ useStore }) => useStore.setState({ uiHidden: false, viewport: { x: 20, y: 60, zoom: 0.08 } }))`,
++      `window.testImport('/src/lib/store.ts').then(({ useStore }) => useStore.setState({ uiHidden: false, viewport: { x: 20, y: 60, zoom: 0.08 } }))`,
+     )
+     stage = await page.evaluate(() => {
+       const r = document.querySelector('.stage')!.getBoundingClientRect()
+@@ -505,7 +507,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures on a phone', () => {
+     })
+     if (webgl)
+       await page.waitForFunction(
+-        `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => ['f2', 'f8', 'f16', 'f17'].every((id) => useGpuPictures.getState().drawn.has(id)))`,
++        `window.testImport('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => ['f2', 'f8', 'f16', 'f17'].every((id) => useGpuPictures.getState().drawn.has(id)))`,
+         { timeout: 30_000 },
+       )
+   }, 60_000)
+diff --git a/tests/liveFramesBrowser.test.ts b/tests/liveFramesBrowser.test.ts
+index 4eeffdb..2e2fb9f 100644
+--- a/tests/liveFramesBrowser.test.ts
++++ b/tests/liveFramesBrowser.test.ts
+@@ -72,7 +72,7 @@ const canvas: Canvas = {
+ const iframes = (page: Page) => page.evaluate(() => document.querySelectorAll('iframe[data-doop-frame]').length)
+ /** call a store action in the page (a string, so the test transform leaves the import alone) */
+ const store = (page: Page, call: string) =>
+-  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
++  page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
+ /** pan/zoom the camera the way the zoom controls do, then let culling settle */
+ async function camera(page: Page, viewport: { x: number; y: number; zoom: number }) {
+   await store(page, `setViewport(${JSON.stringify(viewport)})`)
+@@ -151,13 +151,13 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
+      the shell into a FrameView before it is delivered. */
+   const frameAt = (page: Page, id: string) =>
+     page.evaluate(
+-      `import('/src/lib/store.ts').then(({ useStore }) => { const s = useStore.getState(); const f = s.canvas.frames.find((f) => f.id === '${id}'); return { x: f.x, y: f.y, selected: s.selectedIds.includes('${id}') } })`,
++      `window.testImport('/src/lib/store.ts').then(({ useStore }) => { const s = useStore.getState(); const f = s.canvas.frames.find((f) => f.id === '${id}'); return { x: f.x, y: f.y, selected: s.selectedIds.includes('${id}') } })`,
+     ) as Promise<{ x: number; y: number; selected: boolean }>
+   /** screen point at the middle of a frame, for the current camera */
+   async function middleOf(page: Page, id: string) {
+     const f = await frameAt(page, id)
+     const vp = (await page.evaluate(
+-      `import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().viewport)`,
++      `window.testImport('/src/lib/store.ts').then(({ useStore }) => useStore.getState().viewport)`,
+     )) as { x: number; y: number; zoom: number }
+     const stage = await page.evaluate(() => {
+       const r = document.querySelector('.stage')!.getBoundingClientRect()
+@@ -197,7 +197,7 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
+ 
+   it('keeps a large selection as previews: no document per selected frame', async () => {
+     await page.evaluate(
+-      `import('/src/lib/store.ts').then(({ useStore }) => useStore.setState({ selectedIds: Array.from({ length: 60 }, (_, i) => 'f' + i), selectedId: 'f0' }))`,
++      `window.testImport('/src/lib/store.ts').then(({ useStore }) => useStore.setState({ selectedIds: Array.from({ length: 60 }, (_, i) => 'f' + i), selectedId: 'f0' }))`,
+     )
+     await new Promise((r) => setTimeout(r, 400))
+     expect(await iframes(page)).toBe(0)
+@@ -250,13 +250,13 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
+        picture must be there with it, and gone once the runtime reports the
+        document shown. */
+     const seen = (await page.evaluate(`new Promise((resolve) => {
+-      import('/src/lib/store.ts').then(({ useStore }) => {
++      window.testImport('/src/lib/store.ts').then(({ useStore }) => {
+         useStore.getState().select('f60')
+         const started = performance.now()
+         let covered = false
+         ;(function poll() {
+           const iframe = document.querySelector('iframe[title="Frame 60"]')
+-          const preview = iframe?.parentElement?.querySelector('[data-doop-frame-preview]')
++          const preview = iframe?.parentElement?.parentElement?.querySelector('[data-doop-frame-preview]')
+           if (iframe && preview) covered = true
+           const ms = performance.now() - started
+           if (iframe && !preview) resolve({ covered, shown: true, ms })
+diff --git a/tests/pageCanvasBrowser.test.ts b/tests/pageCanvasBrowser.test.ts
+index db9f05a..cfea68e 100644
+--- a/tests/pageCanvasBrowser.test.ts
++++ b/tests/pageCanvasBrowser.test.ts
+@@ -400,7 +400,12 @@ describe.skipIf(!findBrowserPath())('pages in the URL', { timeout: 30_000 }, ()
+   const open = (search = '', canvas = board) => openCanvasPage(page, frames, search, canvas)
+   const activePage = () =>
+     page.$eval('[data-page-id]:has(button[aria-current="page"])', (row) => row.getAttribute('data-page-id'))
+-  const mounted = () => page.evaluate(() => (window as unknown as { mountedFrames: () => string[] }).mountedFrames())
++  /* a frame's document mounts just after its label on a first load (no
++     throwaway documents), so wait for the first before reading what mounted */
++  const mounted = async () => {
++    await page.waitForSelector('iframe[data-doop-frame]')
++    return page.evaluate(() => (window as unknown as { mountedFrames: () => string[] }).mountedFrames())
++  }
+   const search = () => page.evaluate(() => location.search)
+   async function switchTo(pageId: string) {
+     await page.locator(`[data-page-id="${pageId}"] button`).click()
+diff --git a/tests/phoneReviewBrowser.test.ts b/tests/phoneReviewBrowser.test.ts
+index 8edcd7f..76c2b1f 100644
+--- a/tests/phoneReviewBrowser.test.ts
++++ b/tests/phoneReviewBrowser.test.ts
+@@ -28,7 +28,9 @@ const FRAME: Frame = {
+ }
+ 
+ const store = (page: Page, expr: string) =>
+-  page.evaluate(`import('/src/lib/store.ts').then((m) => { const s = m.useStore.getState(); return ${expr} })`)
++  page.evaluate(
++    `window.testImport('/src/lib/store.ts').then((m) => { const s = m.useStore.getState(); return ${expr} })`,
++  )
+ const dock = '[aria-label="Canvas dock"]'
+ const menuOpen = (page: Page) => page.evaluate(() => !!document.querySelector('[role="menu"]'))
+ const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+@@ -162,7 +164,7 @@ describe.skipIf(!findBrowserPath())('a phone in the reviewer layout', () => {
+     await page.touchscreen.tap(tap.x, tap.y)
+     /* a string: the test file's own transform would rewrite a function's import() */
+     await page.waitForFunction(
+-      `import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().selectedIds.includes('f'))`,
++      `window.testImport('/src/lib/store.ts').then(({ useStore }) => useStore.getState().selectedIds.includes('f'))`,
+       { polling: 100 },
+     )
+   }, 20_000)
+diff --git a/tests/renderTrialBrowser.test.ts b/tests/renderTrialBrowser.test.ts
+index 28dbaca..673d91b 100644
+--- a/tests/renderTrialBrowser.test.ts
++++ b/tests/renderTrialBrowser.test.ts
+@@ -48,7 +48,7 @@ const PNG = Buffer.from(
+ )
+ 
+ const store = (page: Page, call: string) =>
+-  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
++  page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
+ const settle = () => new Promise((r) => setTimeout(r, 600))
+ 
+ async function open(browser: TestBrowser, keys: Record<string, string>): Promise<Page> {
+@@ -79,7 +79,7 @@ async function open(browser: TestBrowser, keys: Record<string, string>): Promise
+ }
+ 
+ const decision = (page: Page) =>
+-  page.evaluate(`import('/src/lib/renderTrialClient.ts').then((m) => m.renderTrial())`) as Promise<{
++  page.evaluate(`window.testImport('/src/lib/renderTrialClient.ts').then((m) => m.renderTrial())`) as Promise<{
+     active: boolean
+     gpu: { level: string; reason: string; mode: string }
+     zoomPictures: { level: string; reason: string }
+@@ -89,7 +89,7 @@ const decision = (page: Page) =>
+  *  wait past its end. */
+ async function gesture(page: Page, steps: number, zoomFrom: number, zoomTo: number, dx: number) {
+   /* a string, so the test runner does not rewrite the page's import() */
+-  await page.evaluate(`import('/src/lib/store.ts').then(async ({ useStore }) => {
++  await page.evaluate(`window.testImport('/src/lib/store.ts').then(async ({ useStore }) => {
+     const start = useStore.getState().viewport
+     for (let i = 1; i <= ${steps}; i++) {
+       await new Promise((r) => requestAnimationFrame(r))
+diff --git a/tests/reviewerLayoutBrowser.test.ts b/tests/reviewerLayoutBrowser.test.ts
+index 129ba44..cffd17c 100644
+--- a/tests/reviewerLayoutBrowser.test.ts
++++ b/tests/reviewerLayoutBrowser.test.ts
+@@ -31,7 +31,9 @@ const FRAME: Frame = {
+ }
+ 
+ const store = (page: Page, expr: string) =>
+-  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { const s = useStore.getState(); return ${expr} })`)
++  page.evaluate(
++    `window.testImport('/src/lib/store.ts').then(({ useStore }) => { const s = useStore.getState(); return ${expr} })`,
++  )
+ const dock = '[aria-label="Canvas dock"]'
+ const shown = (page: Page, selector: string) =>
+   page.evaluate((sel) => {
+diff --git a/tests/shellCullBrowser.test.ts b/tests/shellCullBrowser.test.ts
+index bd99bf7..e4cda83 100644
+--- a/tests/shellCullBrowser.test.ts
++++ b/tests/shellCullBrowser.test.ts
+@@ -45,7 +45,7 @@ const PICTURE = `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="225
+ 
+ /** call a store action in the page (a string, so the test transform leaves the import alone) */
+ const store = (page: Page, call: string) =>
+-  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
++  page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
+ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+ async function camera(page: Page, viewport: { x: number; y: number; zoom: number }) {
+   await store(page, `setViewport(${JSON.stringify(viewport)})`)
+@@ -109,7 +109,7 @@ describe.skipIf(!findBrowserPath())('frame shells far from the view', () => {
+   it('puts a shell back in the same task as the camera reaches it, and takes out the ones it leaves far behind', async () => {
+     await camera(page, { x: 0, y: 0, zoom: 0.25 })
+     const atLast = { x: -LAST.x * 0.25 + 100, y: -LAST.y * 0.25 + 100, zoom: 0.25 }
+-    const jump = await page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => {
++    const jump = await page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => {
+       useStore.getState().setViewport(${JSON.stringify(atLast)})
+       const at = (id) => document.querySelector('[data-frame-shell="' + id + '"]').hidden
+       return { last: at('f199'), first: at('f0') }
+@@ -118,7 +118,7 @@ describe.skipIf(!findBrowserPath())('frame shells far from the view', () => {
+     await sleep(400)
+     /* 2200 px on, frame 199 is past the keep margin but not the drop one: it
+        stays while the camera moves and goes once it rests */
+-    const moved = await page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => {
++    const moved = await page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => {
+       useStore.getState().setViewport(${JSON.stringify({ ...atLast, x: atLast.x - 2200 })})
+       return document.querySelector('[data-frame-shell="f199"]').hidden
+     })`)
+@@ -137,7 +137,8 @@ describe.skipIf(!findBrowserPath())('frame shells far from the view', () => {
+     const y = 300 - LAST.y * zoom
+     await camera(page, { x: startX, y, zoom })
+     await sleep(600)
+-    const misses = (await page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => new Promise((resolve) => {
++    const misses =
++      (await page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => new Promise((resolve) => {
+       const misses = []
+       let x = ${startX}
+       let steps = 0
+diff --git a/tests/stageGridBrowser.test.ts b/tests/stageGridBrowser.test.ts
+index 5f37784..184c044 100644
+--- a/tests/stageGridBrowser.test.ts
++++ b/tests/stageGridBrowser.test.ts
+@@ -41,13 +41,13 @@ const canvas: Canvas = {
+ 
+ const setViewport = (page: Page, vp: { x: number; y: number; zoom: number }) =>
+   page.evaluate(
+-    `import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().setViewport(${JSON.stringify(vp)}) })`,
++    `window.testImport('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().setViewport(${JSON.stringify(vp)}) })`,
+   )
+ const grids = (page: Page) =>
+   page.evaluate(() => {
+     const divs = [...document.querySelectorAll<HTMLElement>('.stage div')]
+     const dots = divs.find((d) => d.className.includes('radial-gradient'))
+-    const pixels = divs.find((d) => d.className.includes('--pixel-line'))
++    const pixels = document.querySelector<HTMLElement>('[data-pixel-grid="paper"]')
+     return {
+       dots: { size: dots?.style.backgroundSize, width: dots?.style.width, transform: dots?.style.transform },
+       pixels: { hidden: pixels?.hidden, size: pixels?.style.backgroundSize, transform: pixels?.style.transform },
+@@ -128,7 +128,9 @@ describe.skipIf(!findBrowserPath())('the stage grids while zooming', () => {
+   it('treats the pixel grid the same way', async () => {
+     await setViewport(page, { x: 0, y: 0, zoom: 4 })
+     await rest()
+-    expect(await grids(page)).toMatchObject({ pixels: { hidden: false, size: '4px 4px', transform: 'translate(-4px, -4px)' } })
++    expect(await grids(page)).toMatchObject({
++      pixels: { hidden: false, size: '4px 4px', transform: 'translate(-4px, -4px)' },
++    })
+     await setViewport(page, { x: 0, y: 0, zoom: 4.1 })
+     const moving = (await grids(page)).pixels
+     expect(moving.size).toBe('4px 4px')
+diff --git a/tests/zoomPicturesBrowser.test.ts b/tests/zoomPicturesBrowser.test.ts
+index 90792a1..2b248a4 100644
+--- a/tests/zoomPicturesBrowser.test.ts
++++ b/tests/zoomPicturesBrowser.test.ts
+@@ -44,7 +44,7 @@ const PNG = Buffer.from(
+ )
+ 
+ const store = (page: Page, call: string) =>
+-  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
++  page.evaluate(`window.testImport('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
+ const settle = () => new Promise((r) => setTimeout(r, 600))
+ 
+ /** each frame's iframe visibility and its picture's, '-' when it has none */
+@@ -53,7 +53,7 @@ const looks = (page: Page) =>
+     const out: Record<string, { iframe: string; picture: string }> = {}
+     for (let i = 0; i < n; i++) {
+       const iframe = document.querySelector<HTMLElement>(`iframe[title="Frame ${i}"]`)
+-      const wrapper = iframe?.parentElement?.querySelector('[data-doop-frame-preview]')?.parentElement
++      const wrapper = iframe?.parentElement?.parentElement?.querySelector('[data-doop-frame-preview]')?.parentElement
+       out[`f${i}`] = {
+         iframe: iframe ? iframe.style.visibility || 'shown' : '-',
+         picture: wrapper ? wrapper.style.visibility || 'shown' : '-',
+@@ -100,7 +100,9 @@ describe.skipIf(!findBrowserPath())('pictures in place of documents while zoomin
+       (n) =>
+         Array.from({ length: n }, (_, i) => {
+           const iframe = document.querySelector(`iframe[title="Frame ${i}"]`)
+-          const img = iframe?.parentElement?.querySelector<HTMLImageElement>('[data-doop-frame-preview] img')
++          const img = iframe?.parentElement?.parentElement?.querySelector<HTMLImageElement>(
++            '[data-doop-frame-preview] img',
++          )
+           return !!img && img.complete && img.naturalWidth > 0
+         }).every(Boolean),
+       { timeout: 15_000 },
+@@ -140,7 +142,7 @@ describe.skipIf(!findBrowserPath())('pictures in place of documents while zoomin
+     await page.waitForFunction(
+       () =>
+         [...document.querySelectorAll('iframe[data-doop-frame]')].every(
+-          (iframe) => !iframe.parentElement?.querySelector('[data-doop-frame-preview]'),
++          (iframe) => !iframe.parentElement?.parentElement?.querySelector('[data-doop-frame-preview]'),
+         ),
+       { timeout: 15_000 },
+     )

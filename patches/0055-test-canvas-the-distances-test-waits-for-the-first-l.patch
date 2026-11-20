@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 08:09:20 +0000
+Subject: [PATCH 55/55] =?UTF-8?q?test(canvas):=20the=20=E2=8C=A5=20distanc?=
+ =?UTF-8?q?es=20test=20waits=20for=20the=20first=20load's=20documents?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The test finds a frame by its index among [data-frame-surface] elements.
+Our first load draws frames as shells until the page's camera rests
+(0048), and a FrameShell has a surface too: for a moment after the load
+each frame had a shell and a view, so index 1 was the left frame's view
+and the pointer measured the selection to itself. Wait for the views, as
+pageCanvas does since 0055.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tests/measureBrowser.test.ts | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/tests/measureBrowser.test.ts b/tests/measureBrowser.test.ts
+index 618dfca..51c6f80 100644
+--- a/tests/measureBrowser.test.ts
++++ b/tests/measureBrowser.test.ts
+@@ -23,6 +23,9 @@ describe.skipIf(!findBrowserPath())('⌥ distances', () => {
+     page.setDefaultTimeout(10_000)
+     await page.setViewport({ width: 1600, height: 1000 })
+     await openCanvasPage(page, [LEFT, RIGHT])
++    /* the first load draws frames as shells until the camera rests, and a shell
++       has a [data-frame-surface] too: wait for the views before counting them */
++    await page.waitForFunction(() => !document.querySelector('[data-frame-shell]'))
+   })
+ 
+   /** a design point of a frame, on screen */

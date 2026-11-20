@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 05:00:19 +0000
+Subject: [PATCH 42/55] fix(canvas): the renderer label names a failed GPU
+ layer GPU, struck through
+
+When the GPU layer was asked for and did not start (or lost its context),
+the label was meant to show "GPU" crossed out. It showed "DOM" crossed out:
+the name was chosen from `gpu`, which is false once the layer failed, so
+the strike landed on the fallback and hid what had failed. The tooltip was
+already right.
+
+rendererName() now picks the name from the state, a failed layer included,
+and the label's text and its data-renderer attribute both read it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/components/RendererLabel.tsx | 12 ++++++++++--
+ src/lib/rendererSetting.ts       |  8 ++++++++
+ tests/rendererSetting.test.ts    | 16 ++++++++++++++++
+ 3 files changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/src/components/RendererLabel.tsx b/src/components/RendererLabel.tsx
+index 06cb245..3c98068 100644
+--- a/src/components/RendererLabel.tsx
++++ b/src/components/RendererLabel.tsx
+@@ -7,6 +7,7 @@ import {
+   isGpuSetting,
+   isZoomPicturesSetting,
+   readRendererSetting,
++  rendererName,
+   rendererState,
+   settingApplied,
+   writeRendererSetting,
+@@ -29,6 +30,12 @@ import {
+ import { ToolbarButton } from './ui/toolbar'
+ import { Tooltip } from './ui/tooltip'
+ 
++const NAME = {
++  live: 'canvas.rendererLive',
++  gpu: 'canvas.rendererGpu',
++  dom: 'canvas.rendererDom',
++} as const satisfies Record<ReturnType<typeof rendererName>, PlainMessageKey>
++
+ const SOURCE: Record<RendererSource, PlainMessageKey> = {
+   trial: 'canvas.rendererSourceTrial',
+   set: 'canvas.rendererSourceSet',
+@@ -64,7 +71,8 @@ export function RendererLabel() {
+     if (writeRendererSetting(next)) setSetting(next)
+   }
+ 
+-  const name = t(state.allLive ? 'canvas.rendererLive' : state.gpu ? 'canvas.rendererGpu' : 'canvas.rendererDom')
++  const renderer = rendererName(state)
++  const name = t(NAME[renderer])
+   const tag = pending
+     ? t('canvas.rendererTagReload')
+     : state.auto
+@@ -92,7 +100,7 @@ export function RendererLabel() {
+         <DropdownMenuTrigger asChild>
+           <ToolbarButton
+             aria-label={t('canvas.rendererAria')}
+-            data-renderer={state.allLive ? 'live' : state.gpu ? 'gpu' : 'dom'}
++            data-renderer={renderer}
+             data-zoom-pictures={state.zoomPictures ? 'on' : 'off'}
+             className="w-auto min-w-0 gap-1 whitespace-nowrap px-1.5 font-mono text-caption sm:w-auto sm:px-1.5"
+           >
+diff --git a/src/lib/rendererSetting.ts b/src/lib/rendererSetting.ts
+index 4fb709d..77b4bd5 100644
+--- a/src/lib/rendererSetting.ts
++++ b/src/lib/rendererSetting.ts
+@@ -131,3 +131,11 @@ export function rendererState(
+     auto: gpuSource === 'trial' || zoomSource === 'trial',
+   }
+ }
++
++/** The renderer the label names. A GPU layer that was asked for and failed
++ *  is still named GPU (the label strikes it through), not DOM: the shells
++ *  that stand in for it are the fallback, not what this browser runs with. */
++export function rendererName(s: RendererState): 'live' | 'gpu' | 'dom' {
++  if (s.allLive) return 'live'
++  return s.gpu || s.gpuFailed ? 'gpu' : 'dom'
++}
+diff --git a/tests/rendererSetting.test.ts b/tests/rendererSetting.test.ts
+index 48a86e0..f3b8725 100644
+--- a/tests/rendererSetting.test.ts
++++ b/tests/rendererSetting.test.ts
+@@ -4,6 +4,7 @@ import {
+   GPU_KEY,
+   ZOOM_PICTURES_KEY,
+   readRendererSetting,
++  rendererName,
+   rendererState,
+   settingApplied,
+   writeRendererSetting,
+@@ -106,3 +107,18 @@ describe('rendererState', () => {
+     })
+   })
+ })
++
++describe('rendererName', () => {
++  const on = trial({ gpu: { level: 'on', reason: 'override', mode: 'on' } })
++  const off = trial({ gpu: { level: 'off', reason: 'override', mode: 'off' } })
++
++  it('names a failed GPU layer GPU (struck through), not DOM', () => {
++    expect(rendererName(rendererState(on, { culling: true, gpuFailed: true }))).toBe('gpu')
++  })
++
++  it('names what draws otherwise', () => {
++    expect(rendererName(rendererState(on, { culling: true, gpuFailed: false }))).toBe('gpu')
++    expect(rendererName(rendererState(off, { culling: true, gpuFailed: false }))).toBe('dom')
++    expect(rendererName(rendererState(on, { culling: false, gpuFailed: false }))).toBe('live')
++  })
++})

@@ -33,10 +33,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 tests/liveFramesBrowser.test.ts
 
 diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
-index 827bc02..888e876 100644
+index 3dc2ca0..d481f92 100644
 --- a/src/components/FrameView.tsx
 +++ b/src/components/FrameView.tsx
-@@ -17,6 +17,7 @@ import { copyElementLink } from '../lib/elementLink'
+@@ -16,6 +16,7 @@ import { api } from '../lib/api'
  import { sendWs } from '../lib/ws'
  import { throttle } from '../lib/throttle'
  import { getIdentity } from '../lib/identity'
@@ -44,7 +44,7 @@ index 827bc02..888e876 100644
  import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
  import { FRAME_DOCUMENTS_TAKE_ZOOM_AS_DENSITY, counterZoom } from '../lib/layoutZoom'
  import { dropEntry, recordCreate, recordUpdate, recordUpdates, trackSave, type HistoryEntry } from '../lib/history'
-@@ -820,6 +821,21 @@ export const FrameView = memo(function FrameView({
+@@ -815,6 +816,21 @@ export const FrameView = memo(function FrameView({
    const keyPort = useRef<MessagePort | null>(null)
    /* saves a document the runtime serialized after a text edit (set below) */
    const saveEditedRef = useRef<(html: string, discrete: boolean) => void>(() => {})
@@ -66,7 +66,7 @@ index 827bc02..888e876 100644
    useEffect(() => {
      /* a key pressed while the focus sits in this frame's document: replay
         it on the iframe, where it bubbles to the canvas shortcuts as if the
-@@ -1904,6 +1920,7 @@ export const FrameView = memo(function FrameView({
+@@ -1897,6 +1913,7 @@ export const FrameView = memo(function FrameView({
                   belong to the canvas, so neither this box nor the iframe takes them */
                style={{ left: -bleed, top: -bleed, ...(bleed ? { pointerEvents: 'none' } : null) }}
              >
@@ -74,7 +74,7 @@ index 827bc02..888e876 100644
                <iframe
                  ref={iframeRef}
                  className="relative block border-none bg-transparent"
-@@ -1937,6 +1954,23 @@ export const FrameView = memo(function FrameView({
+@@ -1930,6 +1947,23 @@ export const FrameView = memo(function FrameView({
                    ...(isCanvasElement(frame.html) ? { colorScheme: 'light' } : null),
                  }}
                />
@@ -99,11 +99,11 @@ index 827bc02..888e876 100644
              {/* a standalone element is see-through: the paper's grid shows */}
              {!isCanvasElement(frame.html) && <PixelGrid layoutZoom={layoutZoom} />}
 diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
-index ef44249..0fb0308 100644
+index 724664a..d75a2ec 100644
 --- a/src/components/Stage.tsx
 +++ b/src/components/Stage.tsx
-@@ -53,6 +53,8 @@ import { useT, type PlainMessageKey } from '../lib/i18n'
- import { NO_INSETS, fitBox, type StageInsets } from '../lib/viewFit'
+@@ -54,6 +54,8 @@ import { useT, type PlainMessageKey } from '../lib/i18n'
+ import { NO_INSETS, fitBox, fitColumnStart, type StageInsets } from '../lib/viewFit'
  import { spaceWouldScroll } from '../lib/spaceScroll'
  import { ZOOM_DRAG_MIN, ZOOM_TOOL_STEP, zoomAtPoint, zoomToBox } from '../lib/zoomTool'
 +import { isCanvasElement } from '../lib/drawing'
@@ -111,7 +111,7 @@ index ef44249..0fb0308 100644
  
  const MIN_ZOOM = 0.08
  /* The settled world is laid out at up to this zoom too (layoutZoomFor), so
-@@ -348,6 +350,47 @@ export function Stage({
+@@ -367,6 +369,47 @@ export function Stage({
      }
    }, [])
  

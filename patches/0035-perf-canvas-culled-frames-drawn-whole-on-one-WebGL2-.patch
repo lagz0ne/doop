@@ -1,0 +1,2180 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 08:11:44 +0000
+Subject: [PATCH 35/55] perf(canvas): culled frames drawn whole on one WebGL2
+ canvas, no DOM for them (experiment, doop:gpu)
+
+Every FrameShell is its own compositor layer, and Layerize and Commit run per
+layer on every camera frame, so a page of ~190 frames at fit pays ~150 ms of
+Layerize over a 30-event wheel pan. Making the shells cheaper does not help;
+only removing them does. With localStorage 'doop:gpu' = 'on' (or 'force', which
+also accepts a software-rendered context) a culled frame whose preview texture is
+ready has nothing in the render tree: no shell, no name, no hit target.
+Unset, StagePictures renders nothing and FrameSlot keeps today's tree.
+
+What is drawn (gpuPictures.ts, StagePictures.tsx):
+- The picture: one textured quad per frame, rotation included, under the
+  world. Paint order comes from a depth buffer (item i of n at depth
+  1 - 2(i+1)/(n+1), LEQUAL), so stacking matches frames.z.
+- The name (gpuLabels.ts): every distinct name rendered once into a 2D-canvas
+  atlas at the screen's density, in the font, weight, letter spacing and
+  colour read off a hidden probe styled like the shell's title, so it follows
+  the theme and the web font. It keeps 12px on screen at every zoom, LABEL_GAP
+  6 above the frame, and is cut with an ellipsis at the frame's on-screen width
+  by per-grapheme prefix widths measured once (text-overflow's rule). One
+  instanced draw, rebuilt only when the scene, atlas or settled zoom changes;
+  the origin snaps to device px when upright.
+- The hover ring (brand at 55%, 1 screen px), on the canvas.
+
+Which frames: a frame is drawn only when it is a candidate (has HTML, not a
+canvas element, not hidden, locked, approved/under review, synced or GitHub:
+those carry icons or a badge and stay shells), its texture is ready, and
+nothing still in the DOM lies under it or under its name strip, since the
+canvas sits under the world. Selected, live, woken and streaming frames are
+the DOM. A shell under a drawn frame cascades: it keeps the frames over it in
+the DOM too. The set is recomputed at rest, never per camera frame.
+
+Pointer: Stage's onDown asks gpuFrameAt when no shell is hit: arithmetic over
+the drawn list back to front (rotation, the name strip), then the same wake
+and press re-delivery a shell gets. Hover is pointermove arithmetic against a
+cached stage origin (refreshed on resize and press), so it forces no layout.
+
+Fallbacks: context loss hands every frame back to its shell; restore draws
+them again once textures reload. A frame whose texture is not ready, or whose
+name does not fit the atlas, stays a shell.
+
+Camera cost: setCamera writes uniforms and draws; no measuring, allocation or
+React render per frame (~0.4 ms of rAF script for 188 quads, swiftshader).
+
+Measured on a 188-frame page, headless Chromium with GPU compositing
+(swiftshader), wheel pan of 30 events, off/force interleaved, two rounds:
+- layers at fit: 204 -> 9 (shells 188 -> 0, world elements 1130 -> 2);
+  at 60%: 134 -> 31 (shells 182 -> 0)
+- fit: main thread 270-337 -> 128-216 ms, Layerize 136-164 -> 10-18 ms,
+  compositor 196-246 -> 97-120 ms (load 5.2-5.5)
+- 60%: main thread 426-627 -> 236-312 ms, Layerize 188-268 -> 38-46 ms,
+  compositor 266-374 -> 130-173 ms (load 4.9-15.9)
+- names at fit vs the DOM title, 88 boxes: mean |diff| 0.8/255 light,
+  2.5/255 dark; pixels off by more than 32: 0.06% light, 3.3% dark (glyph
+  antialiasing; same cut, position and stacking)
+
+Not done: kerning across the ellipsis cut; DPR > 1 and a hardware GPU are
+untested; picture draws are one call each (instancing needs a texture array).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/components/FrameView.tsx     |   10 +-
+ src/components/Stage.tsx         |   11 +-
+ src/components/StagePictures.tsx |  351 +++++++++++
+ src/lib/gpuLabels.ts             |  177 ++++++
+ src/lib/gpuPictures.ts           | 1006 ++++++++++++++++++++++++++++++
+ tests/gpuPictures.test.ts        |  191 ++++++
+ tests/gpuPicturesBrowser.test.ts |  274 ++++++++
+ 7 files changed, 2013 insertions(+), 7 deletions(-)
+ create mode 100644 src/components/StagePictures.tsx
+ create mode 100644 src/lib/gpuLabels.ts
+ create mode 100644 src/lib/gpuPictures.ts
+ create mode 100644 tests/gpuPictures.test.ts
+ create mode 100644 tests/gpuPicturesBrowser.test.ts
+
+diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
+index 1323bfb..5c3316f 100644
+--- a/src/components/FrameView.tsx
++++ b/src/components/FrameView.tsx
+@@ -17,6 +17,7 @@ import { sendWs } from '../lib/ws'
+ import { throttle } from '../lib/throttle'
+ import { getIdentity } from '../lib/identity'
+ import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
++import { useGpuPicture } from '../lib/gpuPictures'
+ import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
+ import { trackShell } from '../lib/shellCull'
+ import { keepsDocument, registerZoomPicture, zoomPicturesEnabled } from '../lib/zoomPictures'
+@@ -2540,9 +2541,8 @@ export const FrameSlot = memo(function FrameSlot({
+ }) {
+   const awake = useFrameAwake(frame.id)
+   const engaged = useStore((s) => s.selectedIds.includes(frame.id) || !!s.streams[frame.id])
+-  return awake || engaged ? (
+-    <FrameView frame={frame} stack={stack} layoutZoom={layoutZoom} />
+-  ) : (
+-    <FrameShell frame={frame} stack={stack} />
+-  )
++  /* drawn on the Stage's GPU canvas (gpuPictures.ts): nothing of it in the DOM */
++  const gpu = useGpuPicture(frame.id)
++  if (awake || engaged) return <FrameView frame={frame} stack={stack} layoutZoom={layoutZoom} />
++  return gpu ? null : <FrameShell frame={frame} stack={stack} />
+ })
+diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
+index a57c4cf..130bb70 100644
+--- a/src/components/Stage.tsx
++++ b/src/components/Stage.tsx
+@@ -51,6 +51,8 @@ import { TOOLS, isDrawingTool, resolvePointerAction, toolForKey, type Tool } fro
+ import { useCanvasDrawing } from './CanvasDrawing'
+ import { CommentThreadLayer, FrameLabelLayer } from './FrameLabelLayer'
+ import { pixelGridLines } from './PixelGrid'
++import { gpuFrameAt } from '../lib/gpuPictures'
++import { StagePictures } from './StagePictures'
+ import { chromeZoomStale, layoutZoomFor } from '../lib/layoutZoom'
+ import { DOT_PERIOD, GRID_ZOOM_DRIFT, gridPaintZoom, gridStale, gridTransform } from '../lib/stageGrid'
+ import { zoomPicturesActive, zoomPicturesEnabled, zoomPicturesEnd, zoomPicturesStart } from '../lib/zoomPictures'
+@@ -98,6 +100,8 @@ const PEN_CURSOR = {
+   'pen-anchor': 'cursor-pen-anchor! [&_:not([data-comment-ui]_*)]:cursor-pen-anchor!',
+ } as const
+ 
++const NO_FRAMES: Frame[] = []
++
+ /* The world is laid out at CSS zoom k, the settled camera zoom, and its
+    transform carries only what the camera has moved since. WebKit rasterizes a
+    composited layer at its CSS size and stretches it under a scale transform,
+@@ -638,11 +642,12 @@ export function Stage({
+   useEffect(() => {
+     function onDown(e: PointerEvent) {
+       const shell = e.target instanceof Element ? e.target.closest('[data-frame-shell]') : null
+-      const id = shell?.getAttribute('data-frame-shell')
++      /* or on a frame drawn on the GPU canvas, which has no element at all */
++      const id = shell?.getAttribute('data-frame-shell') ?? gpuFrameAt(e)
+       if (!id) return
+       flushSync(() => useLiveFrames.getState().wake(id))
+       const target = document.elementFromPoint(e.clientX, e.clientY)
+-      if (!target || target.closest('[data-frame-shell]')) return
++      if (!target || target === e.target || target.closest('[data-frame-shell]')) return
+       e.stopImmediatePropagation()
+       target.dispatchEvent(
+         new PointerEvent('pointerdown', {
+@@ -1530,6 +1535,8 @@ export function Stage({
+               style={pixelGridLines(1)}
+               ref={pixelGridRef}
+             />
++            {/* culled frames drawn on the GPU, under the frame stack (doop:gpu) */}
++            <StagePictures frames={canvas?.frames ?? NO_FRAMES} stage={ref} />
+             {/* `world` is likewise a behaviour hook: pan hit-testing checks
+             classList.contains('world') to tell background from frame */}
+             <div
+diff --git a/src/components/StagePictures.tsx b/src/components/StagePictures.tsx
+new file mode 100644
+index 0000000..70aa56b
+--- /dev/null
++++ b/src/components/StagePictures.tsx
+@@ -0,0 +1,351 @@
++import { useEffect, useRef, useState, type RefObject } from 'react'
++import type { Frame } from '../../shared/types'
++import { useStore } from '../lib/store'
++import { isCanvasElement } from '../lib/drawing'
++import { isSyncedFrame } from '../lib/sync'
++import { isGithubFrame } from '../lib/github'
++import { cullingEnabled, useLiveFrames } from '../lib/liveFrames'
++import { NameAtlas, type NameStyle } from '../lib/gpuLabels'
++import {
++  PictureRenderer,
++  frameAt,
++  gpuDrawnFrames,
++  gpuMode,
++  nameStrip,
++  pictureSrc,
++  setGpuHitTest,
++  useGpuPictures,
++  type Picture,
++  type PictureFrame,
++} from '../lib/gpuPictures'
++
++const NONE: ReadonlySet<string> = new Set()
++
++type Candidate = PictureFrame & { updatedAt: number }
++
++/** The name as the title shows it: white space collapsed, none at the ends. */
++const shownName = (name: string) => name.replace(/[\t\n\f\r ]+/g, ' ').trim()
++
++function framesOf(frames: readonly Frame[]): Candidate[] {
++  return frames.map((f) => {
++    const element = isCanvasElement(f.html)
++    return {
++      id: f.id,
++      x: f.x,
++      y: f.y,
++      width: f.width,
++      height: f.height,
++      rotation: f.rotation,
++      updatedAt: f.updatedAt,
++      hidden: f.hidden,
++      /* the title of these holds more than the name (a lock, a mark, the
++         review badge), or the shell shows something no picture does */
++      candidate:
++        !!f.html &&
++        !element &&
++        !f.hidden &&
++        !f.locked &&
++        !f.approval &&
++        !isSyncedFrame(f.html) &&
++        !isGithubFrame(f.html),
++      label: element ? '' : shownName(f.name),
++    }
++  })
++}
++
++/** A CSS colour as rgba (0-255, alpha 0-1), through a canvas, which parses
++ *  every colour syntax the page may use (color-mix, oklch). */
++function rgba(color: string): [number, number, number, number] {
++  const c = document.createElement('canvas')
++  c.width = c.height = 1
++  const ctx = c.getContext('2d', { willReadFrequently: true })
++  if (!ctx) return [0, 0, 0, 0]
++  ctx.fillStyle = color
++  ctx.fillRect(0, 0, 1, 1)
++  const [r = 0, g = 0, b = 0, a = 0] = ctx.getImageData(0, 0, 1, 1).data
++  return [r, g, b, a / 255]
++}
++
++/**
++ * The Stage's GPU canvas (gpuPictures.ts), under the frame stack: draws the
++ * culled frames it can stand in for, pictures, names and the hover ring, and
++ * takes them out of the DOM through `useGpuPictures`; a press on one is
++ * resolved here (`setGpuHitTest`) for the Stage to wake it. Renders nothing
++ * unless `doop:gpu` asks for it and culling is on (with culling off every
++ * frame is live, and there is nothing to draw).
++ */
++export function StagePictures({
++  frames,
++  stage,
++}: {
++  frames: readonly Frame[]
++  stage: RefObject<HTMLDivElement | null>
++}) {
++  const [mode] = useState(gpuMode)
++  const [on] = useState(() => mode !== 'off' && cullingEnabled())
++  const canvasRef = useRef<HTMLCanvasElement>(null)
++  const probeRef = useRef<HTMLDivElement>(null)
++  const textRef = useRef<HTMLSpanElement>(null)
++  const markRef = useRef<HTMLSpanElement>(null)
++  const ringRef = useRef<HTMLSpanElement>(null)
++  const control = useRef<{ setFrames(frames: readonly Frame[]): void } | null>(null)
++  const framesRef = useRef(frames)
++
++  useEffect(() => {
++    const canvas = canvasRef.current
++    const el = stage.current
++    const probe = probeRef.current
++    const text = textRef.current
++    const mark = markRef.current
++    const ringProbe = ringRef.current
++    if (!on || !canvas || !el || !probe || !text || !mark || !ringProbe) return
++    let all = framesOf(framesRef.current)
++    let lost = false
++    let drawnList: Candidate[] = []
++    const renderer = PictureRenderer.create(canvas, mode, {
++      lost(isLost) {
++        lost = isLost
++        update()
++      },
++      textures: () => update(),
++    })
++    if (!renderer) return
++    const atlas = new NameAtlas()
++    let style: NameStyle | null = null
++    let styleKey = ''
++    let atlasKey = ''
++    /* the names the atlas was last built from */
++    let tried = new Set<string>()
++    let fontAsked = ''
++    let lastZoom = NaN
++
++    /* The title's look, read off a hidden element styled as it is: the
++       theme's colour, the web font, the line the title sits on. */
++    function restyle() {
++      if (!probe || !text || !mark || !ringProbe) return
++      const cs = getComputedStyle(text)
++      const font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`
++      const box = probe.getBoundingClientRect()
++      const next: NameStyle = {
++        font,
++        letterSpacing: cs.letterSpacing === 'normal' ? '0px' : cs.letterSpacing,
++        color: cs.color,
++        lineHeight: box.height,
++        baseline: mark.getBoundingClientRect().top - box.top,
++      }
++      const dpr = window.devicePixelRatio || 1
++      const key = `${next.font}|${next.letterSpacing}|${next.color}|${next.lineHeight}|${next.baseline}|${dpr}`
++      /* drawn in a fallback font, the names would stay so: wait for the
++         page's own (once; a font that never comes is not waited for) */
++      if (fontAsked !== font && !document.fonts.check(font)) {
++        fontAsked = font
++        document.fonts.load(font).then(restyle, restyle)
++      }
++      const ring = getComputedStyle(ringProbe).color
++      renderer!.setLabels(atlas.style ? atlas : null, rgba(ring))
++      if (key === styleKey) return
++      styleKey = key
++      style = next
++      atlasKey = ''
++      update()
++    }
++
++    /* Draws the names into the atlas when one is missing from it, or the
++       look changed. A name that did not fit keeps its frame in the DOM. */
++    function ensureAtlas() {
++      if (!style) return
++      let missing = atlasKey !== styleKey
++      if (!missing) for (const f of all) if (f.candidate && f.label && !tried.has(f.label)) missing = true
++      if (!missing) return
++      const names = new Set<string>()
++      for (const f of all) if (f.candidate && f.label) names.add(f.label)
++      atlas.build(names, style, window.devicePixelRatio || 1, renderer!.maxTextureSide)
++      tried = names
++      atlasKey = styleKey
++      renderer!.setLabels(atlas, rgba(getComputedStyle(ringProbe!).color))
++    }
++
++    function update() {
++      if (!renderer) return
++      const live = useLiveFrames.getState()
++      const s = useStore.getState()
++      const ids = live.ids
++      if (lost || ids === null || !style) {
++        drawnList = []
++        renderer.setScene([])
++        useGpuPictures.getState().setDrawn(NONE)
++        return
++      }
++      const selected = new Set(s.selectedIds)
++      /* what FrameSlot draws as a FrameView (or HiddenFrameView, selected) */
++      const inDom = (id: string) => selected.has(id) || ids.has(id) || live.woken.includes(id) || !!s.streams[id]
++      ensureAtlas()
++      const pictures: Picture[] = []
++      for (const f of all)
++        if (f.candidate)
++          pictures.push({
++            id: f.id,
++            x: f.x,
++            y: f.y,
++            width: f.width,
++            height: f.height,
++            src: pictureSrc(f, live.previewDensity, live.sharp),
++            later: inDom(f.id),
++          })
++      renderer.setPictures(pictures)
++      lastZoom = s.viewport.zoom
++      const strip = nameStrip(style.lineHeight, lastZoom)
++      const drawn = gpuDrawnFrames(
++        all,
++        inDom,
++        (f) => renderer.hasPicture(f.id) && (!f.label || atlas.cells.has(f.label)),
++        strip,
++      )
++      drawnList = all.filter((f) => drawn.has(f.id))
++      /* the canvas first, in this same task, then the DOM: a frame that
++         leaves it finds itself already drawn in its place */
++      renderer.setScene(drawnList)
++      renderer.drawNow()
++      useGpuPictures.getState().setDrawn(drawn)
++    }
++
++    /* where the stage's content starts on screen: read on a press, and kept
++       for the hover, which must not force a layout on every move */
++    let origin = { left: 0, top: 0 }
++    function readOrigin() {
++      if (!el) return origin
++      const r = el.getBoundingClientRect()
++      origin = { left: r.left + el.clientLeft, top: r.top + el.clientTop }
++      return origin
++    }
++
++    /* the drawn frame under a pointer event, or null off the empty stage */
++    function pageAt(e: { clientX: number; clientY: number; target: EventTarget | null }, at = origin) {
++      if (!el || !style || !drawnList.length) return null
++      const t = e.target
++      if (t !== el && !(t instanceof Element && t.classList.contains('world'))) return null
++      const vp = useStore.getState().viewport
++      const x = (e.clientX - at.left - vp.x) / vp.zoom
++      const y = (e.clientY - at.top - vp.y) / vp.zoom
++      return frameAt(drawnList, x, y, vp.zoom, style.lineHeight)
++    }
++
++    setGpuHitTest((e) => pageAt(e, readOrigin())?.id ?? null)
++
++    /* the shell's hover ring, for a mouse resting over a drawn frame's box */
++    let pointer: PointerEvent | null = null
++    function hover(e: PointerEvent | null) {
++      pointer = e
++      const hit = e && e.pointerType !== 'touch' && e.buttons === 0 ? pageAt(e) : null
++      renderer!.setHover(hit && !hit.name ? hit.id : null)
++    }
++    const onMove = (e: PointerEvent) => hover(e)
++    const onLeave = () => hover(null)
++    el.addEventListener('pointermove', onMove, { passive: true })
++    el.addEventListener('pointerleave', onLeave)
++    el.addEventListener('pointerdown', onLeave, true)
++
++    function measure() {
++      if (!renderer || !el) return
++      renderer.setStage({ width: el.clientWidth, height: el.clientHeight }, window.devicePixelRatio || 1)
++      readOrigin()
++    }
++
++    /* Names are cut at the frame's width and kept a set size on screen, so
++       what the canvas may draw beside DOM frames changes with the zoom: it
++       is worked out again once the camera rests, not per frame. */
++    let rest = 0
++    function camera(vp: { x: number; y: number; zoom: number }) {
++      renderer!.setCamera(vp)
++      window.clearTimeout(rest)
++      rest = window.setTimeout(() => {
++        if (useStore.getState().viewport.zoom !== lastZoom) update()
++        if (pointer) hover(pointer)
++      }, 150)
++    }
++
++    renderer.setCamera(useStore.getState().viewport)
++    measure()
++    restyle()
++    update()
++    control.current = {
++      setFrames(next) {
++        all = framesOf(next)
++        update()
++      },
++    }
++    const unLive = useLiveFrames.subscribe(update)
++    const unStore = useStore.subscribe((s, prev) => {
++      if (s.viewport !== prev.viewport) camera(s.viewport)
++      if (s.selectedIds !== prev.selectedIds || s.streams !== prev.streams) update()
++    })
++    const resize = new ResizeObserver(measure)
++    resize.observe(el)
++    /* the theme flips classes and custom properties on the root */
++    const theme = new MutationObserver(restyle)
++    theme.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style'] })
++    document.fonts.addEventListener('loadingdone', restyle)
++    /* a window moved to a screen of another density */
++    let dpr = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
++    const onDpr = () => {
++      dpr.removeEventListener('change', onDpr)
++      dpr = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
++      dpr.addEventListener('change', onDpr)
++      measure()
++      restyle()
++    }
++    dpr.addEventListener('change', onDpr)
++    return () => {
++      control.current = null
++      setGpuHitTest(null)
++      window.clearTimeout(rest)
++      unLive()
++      unStore()
++      resize.disconnect()
++      theme.disconnect()
++      document.fonts.removeEventListener('loadingdone', restyle)
++      dpr.removeEventListener('change', onDpr)
++      el.removeEventListener('pointermove', onMove)
++      el.removeEventListener('pointerleave', onLeave)
++      el.removeEventListener('pointerdown', onLeave, true)
++      renderer.dispose()
++      useGpuPictures.getState().setDrawn(NONE)
++    }
++  }, [on, mode, stage])
++
++  useEffect(() => {
++    framesRef.current = frames
++    control.current?.setFrames(frames)
++  }, [frames])
++
++  if (!on) return null
++  return (
++    <>
++      <canvas ref={canvasRef} data-stage-pictures="" className="pointer-events-none absolute inset-0 h-full w-full" />
++      {/* styled as a frame's title (FrameShell), for the names drawn above */}
++      <div
++        ref={probeRef}
++        aria-hidden
++        style={{
++          position: 'absolute',
++          left: 0,
++          top: 0,
++          visibility: 'hidden',
++          pointerEvents: 'none',
++          display: 'flex',
++          alignItems: 'center',
++          whiteSpace: 'nowrap',
++          fontSize: 12,
++          fontWeight: 600,
++          color: 'var(--ink-soft)',
++        }}
++      >
++        <span ref={textRef}>
++          Hg
++          <span ref={markRef} style={{ display: 'inline-block', width: 0, height: 0 }} />
++        </span>
++        <span ref={ringRef} style={{ color: 'color-mix(in srgb, var(--brand) 55%, transparent)' }} />
++      </div>
++    </>
++  )
++}
+diff --git a/src/lib/gpuLabels.ts b/src/lib/gpuLabels.ts
+new file mode 100644
+index 0000000..7bfcf92
+--- /dev/null
++++ b/src/lib/gpuLabels.ts
+@@ -0,0 +1,177 @@
++/* Frame names for the GPU picture layer (gpuPictures.ts), as one texture.
++
++   A frame drawn on the Stage's canvas has no element at all, so its name is
++   drawn there too: each distinct name is rendered once, with the font and
++   colour the FrameShell's title has (read off a probe element in the stage,
++   so the theme and the web font are the page's own), into one 2D canvas at
++   the screen's density, and that canvas is the atlas the GL pass samples.
++
++   The name keeps its size on screen at every zoom, so only where it is cut
++   changes with the zoom: the DOM title is the frame's width on screen and
++   ends in an ellipsis when the name is longer. For that each cell carries
++   the width of every prefix of its name, measured once, and a draw picks
++   the longest prefix that leaves room for the ellipsis (`ellipsisCut`), the
++   rule text-overflow follows. Nothing is measured or rendered while the
++   camera moves. */
++
++/** The title's look, read off the probe (StagePictures). */
++export interface NameStyle {
++  /** the canvas `font` shorthand: style, weight, size, family */
++  font: string
++  letterSpacing: string
++  /** the computed CSS colour of the name */
++  color: string
++  /** the title row's height, CSS px */
++  lineHeight: number
++  /** the baseline below the row's top, CSS px */
++  baseline: number
++}
++
++/** One name in the atlas. */
++export interface NameCell {
++  /** the cell in the atlas, device px; the text starts PAD px in */
++  x: number
++  y: number
++  width: number
++  height: number
++  /** the name's advance, CSS px */
++  advance: number
++  /** prefix[k]: the advance of the first k graphemes, CSS px (k = 0…count) */
++  prefix: Float32Array
++  count: number
++}
++
++/** Device px around each cell's text, for ink outside the advance. */
++export const PAD = 2
++
++/** The atlas side, device px, unless the GPU allows less. */
++const ATLAS_SIDE = 4096
++
++const segmenter = typeof Intl !== 'undefined' && 'Segmenter' in Intl ? new Intl.Segmenter() : null
++
++function graphemeEnds(text: string): number[] {
++  if (!segmenter) return Array.from(text, (_, i) => i + 1)
++  const ends: number[] = []
++  for (const s of segmenter.segment(text)) ends.push(s.index + s.segment.length)
++  return ends
++}
++
++/**
++ * How many graphemes of a name to keep before the ellipsis for it to fit in
++ * `width` (CSS px), or -1 when the whole name fits and no ellipsis is drawn.
++ * As text-overflow does: the longest prefix that leaves room for the
++ * ellipsis, down to none (the ellipsis alone, clipped if even it is wider).
++ */
++export function ellipsisCut(prefix: ArrayLike<number>, count: number, ellipsis: number, width: number): number {
++  if ((prefix[count] ?? 0) <= width) return -1
++  const room = width - ellipsis
++  /* the prefixes grow with k: the last one that fits */
++  let lo = 0
++  let hi = count
++  while (lo < hi) {
++    const mid = (lo + hi + 1) >> 1
++    if ((prefix[mid] ?? Infinity) <= room) lo = mid
++    else hi = mid - 1
++  }
++  return lo
++}
++
++/**
++ * The names of the frames drawn on the GPU canvas, rendered into one canvas.
++ * `build` lays out the names it is given (a name shared by several frames is
++ * one cell) and draws them; it measures a name only the first time it sees
++ * it in a font, so a rebuild for a new theme or a renamed frame only redraws.
++ */
++export class NameAtlas {
++  readonly canvas: HTMLCanvasElement
++  private ctx: CanvasRenderingContext2D
++  /** the cells by name; a name missing here did not fit (its frame stays in the DOM) */
++  cells = new Map<string, NameCell>()
++  ellipsis: NameCell | null = null
++  style: NameStyle | null = null
++  dpr = 1
++  /** bumped on every build, so the renderer knows to upload */
++  version = 0
++  private measured = new Map<string, { advance: number; prefix: Float32Array; count: number }>()
++  private measuredFont = ''
++
++  constructor() {
++    this.canvas = document.createElement('canvas')
++    this.ctx = this.canvas.getContext('2d')!
++  }
++
++  private applyFont(style: NameStyle) {
++    const ctx = this.ctx
++    ctx.font = style.font
++    ctx.letterSpacing = style.letterSpacing
++    ctx.fontKerning = 'normal'
++    ctx.textBaseline = 'alphabetic'
++    ctx.textAlign = 'left'
++  }
++
++  private measure(name: string) {
++    const known = this.measured.get(name)
++    if (known) return known
++    const ends = graphemeEnds(name)
++    const prefix = new Float32Array(ends.length + 1)
++    for (let k = 0; k < ends.length; k++) prefix[k + 1] = this.ctx.measureText(name.slice(0, ends[k])).width
++    const m = { advance: prefix[ends.length] ?? 0, prefix, count: ends.length }
++    this.measured.set(name, m)
++    return m
++  }
++
++  /** Lays out and draws `names` (no empty ones) in `style` at `dpr`. */
++  build(names: Iterable<string>, style: NameStyle, dpr: number, maxSide: number) {
++    const ctx = this.ctx
++    const font = `${style.font}|${style.letterSpacing}`
++    if (font !== this.measuredFont) {
++      this.measured.clear()
++      this.measuredFont = font
++    }
++    this.applyFont(style)
++    const side = Math.min(ATLAS_SIDE, maxSide)
++    const cellH = Math.ceil(style.lineHeight * dpr) + 2 * PAD
++    const cells = new Map<string, NameCell>()
++    let x = 0
++    let y = 0
++    const place = (name: string): NameCell | null => {
++      const m = this.measure(name)
++      const width = Math.ceil(m.advance * dpr) + 2 * PAD
++      if (width > side) return null
++      if (x + width > side) {
++        x = 0
++        y += cellH
++      }
++      if (y + cellH > side) return null
++      const cell = { x, y, width, height: cellH, ...m }
++      x += width
++      return cell
++    }
++    const ellipsis = place('…')
++    for (const name of names) {
++      if (cells.has(name)) continue
++      const cell = place(name)
++      if (cell) cells.set(name, cell)
++    }
++    const height = Math.max(1, y + cellH)
++    /* a resize clears the canvas and resets its state */
++    this.canvas.width = side
++    this.canvas.height = height
++    this.applyFont(style)
++    ctx.fillStyle = style.color
++    /* the baseline on a whole device pixel, as the DOM lays text out */
++    const base = Math.round(style.baseline * dpr)
++    const drawCell = (name: string, c: NameCell) => {
++      ctx.setTransform(dpr, 0, 0, dpr, c.x + PAD, c.y + PAD + base)
++      ctx.fillText(name, 0, 0)
++    }
++    if (ellipsis) drawCell('…', ellipsis)
++    for (const [name, c] of cells) drawCell(name, c)
++    ctx.setTransform(1, 0, 0, 1, 0, 0)
++    this.cells = cells
++    this.ellipsis = ellipsis
++    this.style = style
++    this.dpr = dpr
++    this.version++
++  }
++}
+diff --git a/src/lib/gpuPictures.ts b/src/lib/gpuPictures.ts
+new file mode 100644
+index 0000000..f0aa299
+--- /dev/null
++++ b/src/lib/gpuPictures.ts
+@@ -0,0 +1,1006 @@
++import { create } from 'zustand'
++import { PREVIEW_SCALES, previewLevelFor, type PreviewScale } from '../../shared/types'
++import { previewSrc, type Camera, type Size } from './liveFrames'
++import { ellipsisCut, PAD, type NameAtlas, type NameCell } from './gpuLabels'
++
++/* Culled frames drawn on one GPU canvas, with nothing of them in the DOM.
++
++   A frame without its live document is a FrameShell: its preview and its name
++   (liveFrames.ts). Chrome gives every shell a compositor layer of its own,
++   and every camera frame rebuilds the layer list (Layerize) at a cost that
++   follows the number of layers, so on a page of a few hundred frames that
++   rebuild, not drawing, was what a pan cost. Pictures drawn elsewhere while
++   the shells stayed in the DOM for their names and hit testing saved nothing:
++   the layers were still there. Only frames with no element at all leave it.
++
++   So with this on, one WebGL2 canvas under the world draws a culled frame
++   whole, wherever it can stand in for the shell: its picture (the preview the
++   <img> would have asked for), the name above it (from a texture of names,
++   gpuLabels.ts) and the hover ring, and FrameSlot renders nothing for it. A
++   press on the empty stage is resolved to a drawn frame here by arithmetic
++   (`frameAt`), and the Stage wakes it and hands it the press, as it does for
++   a shell. A camera move is one draw: a uniform per picture and one call for
++   every name, no style, layout, paint or layer work.
++
++   A frame is drawn only once its picture is on the GPU and its name is in
++   the texture, and only where it is the plain case: a canvas element, an
++   empty, hidden or locked frame, one with a review badge or a sync or GitHub
++   mark keeps its shell, as does every frame while WebGL2 is missing, the
++   context is lost, or a FrameView lies under it (the canvas is under the
++   whole stack, so it cannot draw a frame above something in the DOM). Live
++   documents stay iframes: they are sandboxed (an opaque origin), so no canvas
++   API may draw them.
++
++   Off unless `localStorage['doop:gpu']` is 'on' (or 'force', which accepts a
++   software GL as well, for measuring on a machine without a GPU). */
++
++export type GpuMode = 'off' | 'on' | 'force'
++
++export function gpuMode(): GpuMode {
++  try {
++    const v = localStorage.getItem('doop:gpu')
++    return v === 'on' || v === 'force' ? v : 'off'
++  } catch {
++    return 'off'
++  }
++}
++
++/** Screen px between a frame's name and its top edge (FrameView's LABEL_GAP). */
++export const LABEL_GAP = 6
++
++/** A frame as this layer sees it, in the page's paint order. */
++export interface PictureFrame {
++  id: string
++  x: number
++  y: number
++  width: number
++  height: number
++  rotation?: number
++  /** the canvas may stand in for its shell: a document with a picture whose
++   *  title is its name alone (no lock, mark or review badge) */
++  candidate: boolean
++  /** hidden: painted only while selected, and never a target (HiddenFrameView) */
++  hidden?: boolean
++  /** the name over the frame as the title lays it out ('' for none) */
++  label: string
++}
++
++export interface Box {
++  x0: number
++  y0: number
++  x1: number
++  y1: number
++}
++
++type Geometry = Pick<PictureFrame, 'x' | 'y' | 'width' | 'height' | 'rotation'>
++
++/** The page box of a frame, turned frames included, with `top` page px of
++ *  its own space above it (its name) counted in. */
++export function frameBounds(f: Geometry, top = 0): Box {
++  const r = f.rotation ? (f.rotation * Math.PI) / 180 : 0
++  const c = Math.cos(r)
++  const s = Math.sin(r)
++  const hw = f.width / 2
++  const hh = f.height / 2
++  const cx = f.x + hw
++  const cy = f.y + hh
++  let x0 = Infinity
++  let y0 = Infinity
++  let x1 = -Infinity
++  let y1 = -Infinity
++  for (const [lx, ly] of [
++    [-hw, -hh - top],
++    [hw, -hh - top],
++    [-hw, hh],
++    [hw, hh],
++  ] as const) {
++    const x = cx + lx * c - ly * s
++    const y = cy + lx * s + ly * c
++    x0 = Math.min(x0, x)
++    y0 = Math.min(y0, y)
++    x1 = Math.max(x1, x)
++    y1 = Math.max(y1, y)
++  }
++  return { x0, y0, x1, y1 }
++}
++
++const overlaps = (a: Box, b: Box) => a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0
++
++/** Page px a frame's name takes above it at `zoom`, gap included: constant on
++ *  screen, so it grows on the page as the camera zooms out. */
++export function nameStrip(lineHeight: number, zoom: number): number {
++  return zoom > 0 && lineHeight > 0 ? (LABEL_GAP + lineHeight) / zoom : 0
++}
++
++/**
++ * The frames the canvas draws. The canvas lies under the whole frame stack,
++ * so it can only stand in for a frame that nothing in the DOM lies under: a
++ * frame overlapping something lower in the paint order that stays in the DOM
++ * (a FrameView, a shell, a canvas element, a selected hidden frame), names
++ * counted (`strip`, page px above each named frame), stays a shell, or the
++ * canvas would draw it beneath what it should cover. Pages lay frames side
++ * by side, so that is the rare case. `ready`: its picture and name are on
++ * the GPU, so the shell has nothing left to show.
++ */
++export function gpuDrawnFrames(
++  frames: readonly PictureFrame[],
++  inDom: (id: string) => boolean,
++  ready: (f: PictureFrame) => boolean,
++  strip: number,
++): Set<string> {
++  const drawn = new Set<string>()
++  const below: Box[] = []
++  for (const f of frames) {
++    const dom = inDom(f.id)
++    if (!dom && f.hidden) continue
++    const box = frameBounds(f, f.label ? strip : 0)
++    if (!dom && f.candidate && ready(f) && !below.some((b) => overlaps(b, box))) {
++      drawn.add(f.id)
++      continue
++    }
++    below.push(box)
++  }
++  return drawn
++}
++
++/**
++ * The topmost of `frames` (paint order, back to front) at page point x, y:
++ * on its box, turned as it is, or on its name, the strip the DOM title
++ * covers (the frame's width, a line high, LABEL_GAP screen px above it; the
++ * gap itself is not part of it).
++ */
++export function frameAt(
++  frames: readonly Pick<PictureFrame, 'id' | 'x' | 'y' | 'width' | 'height' | 'rotation' | 'label'>[],
++  x: number,
++  y: number,
++  zoom: number,
++  lineHeight: number,
++): { id: string; name: boolean } | null {
++  const top = nameStrip(lineHeight, zoom)
++  const gap = zoom > 0 ? LABEL_GAP / zoom : 0
++  for (let i = frames.length - 1; i >= 0; i--) {
++    const f = frames[i]!
++    const hw = f.width / 2
++    const hh = f.height / 2
++    let dx = x - f.x - hw
++    let dy = y - f.y - hh
++    if (f.rotation) {
++      const r = (-f.rotation * Math.PI) / 180
++      const c = Math.cos(r)
++      const s = Math.sin(r)
++      const ux = dx * c - dy * s
++      dy = dx * s + dy * c
++      dx = ux
++    }
++    const lx = dx + hw
++    const ly = dy + hh
++    if (lx < 0 || lx > f.width) continue
++    if (ly >= 0 && ly <= f.height) return { id: f.id, name: false }
++    if (f.label && ly >= -top && ly < -gap) return { id: f.id, name: true }
++  }
++  return null
++}
++
++/** The preview a drawn frame shows: the level `usePreviewLevel` would pick. */
++export function pictureSrc(
++  frame: { id: string; width: number; height: number; updatedAt: number },
++  density: number | null,
++  sharp: ReadonlySet<string>,
++): string | null {
++  if (density === null) return null
++  const level: PreviewScale | null = sharp.has(frame.id) ? previewLevelFor(frame, density) : (PREVIEW_SCALES[0] ?? null)
++  return level === null ? null : previewSrc(frame.id, frame.updatedAt, level)
++}
++
++interface GpuPicturesState {
++  /** the frames the canvas draws: FrameSlot renders nothing for them */
++  drawn: ReadonlySet<string>
++  setDrawn(drawn: ReadonlySet<string>): void
++}
++
++function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
++  if (a.size !== b.size) return false
++  for (const id of a) if (!b.has(id)) return false
++  return true
++}
++
++export const useGpuPictures = create<GpuPicturesState>((set, get) => ({
++  drawn: new Set(),
++  setDrawn(drawn) {
++    if (!sameSet(get().drawn, drawn)) set({ drawn })
++  },
++}))
++
++/** True when the canvas draws this frame: it has no element of its own. */
++export function useGpuPicture(frameId: string): boolean {
++  return useGpuPictures((s) => s.drawn.has(frameId))
++}
++
++let hitTest: ((e: PointerEvent) => string | null) | null = null
++
++/** Set by the Stage's canvas while it draws frames (StagePictures). */
++export function setGpuHitTest(test: ((e: PointerEvent) => string | null) | null) {
++  hitTest = test
++}
++
++/** The drawn frame a press on the empty stage landed on, if any: the Stage
++ *  wakes it and hands it the press, as it does for a shell. */
++export function gpuFrameAt(e: PointerEvent): string | null {
++  return hitTest ? hitTest(e) : null
++}
++
++/* ---- the renderer ---- */
++
++/** A picture to keep on the GPU: every frame the canvas could draw, so it is
++ *  ready when the frame is culled. */
++export interface Picture {
++  id: string
++  x: number
++  y: number
++  width: number
++  height: number
++  /** null while there is none to ask for */
++  src: string | null
++  /** in the DOM now (live): fetched after the others */
++  later: boolean
++}
++
++const PICTURE_VERTEX = `#version 300 es
++precision highp float;
++in vec2 a_unit;
++uniform vec2 u_view;   // canvas size, device px
++uniform vec3 u_cam;    // camera x, y (css px), zoom
++uniform float u_dpr;
++uniform vec4 u_q[2];   // frame x, y, width, height | cos, sin of its turn, depth
++uniform float u_mode;  // 0 its picture, 1 its hover ring
++out vec2 v_local;
++void main() {
++  vec4 r = u_q[0];
++  vec4 t = u_q[1];
++  float s = u_cam.z * u_dpr;
++  /* a device pixel past the edge for its coverage; the ring is a screen
++     pixel wider */
++  float pad = (u_mode > 0.5 ? u_dpr + 1.0 : 1.0) / s;
++  vec2 local = mix(vec2(-pad), r.zw + pad, a_unit);
++  v_local = local;
++  vec2 rel = local - 0.5 * r.zw;
++  vec2 page = r.xy + 0.5 * r.zw + vec2(rel.x * t.x - rel.y * t.y, rel.x * t.y + rel.y * t.x);
++  vec2 dev = (page * u_cam.z + u_cam.xy) * u_dpr;
++  vec2 clip = dev / u_view * 2.0 - 1.0;
++  gl_Position = vec4(clip.x, -clip.y, t.z, 1.0);
++}`
++
++const PICTURE_FRAGMENT = `#version 300 es
++precision highp float;
++in vec2 v_local;
++uniform vec3 u_cam;
++uniform float u_dpr;
++uniform vec4 u_q[2];
++uniform float u_mode;
++uniform sampler2D u_tex;
++uniform vec4 u_ring;   // premultiplied
++out vec4 o;
++void main() {
++  vec2 wh = u_q[0].zw;
++  float s = u_cam.z * u_dpr;
++  /* coverage of this pixel by the frame's box: an antialiased edge that
++     moves by fractions of a pixel, as the DOM's does */
++  vec2 din = min(v_local, wh - v_local) * s;
++  float inside = clamp(min(din.x, din.y) + 0.5, 0.0, 1.0);
++  if (u_mode > 0.5) {
++    /* the shell's hover shadow: a one screen px spread around the box */
++    float r = 1.0 / u_cam.z;
++    vec2 dout = min(v_local + r, wh + r - v_local) * s;
++    float a = clamp(min(dout.x, dout.y) + 0.5, 0.0, 1.0) - inside;
++    if (a <= 0.0) discard;
++    o = u_ring * a;
++    return;
++  }
++  if (inside <= 0.0) discard;
++  vec4 c = texture(u_tex, clamp(v_local / wh, 0.0, 1.0));
++  /* premultiplied picture over the frame's white ground */
++  o = vec4(c.rgb + (1.0 - c.a), 1.0) * inside;
++}`
++
++const LABEL_VERTEX = `#version 300 es
++precision highp float;
++in vec2 a_unit;
++in vec4 a_frame;       // frame x, y, width, height (page px)
++in vec4 a_turn;        // cos, sin, depth, snap to device px
++in vec4 a_box;         // x, y, width, height from the title's top left (screen px)
++in vec4 a_uv;          // the atlas rect shown
++uniform vec2 u_view;
++uniform vec3 u_cam;
++uniform float u_dpr;
++uniform float u_top;   // the title's top above the frame (screen px)
++out vec2 v_uv;
++void main() {
++  float z = u_cam.z;
++  vec2 c = a_turn.xy;
++  vec2 hw = 0.5 * a_frame.zw;
++  vec2 rel = vec2(0.0, -u_top / z) - hw;
++  vec2 origin = a_frame.xy + hw + vec2(rel.x * c.x - rel.y * c.y, rel.x * c.y + rel.y * c.x);
++  vec2 dev = (origin * z + u_cam.xy) * u_dpr;
++  vec2 off = a_box.xy * u_dpr;
++  if (a_turn.w > 0.5) {
++    /* an upright name starts on a whole device pixel, as text does */
++    dev = floor(dev + off + 0.5);
++    off = vec2(0.0);
++  }
++  vec2 d = off + a_unit * a_box.zw * u_dpr;
++  dev += vec2(d.x * c.x - d.y * c.y, d.x * c.y + d.y * c.x);
++  v_uv = mix(a_uv.xy, a_uv.zw, a_unit);
++  vec2 clip = dev / u_view * 2.0 - 1.0;
++  gl_Position = vec4(clip.x, -clip.y, a_turn.z, 1.0);
++}`
++
++const LABEL_FRAGMENT = `#version 300 es
++precision highp float;
++in vec2 v_uv;
++uniform sampler2D u_atlas;
++out vec4 o;
++void main() {
++  o = texture(u_atlas, v_uv);
++}`
++
++/** Floats per name quad: frame, turn, box, uv. */
++const LABEL_FLOATS = 16
++
++interface Texture {
++  src: string
++  tex: WebGLTexture
++  bytes: number
++  /** the last draw that showed it or found it near the view */
++  seen: number
++}
++
++interface Pending {
++  src: string
++  attempt: number
++  /** no new request before this time (a failed one backs off) */
++  notBefore: number
++}
++
++/** A drawn frame, with what its draw needs worked out ahead. */
++interface Item {
++  id: string
++  /** u_q: x, y, width, height, cos, sin, depth, 0 */
++  q: Float32Array
++  /** its page box, for culling */
++  x0: number
++  y0: number
++  x1: number
++  y1: number
++  width: number
++  cell: NameCell | null
++  upright: boolean
++}
++
++/** Requests in flight at once, nearest the view first. */
++const MAX_LOADS = 6
++/** Main-thread time a frame may spend uploading pictures. */
++const UPLOAD_BUDGET_MS = 4
++/** Sharp pictures are asked for this many viewports around the view, the
++ *  smallest level (a few hundred KB each) this many… */
++const LOAD_MARGIN = 1
++const SMALL_LOAD_MARGIN = 4
++/** …and a texture not drawn for a while is dropped past this many bytes. */
++const TEXTURE_BUDGET = 256 * 1024 * 1024
++const PREVIEW_RETRIES = 4
++/** How often a moving camera looks for pictures to fetch. */
++const LOAD_EVERY_MS = 150
++
++export interface RendererEvents {
++  /** the context was lost (true) or restored (false) */
++  lost(lost: boolean): void
++  /** a picture arrived on the GPU or left it: which frames are ready changed */
++  textures(): void
++}
++
++/**
++ * Draws the frames with WebGL2. Owns one texture per picture (the one last
++ * uploaded for a frame, kept until its replacement has arrived, as an <img>
++ * keeps painting while its new src loads), fetches and decodes pictures off
++ * the main thread (`createImageBitmap`), and uploads a few per animation
++ * frame. Paint order is kept with depth: each drawn frame has its own, so a
++ * name or ring drawn after every picture still goes under the frames above
++ * it, and all the names are one instanced draw.
++ */
++export class PictureRenderer {
++  private gl: WebGL2RenderingContext
++  private pictureProgram!: WebGLProgram
++  private labelProgram!: WebGLProgram
++  private pictureVao!: WebGLVertexArrayObject
++  private labelVao!: WebGLVertexArrayObject
++  private labelBuffer!: WebGLBuffer
++  private atlasTex!: WebGLTexture
++  private pu!: Record<string, WebGLUniformLocation | null>
++  private lu!: Record<string, WebGLUniformLocation | null>
++  private textures = new Map<string, Texture>()
++  private next = new Map<string, Pending>()
++  private loading = new Map<string, AbortController>()
++  private uploads: { id: string; src: string; bitmap: ImageBitmap }[] = []
++  private pictures = new Map<string, Picture>()
++  private items: Item[] = []
++  private atlas: NameAtlas | null = null
++  private atlasUploaded = -1
++  private labels = new Float32Array(0)
++  private labelCount = 0
++  private labelsZoom = NaN
++  private labelsDirty = true
++  private labelCapacity = 0
++  private ring = new Float32Array(4)
++  private hoverId: string | null = null
++  private hover = -1
++  private hoverQ = new Float32Array(8)
++  private camera: Camera = { x: 0, y: 0, zoom: 1 }
++  private stage: Size = { width: 0, height: 0 }
++  private dpr = 1
++  private raf = 0
++  private retry = 0
++  private loadTimer = 0
++  private frameNo = 0
++  private maxSide = 4096
++  private lost = false
++  private disposed = false
++  private texturesChanged = false
++
++  constructor(
++    private canvas: HTMLCanvasElement,
++    gl: WebGL2RenderingContext,
++    private events: RendererEvents,
++  ) {
++    this.gl = gl
++    this.init()
++    canvas.addEventListener('webglcontextlost', this.handleLost)
++    canvas.addEventListener('webglcontextrestored', this.handleRestored)
++  }
++
++  /** A renderer on the canvas, or null where WebGL2 is missing (or software, unless forced). */
++  static create(canvas: HTMLCanvasElement, mode: GpuMode, events: RendererEvents): PictureRenderer | null {
++    const gl = canvas.getContext('webgl2', {
++      alpha: true,
++      premultipliedAlpha: true,
++      antialias: false,
++      depth: true,
++      stencil: false,
++      preserveDrawingBuffer: false,
++      failIfMajorPerformanceCaveat: mode !== 'force',
++    })
++    if (!gl) return null
++    try {
++      return new PictureRenderer(canvas, gl, events)
++    } catch (err) {
++      console.warn('[doop] GPU pictures off:', err)
++      return null
++    }
++  }
++
++  get isLost() {
++    return this.lost
++  }
++
++  private init() {
++    const gl = this.gl
++    const shader = (type: number, source: string) => {
++      const s = gl.createShader(type)!
++      gl.shaderSource(s, source)
++      gl.compileShader(s)
++      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS) && !gl.isContextLost())
++        throw new Error(gl.getShaderInfoLog(s) ?? 'shader')
++      return s
++    }
++    const program = (vertex: string, fragment: string, uniforms: string[]) => {
++      const p = gl.createProgram()
++      gl.attachShader(p, shader(gl.VERTEX_SHADER, vertex))
++      gl.attachShader(p, shader(gl.FRAGMENT_SHADER, fragment))
++      gl.linkProgram(p)
++      if (!gl.getProgramParameter(p, gl.LINK_STATUS) && !gl.isContextLost())
++        throw new Error(gl.getProgramInfoLog(p) ?? 'program')
++      return { p, u: Object.fromEntries(uniforms.map((n) => [n, gl.getUniformLocation(p, n)])) }
++    }
++    const picture = program(PICTURE_VERTEX, PICTURE_FRAGMENT, [
++      'u_view',
++      'u_cam',
++      'u_dpr',
++      'u_q',
++      'u_mode',
++      'u_tex',
++      'u_ring',
++    ])
++    const label = program(LABEL_VERTEX, LABEL_FRAGMENT, ['u_view', 'u_cam', 'u_dpr', 'u_top', 'u_atlas'])
++    this.pictureProgram = picture.p
++    this.pu = picture.u
++    this.labelProgram = label.p
++    this.lu = label.u
++
++    const unit = gl.createBuffer()
++    gl.bindBuffer(gl.ARRAY_BUFFER, unit)
++    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW)
++    const unitAttribute = (p: WebGLProgram) => {
++      const at = gl.getAttribLocation(p, 'a_unit')
++      gl.bindBuffer(gl.ARRAY_BUFFER, unit)
++      gl.enableVertexAttribArray(at)
++      gl.vertexAttribPointer(at, 2, gl.FLOAT, false, 0, 0)
++    }
++    this.pictureVao = gl.createVertexArray()
++    gl.bindVertexArray(this.pictureVao)
++    unitAttribute(picture.p)
++    this.labelVao = gl.createVertexArray()
++    gl.bindVertexArray(this.labelVao)
++    unitAttribute(label.p)
++    this.labelBuffer = gl.createBuffer()
++    gl.bindBuffer(gl.ARRAY_BUFFER, this.labelBuffer)
++    for (const [i, name] of ['a_frame', 'a_turn', 'a_box', 'a_uv'].entries()) {
++      const at = gl.getAttribLocation(label.p, name)
++      gl.enableVertexAttribArray(at)
++      gl.vertexAttribPointer(at, 4, gl.FLOAT, false, LABEL_FLOATS * 4, i * 16)
++      gl.vertexAttribDivisor(at, 1)
++    }
++    gl.bindVertexArray(null)
++    this.labelCapacity = 0
++    this.labelsDirty = true
++
++    this.atlasTex = gl.createTexture()
++    gl.bindTexture(gl.TEXTURE_2D, this.atlasTex)
++    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
++    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
++    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
++    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
++    this.atlasUploaded = -1
++
++    this.maxSide = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number
++    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true)
++    gl.enable(gl.BLEND)
++    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
++    gl.depthFunc(gl.LEQUAL)
++    gl.clearColor(0, 0, 0, 0)
++    gl.clearDepth(1)
++  }
++
++  /** The largest texture side the GPU takes (for the names' atlas). */
++  get maxTextureSide() {
++    return this.maxSide
++  }
++
++  private handleLost = (e: Event) => {
++    e.preventDefault()
++    this.lost = true
++    for (const c of this.loading.values()) c.abort()
++    this.loading.clear()
++    for (const u of this.uploads) u.bitmap.close()
++    this.uploads = []
++    this.textures.clear()
++    this.events.lost(true)
++  }
++
++  private handleRestored = () => {
++    if (this.disposed) return
++    try {
++      this.init()
++    } catch {
++      return
++    }
++    this.lost = false
++    this.events.lost(false)
++    this.invalidate()
++  }
++
++  /** True once a picture of this frame (any version) is on the GPU. */
++  hasPicture(id: string): boolean {
++    return this.textures.has(id)
++  }
++
++  /** The pictures to keep on the GPU; any other is dropped. */
++  setPictures(pictures: readonly Picture[]) {
++    this.pictures = new Map(pictures.map((p) => [p.id, p]))
++    let dropped = false
++    for (const [id, t] of this.textures)
++      if (!this.pictures.has(id)) {
++        if (!this.lost) this.gl.deleteTexture(t.tex)
++        this.textures.delete(id)
++        dropped = true
++      }
++    for (const [id, c] of this.loading)
++      if (!this.pictures.has(id)) {
++        c.abort()
++        this.loading.delete(id)
++      }
++    for (const id of this.next.keys()) if (!this.pictures.has(id)) this.next.delete(id)
++    if (dropped) this.changed()
++    this.scheduleLoad(0)
++  }
++
++  /** The frames to draw, in paint order (back to front). */
++  setScene(frames: readonly Pick<PictureFrame, 'id' | 'x' | 'y' | 'width' | 'height' | 'rotation' | 'label'>[]) {
++    const n = frames.length
++    this.items = frames.map((f, i) => {
++      const r = f.rotation ? (f.rotation * Math.PI) / 180 : 0
++      const b = frameBounds(f)
++      /* each frame its own depth, the later the nearer */
++      const depth = 1 - (2 * (i + 1)) / (n + 1)
++      return {
++        id: f.id,
++        q: new Float32Array([f.x, f.y, f.width, f.height, Math.cos(r), Math.sin(r), depth, 0]),
++        x0: b.x0,
++        y0: b.y0,
++        x1: b.x1,
++        y1: b.y1,
++        width: f.width,
++        cell: f.label ? (this.atlas?.cells.get(f.label) ?? null) : null,
++        upright: !r,
++      }
++    })
++    /* a name is at most two quads: its text, and an ellipsis */
++    if (this.labelCapacity < n * 2) {
++      this.labelCapacity = Math.max(n * 2, 64)
++      this.labels = new Float32Array(this.labelCapacity * LABEL_FLOATS)
++      if (!this.lost) {
++        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.labelBuffer)
++        this.gl.bufferData(this.gl.ARRAY_BUFFER, this.labels.byteLength, this.gl.DYNAMIC_DRAW)
++      }
++    }
++    this.labelsDirty = true
++    this.setHover(this.hoverId)
++    this.invalidate()
++  }
++
++  /** The names' texture, and the colour of the hover ring (CSS rgba, 0-255 and 0-1). */
++  setLabels(atlas: NameAtlas | null, ring: readonly [number, number, number, number]) {
++    this.atlas = atlas
++    const a = ring[3]
++    this.ring.set([(ring[0] / 255) * a, (ring[1] / 255) * a, (ring[2] / 255) * a, a])
++    this.labelsDirty = true
++    this.invalidate()
++  }
++
++  /** The frame under the pointer wears the hover ring (null: none). */
++  setHover(id: string | null) {
++    this.hoverId = id
++    const i = id === null ? -1 : this.items.findIndex((it) => it.id === id)
++    if (i === this.hover) return
++    this.hover = i
++    const item = this.items[i]
++    if (item) this.hoverQ.set(item.q)
++    this.invalidate()
++  }
++
++  /** The camera moved: drawn at once, in the task that moved the world's
++   *  transform, so the canvas and the DOM never part for a frame (a camera
++   *  moved from an animation frame callback would otherwise wait for the
++   *  next one). */
++  setCamera(camera: Camera) {
++    this.camera = camera
++    this.drawNow()
++    this.scheduleLoad(LOAD_EVERY_MS)
++  }
++
++  setStage(stage: Size, dpr: number) {
++    this.stage = stage
++    this.dpr = dpr
++    this.invalidate()
++    this.scheduleLoad(0)
++  }
++
++  /** Draw now: for a change the DOM shows in this same frame (a frame that
++   *  leaves the DOM must not leave a hole until the next one). */
++  drawNow() {
++    cancelAnimationFrame(this.raf)
++    this.raf = 0
++    this.draw()
++  }
++
++  /** Draw at the next animation frame (once, however often it is asked). */
++  invalidate() {
++    if (this.raf || this.disposed) return
++    this.raf = requestAnimationFrame(() => {
++      this.raf = 0
++      this.draw()
++    })
++  }
++
++  private changed() {
++    if (this.texturesChanged) return
++    this.texturesChanged = true
++    /* told after the draw that changed them, never from inside it */
++    queueMicrotask(() => {
++      this.texturesChanged = false
++      if (!this.disposed) this.events.textures()
++    })
++  }
++
++  private draw() {
++    if (this.lost || this.disposed) return
++    const gl = this.gl
++    const { canvas, dpr, stage, camera } = this
++    const w = Math.max(1, Math.round(stage.width * dpr))
++    const h = Math.max(1, Math.round(stage.height * dpr))
++    if (canvas.width !== w || canvas.height !== h) {
++      canvas.width = w
++      canvas.height = h
++    }
++    if (this.uploads.length) this.upload()
++    this.frameNo++
++    const atlas = this.atlas
++    if (atlas && atlas.version !== this.atlasUploaded) {
++      gl.bindTexture(gl.TEXTURE_2D, this.atlasTex)
++      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlas.canvas)
++      this.atlasUploaded = atlas.version
++    }
++    if (this.labelsDirty || camera.zoom !== this.labelsZoom) this.buildLabels()
++
++    gl.viewport(0, 0, w, h)
++    gl.depthMask(true)
++    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
++    gl.enable(gl.DEPTH_TEST)
++
++    gl.useProgram(this.pictureProgram)
++    gl.bindVertexArray(this.pictureVao)
++    gl.activeTexture(gl.TEXTURE0)
++    const pu = this.pu
++    gl.uniform1i(pu.u_tex!, 0)
++    gl.uniform2f(pu.u_view!, w, h)
++    gl.uniform3f(pu.u_cam!, camera.x, camera.y, camera.zoom)
++    gl.uniform1f(pu.u_dpr!, dpr)
++    gl.uniform1f(pu.u_mode!, 0)
++    const vx0 = -camera.x / camera.zoom
++    const vy0 = -camera.y / camera.zoom
++    const vx1 = vx0 + stage.width / camera.zoom
++    const vy1 = vy0 + stage.height / camera.zoom
++    const items = this.items
++    for (let i = 0; i < items.length; i++) {
++      const it = items[i]!
++      if (it.x0 >= vx1 || it.x1 <= vx0 || it.y0 >= vy1 || it.y1 <= vy0) continue
++      const t = this.textures.get(it.id)
++      if (!t) continue
++      t.seen = this.frameNo
++      gl.bindTexture(gl.TEXTURE_2D, t.tex)
++      gl.uniform4fv(pu.u_q!, it.q)
++      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
++    }
++    if (this.hover >= 0) {
++      gl.uniform1f(pu.u_mode!, 1)
++      gl.uniform4fv(pu.u_ring!, this.ring)
++      gl.uniform4fv(pu.u_q!, this.hoverQ)
++      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
++    }
++
++    if (this.labelCount && atlas?.style) {
++      gl.depthMask(false)
++      gl.useProgram(this.labelProgram)
++      gl.bindVertexArray(this.labelVao)
++      gl.bindTexture(gl.TEXTURE_2D, this.atlasTex)
++      const lu = this.lu
++      gl.uniform1i(lu.u_atlas!, 0)
++      gl.uniform2f(lu.u_view!, w, h)
++      gl.uniform3f(lu.u_cam!, camera.x, camera.y, camera.zoom)
++      gl.uniform1f(lu.u_dpr!, dpr)
++      gl.uniform1f(lu.u_top!, LABEL_GAP + atlas.style.lineHeight)
++      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.labelCount)
++    }
++    gl.bindVertexArray(null)
++    gl.disable(gl.DEPTH_TEST)
++    if (this.uploads.length) this.invalidate()
++  }
++
++  /** The name quads for this zoom: where a name is cut depends on its
++   *  frame's width on screen, so they are worked out again when the zoom
++   *  changes (a pan reuses them). No allocation: this runs on zoom frames. */
++  private buildLabels() {
++    this.labelsZoom = this.camera.zoom
++    this.labelsDirty = false
++    this.labelCount = 0
++    const atlas = this.atlas
++    const style = atlas?.style
++    if (!atlas || !style) return
++    const zoom = this.camera.zoom
++    const aw = atlas.canvas.width
++    const ah = atlas.canvas.height
++    const k = atlas.dpr
++    const ellipsis = atlas.ellipsis
++    const data = this.labels
++    const items = this.items
++    const v0 = PAD / ah
++    let n = 0
++    const put = (it: Item, cell: NameCell, x: number, width: number) => {
++      const o = n++ * LABEL_FLOATS
++      const q = it.q
++      data[o] = q[0]!
++      data[o + 1] = q[1]!
++      data[o + 2] = q[2]!
++      data[o + 3] = q[3]!
++      data[o + 4] = q[4]!
++      data[o + 5] = q[5]!
++      data[o + 6] = q[6]!
++      data[o + 7] = it.upright ? 1 : 0
++      data[o + 8] = x
++      data[o + 9] = 0
++      data[o + 10] = width
++      data[o + 11] = style.lineHeight
++      data[o + 12] = (cell.x + PAD) / aw
++      data[o + 13] = cell.y / ah + v0
++      data[o + 14] = (cell.x + PAD + width * k) / aw
++      data[o + 15] = (cell.y + PAD + style.lineHeight * k) / ah
++    }
++    for (let i = 0; i < items.length; i++) {
++      const it = items[i]!
++      const cell = it.cell
++      const room = it.width * zoom
++      if (!cell || !(room > 0)) continue
++      const cut = ellipsisCut(cell.prefix, cell.count, ellipsis?.advance ?? 0, room)
++      const end = cut < 0 ? Math.min(cell.advance, room) : (cell.prefix[cut] ?? 0)
++      if (end > 0) put(it, cell, 0, end)
++      if (cut >= 0 && ellipsis) {
++        const shown = Math.min(ellipsis.advance, room - end)
++        if (shown > 0) put(it, ellipsis, end, shown)
++      }
++    }
++    this.labelCount = n
++    if (n) {
++      const gl = this.gl
++      gl.bindBuffer(gl.ARRAY_BUFFER, this.labelBuffer)
++      gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, n * LABEL_FLOATS)
++    }
++  }
++
++  /** Uploads what has been decoded, within the frame's budget (one at least). */
++  private upload() {
++    const gl = this.gl
++    const started = performance.now()
++    let uploaded = 0
++    while (this.uploads.length && (uploaded++ === 0 || performance.now() - started < UPLOAD_BUDGET_MS)) {
++      const { id, src, bitmap } = this.uploads.shift()!
++      if (this.pictures.get(id)?.src !== src) {
++        bitmap.close()
++        continue
++      }
++      const tex = gl.createTexture()
++      gl.bindTexture(gl.TEXTURE_2D, tex)
++      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap)
++      gl.generateMipmap(gl.TEXTURE_2D)
++      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR)
++      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
++      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
++      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
++      const old = this.textures.get(id)
++      if (old) gl.deleteTexture(old.tex)
++      else this.changed()
++      this.textures.set(id, {
++        src,
++        tex,
++        bytes: Math.round(bitmap.width * bitmap.height * 4 * 1.34),
++        seen: this.frameNo,
++      })
++      bitmap.close()
++    }
++    this.evict()
++  }
++
++  private evict() {
++    let total = 0
++    for (const t of this.textures.values()) total += t.bytes
++    if (total <= TEXTURE_BUDGET) return
++    const old = [...this.textures.entries()]
++      .filter(([, t]) => t.seen < this.frameNo)
++      .sort((a, b) => a[1].seen - b[1].seen)
++    for (const [id, t] of old) {
++      if (total <= TEXTURE_BUDGET) break
++      this.gl.deleteTexture(t.tex)
++      this.textures.delete(id)
++      total -= t.bytes
++      this.changed()
++    }
++  }
++
++  private scheduleLoad(ms: number) {
++    if (this.disposed) return
++    if (this.loadTimer) {
++      if (ms) return
++      window.clearTimeout(this.loadTimer)
++    }
++    this.loadTimer = window.setTimeout(() => {
++      this.loadTimer = 0
++      this.load()
++    }, ms)
++  }
++
++  /** Starts the requests the view needs next: pictures missing or out of
++   *  date near the view (sharp ones within LOAD_MARGIN, the smallest level
++   *  within SMALL_LOAD_MARGIN), nearest its centre first. */
++  private load() {
++    if (this.lost || this.disposed) return
++    const { camera, stage } = this
++    if (camera.zoom <= 0 || stage.width <= 0) return
++    const vw = stage.width / camera.zoom
++    const vh = stage.height / camera.zoom
++    const cx = -camera.x / camera.zoom + vw / 2
++    const cy = -camera.y / camera.zoom + vh / 2
++    const small = `s=${PREVIEW_SCALES[0]}&`
++    const now = performance.now()
++    const wanted: { p: Picture; d: number }[] = []
++    let waiting = Infinity
++    for (const p of this.pictures.values()) {
++      const margin = p.src?.includes(small) ? SMALL_LOAD_MARGIN : LOAD_MARGIN
++      const near =
++        Math.abs(p.x + p.width / 2 - cx) < vw * (0.5 + margin) + p.width / 2 &&
++        Math.abs(p.y + p.height / 2 - cy) < vh * (0.5 + margin) + p.height / 2
++      if (!near) continue
++      const have = this.textures.get(p.id)
++      /* near the view: kept over the budget too (evict), or a picture
++         fetched for a frame shown live would be dropped and fetched again */
++      if (have) have.seen = this.frameNo
++      if (!p.src || this.loading.has(p.id) || have?.src === p.src) continue
++      if (this.uploads.some((u) => u.id === p.id && u.src === p.src)) continue
++      const pending = this.next.get(p.id)
++      if (pending?.src === p.src) {
++        if (pending.attempt > PREVIEW_RETRIES) continue
++        if (pending.notBefore > now) {
++          waiting = Math.min(waiting, pending.notBefore - now)
++          continue
++        }
++      }
++      /* the frames waiting for a picture before the ones only kept ready */
++      const d = (p.later ? 1e12 : 0) + (have ? 1e11 : 0) + Math.hypot(p.x + p.width / 2 - cx, p.y + p.height / 2 - cy)
++      wanted.push({ p, d })
++    }
++    wanted.sort((a, b) => a.d - b.d)
++    for (const { p } of wanted) {
++      if (this.loading.size >= MAX_LOADS) break
++      this.fetch(p.id, p.src!)
++    }
++    window.clearTimeout(this.retry)
++    if (waiting !== Infinity) this.retry = window.setTimeout(() => this.scheduleLoad(0), waiting + 10)
++  }
++
++  private fetch(id: string, src: string) {
++    const control = new AbortController()
++    this.loading.set(id, control)
++    const prev = this.next.get(id)
++    const attempt = prev?.src === src ? prev.attempt : 0
++    const url = attempt ? `${src}&retry=${attempt}` : src
++    void (async () => {
++      try {
++        const res = await fetch(url, { signal: control.signal, credentials: 'same-origin' })
++        if (!res.ok) throw new Error(String(res.status))
++        const blob = await res.blob()
++        let bitmap = await createImageBitmap(blob, { premultiplyAlpha: 'premultiply' })
++        const side = Math.max(bitmap.width, bitmap.height)
++        if (side > this.maxSide) {
++          const k = this.maxSide / side
++          const big = bitmap
++          bitmap = await createImageBitmap(big, {
++            resizeWidth: Math.max(1, Math.floor(big.width * k)),
++            resizeHeight: Math.max(1, Math.floor(big.height * k)),
++            resizeQuality: 'high',
++          })
++          big.close()
++        }
++        if (control.signal.aborted || this.disposed) return bitmap.close()
++        this.next.delete(id)
++        this.uploads.push({ id, src, bitmap })
++        this.invalidate()
++      } catch {
++        if (control.signal.aborted) return
++        /* as the <img> did: again a few times, less often each time */
++        this.next.set(id, { src, attempt: attempt + 1, notBefore: performance.now() + 2000 * 2 ** attempt })
++      } finally {
++        if (this.loading.get(id) === control) this.loading.delete(id)
++        this.scheduleLoad(0)
++      }
++    })()
++  }
++
++  dispose() {
++    this.disposed = true
++    cancelAnimationFrame(this.raf)
++    window.clearTimeout(this.retry)
++    window.clearTimeout(this.loadTimer)
++    for (const c of this.loading.values()) c.abort()
++    for (const u of this.uploads) u.bitmap.close()
++    if (!this.lost) for (const t of this.textures.values()) this.gl.deleteTexture(t.tex)
++    this.textures.clear()
++    this.canvas.removeEventListener('webglcontextlost', this.handleLost)
++    this.canvas.removeEventListener('webglcontextrestored', this.handleRestored)
++    this.gl.getExtension('WEBGL_lose_context')?.loseContext()
++  }
++}
+diff --git a/tests/gpuPictures.test.ts b/tests/gpuPictures.test.ts
+new file mode 100644
+index 0000000..0ec2522
+--- /dev/null
++++ b/tests/gpuPictures.test.ts
+@@ -0,0 +1,191 @@
++import { describe, expect, it } from 'vitest'
++import {
++  LABEL_GAP,
++  frameAt,
++  frameBounds,
++  gpuDrawnFrames,
++  nameStrip,
++  pictureSrc,
++  type PictureFrame,
++} from '../src/lib/gpuPictures'
++import { ellipsisCut } from '../src/lib/gpuLabels'
++
++function frame(id: string, x: number, y: number, extra: Partial<PictureFrame> = {}): PictureFrame {
++  return { id, x, y, width: 100, height: 100, candidate: true, label: '', ...extra }
++}
++const ids = (set: Set<string>) => [...set].sort()
++const ready = () => true
++const draw = (frames: PictureFrame[], inDom: (id: string) => boolean = () => false, strip = 0) =>
++  ids(gpuDrawnFrames(frames, inDom, ready, strip))
++
++describe('frameBounds', () => {
++  it('is the box itself for an unturned frame', () => {
++    expect(frameBounds({ x: 10, y: 20, width: 100, height: 50 })).toEqual({ x0: 10, y0: 20, x1: 110, y1: 70 })
++  })
++  it('covers a turned frame', () => {
++    const b = frameBounds({ x: 0, y: 0, width: 100, height: 50, rotation: 90 })
++    expect(b.x0).toBeCloseTo(25)
++    expect(b.x1).toBeCloseTo(75)
++    expect(b.y0).toBeCloseTo(-25)
++    expect(b.y1).toBeCloseTo(75)
++  })
++  it('counts the name above the frame in, turned with it', () => {
++    expect(frameBounds({ x: 0, y: 100, width: 100, height: 50 }, 20)).toEqual({ x0: 0, y0: 80, x1: 100, y1: 150 })
++    /* turned 90° clockwise the frame's top faces right */
++    const b = frameBounds({ x: 0, y: 0, width: 100, height: 50, rotation: 90 }, 20)
++    expect(b.x1).toBeCloseTo(95)
++    expect(b.x0).toBeCloseTo(25)
++  })
++})
++
++describe('gpuDrawnFrames', () => {
++  it('draws every frame of a page laid out side by side', () => {
++    expect(draw([frame('a', 0, 0), frame('b', 200, 0), frame('c', 400, 0)])).toEqual(['a', 'b', 'c'])
++  })
++
++  it('leaves live frames to the DOM', () => {
++    expect(draw([frame('a', 0, 0), frame('b', 200, 0)], (id) => id === 'b')).toEqual(['a'])
++  })
++
++  it('keeps a frame in the DOM when something in the DOM lies under it', () => {
++    /* b is above a live frame a: the canvas under the stack would draw it beneath a */
++    const frames = [frame('a', 0, 0), frame('b', 50, 50), frame('c', 120, 120)]
++    /* b stays a shell, and so c, above b, does too */
++    expect(draw(frames, (id) => id === 'a')).toEqual([])
++  })
++
++  it('draws a frame lying under a live frame (the live one covers it)', () => {
++    expect(draw([frame('a', 0, 0), frame('b', 50, 50)], (id) => id === 'b')).toEqual(['a'])
++  })
++
++  it('draws frames stacked on each other when none is in the DOM', () => {
++    expect(draw([frame('a', 0, 0), frame('b', 50, 50), frame('c', 80, 80)])).toEqual(['a', 'b', 'c'])
++  })
++
++  it('draws only what is ready: the rest are shells, and count as DOM under what follows', () => {
++    const frames = [frame('a', 0, 0), frame('b', 50, 50), frame('c', 400, 0)]
++    expect(
++      ids(
++        gpuDrawnFrames(
++          frames,
++          () => false,
++          (f) => f.id !== 'a',
++          0,
++        ),
++      ),
++    ).toEqual(['c'])
++  })
++
++  it('never draws what is not a candidate: an empty, locked or marked frame, a canvas element', () => {
++    expect(draw([frame('x', 0, 0, { candidate: false }), frame('b', 200, 0)])).toEqual(['b'])
++  })
++
++  it('counts every shell under a frame, a canvas element included; a hidden frame not', () => {
++    expect(draw([frame('s', 0, 0, { candidate: false }), frame('b', 50, 50)])).toEqual([])
++    expect(draw([frame('h', 0, 0, { candidate: false, hidden: true }), frame('b', 50, 50)])).toEqual(['b'])
++    /* selected, a hidden frame is painted (HiddenFrameView) */
++    expect(
++      draw([frame('h', 0, 0, { candidate: false, hidden: true }), frame('b', 50, 50)], (id) => id === 'h'),
++    ).toEqual([])
++  })
++
++  it('counts names: a frame under the name of a DOM frame, or whose name lies on one, stays', () => {
++    /* b's name strip (20 page px above it) reaches into a, which is live */
++    const named = [frame('a', 0, 0), frame('b', 0, 115, { label: 'B' })]
++    expect(draw(named, (id) => id === 'a', 20)).toEqual([])
++    expect(draw(named, (id) => id === 'a', 10)).toEqual(['b'])
++    /* unnamed, b has no strip */
++    expect(draw([frame('a', 0, 0), frame('b', 0, 115)], (id) => id === 'a', 20)).toEqual(['b'])
++  })
++
++  it('counts a turned frame by its turned bounds', () => {
++    /* a 200×20 bar turned 90° reaches down to y = 190 around x = 100 */
++    const bar = frame('bar', 0, 90, { width: 200, height: 20, rotation: 90 })
++    expect(draw([bar, frame('b', 95, 170, { width: 10, height: 10 })], (id) => id === 'bar')).toEqual([])
++  })
++})
++
++describe('frameAt', () => {
++  const L = 18
++  it('finds the topmost frame under the point, in paint order', () => {
++    const frames = [frame('a', 0, 0), frame('b', 50, 50)]
++    expect(frameAt(frames, 60, 60, 1, L)).toEqual({ id: 'b', name: false })
++    expect(frameAt(frames, 20, 20, 1, L)).toEqual({ id: 'a', name: false })
++    expect(frameAt(frames, 200, 200, 1, L)).toBeNull()
++  })
++
++  it('turns the point into the frame', () => {
++    /* a 200×20 bar turned 90°: it stands at x 90-110, y -90-110 */
++    const bar = [frame('bar', 0, 0, { width: 200, height: 20, rotation: 90 })]
++    expect(frameAt(bar, 100, -80, 1, L)?.id).toBe('bar')
++    expect(frameAt(bar, 100, 100, 1, L)?.id).toBe('bar')
++    expect(frameAt(bar, 20, 10, 1, L)).toBeNull()
++  })
++
++  it('counts the name strip, a line high and LABEL_GAP screen px above the frame', () => {
++    const frames = [frame('a', 0, 100, { label: 'A' })]
++    const z = 0.5
++    /* the strip spans page y 100 - (6 + 18) / 0.5 = 52 to 100 - 6 / 0.5 = 88 */
++    expect(frameAt(frames, 10, 53, z, L)).toEqual({ id: 'a', name: true })
++    expect(frameAt(frames, 10, 87, z, L)).toEqual({ id: 'a', name: true })
++    expect(frameAt(frames, 10, 51, z, L)).toBeNull()
++    /* the gap itself is not the frame's */
++    expect(frameAt(frames, 10, 95, z, L)).toBeNull()
++    /* past the frame's width is not its name either */
++    expect(frameAt(frames, 101, 60, z, L)).toBeNull()
++    /* no name, no strip */
++    expect(frameAt([frame('a', 0, 100)], 10, 60, z, L)).toBeNull()
++  })
++
++  it('gives a frame above the name of the one under it the press', () => {
++    const frames = [frame('a', 0, 100, { label: 'A' }), frame('b', 0, 0)]
++    expect(frameAt(frames, 10, 90, 1, L)?.id).toBe('b')
++  })
++
++  it('turns the name strip with its frame', () => {
++    /* 100×100 turned 90° clockwise: the strip lies right of the frame */
++    const frames = [frame('a', 0, 0, { label: 'A', rotation: 90 })]
++    expect(frameAt(frames, 100 + LABEL_GAP + 5, 50, 1, L)).toEqual({ id: 'a', name: true })
++    expect(frameAt(frames, 50, -10, 1, L)).toBeNull()
++  })
++})
++
++describe('nameStrip', () => {
++  it('is constant on screen: page px grow as the camera zooms out', () => {
++    expect(nameStrip(18, 1)).toBe(24)
++    expect(nameStrip(18, 0.1)).toBeCloseTo(240)
++    expect(nameStrip(18, 0)).toBe(0)
++  })
++})
++
++describe('ellipsisCut', () => {
++  /* five graphemes, 10 px each; the ellipsis is 8 px */
++  const prefix = [0, 10, 20, 30, 40, 50]
++  it('keeps a name that fits whole', () => {
++    expect(ellipsisCut(prefix, 5, 8, 50)).toBe(-1)
++    expect(ellipsisCut(prefix, 5, 8, 80)).toBe(-1)
++  })
++  it('keeps the longest prefix that leaves room for the ellipsis', () => {
++    expect(ellipsisCut(prefix, 5, 8, 49)).toBe(4)
++    expect(ellipsisCut(prefix, 5, 8, 47)).toBe(3)
++    expect(ellipsisCut(prefix, 5, 8, 38)).toBe(3)
++    expect(ellipsisCut(prefix, 5, 8, 37)).toBe(2)
++  })
++  it('keeps only the ellipsis where nothing else fits', () => {
++    expect(ellipsisCut(prefix, 5, 8, 12)).toBe(0)
++    expect(ellipsisCut(prefix, 5, 8, 3)).toBe(0)
++  })
++})
++
++describe('pictureSrc', () => {
++  const f = { id: 'f', width: 1440, height: 900, updatedAt: 7 }
++  it('asks for nothing before the camera has rested', () => {
++    expect(pictureSrc(f, null, new Set())).toBeNull()
++  })
++  it('uses the smallest level away from the view', () => {
++    expect(pictureSrc(f, 2, new Set())).toBe('/i/f.webp?preview&s=0.25&v=7')
++  })
++  it('uses the level covering the density near the view', () => {
++    expect(pictureSrc(f, 0.4, new Set(['f']))).toBe('/i/f.webp?preview&s=0.5&v=7')
++  })
++})
+diff --git a/tests/gpuPicturesBrowser.test.ts b/tests/gpuPicturesBrowser.test.ts
+new file mode 100644
+index 0000000..b5ebfba
+--- /dev/null
++++ b/tests/gpuPicturesBrowser.test.ts
+@@ -0,0 +1,274 @@
++import { afterAll, beforeAll, describe, expect, it } from 'vitest'
++import type { Page } from 'puppeteer-core'
++import { findBrowserPath } from '../server/screenshot'
++import { fixtureUrl, openBrowser, type TestBrowser } from './browser'
++import type { Canvas, Frame } from '../shared/types'
++
++/* The GPU picture layer (src/lib/gpuPictures.ts, localStorage['doop:gpu']):
++   culled frames drawn whole on one WebGL2 canvas under the frame stack,
++   picture, name and hover ring, with nothing of them in the DOM; a press on
++   one is resolved by arithmetic and wakes it into a FrameView. Previews are
++   answered here with one flat colour, so where the canvas draws a picture is
++   that colour. Skipped where this Chromium has no WebGL2 at all. */
++
++declare global {
++  interface Window {
++    seedPages: (canvas: Canvas) => void
++  }
++}
++
++const FRAMES = 40
++const canvas: Canvas = {
++  id: 'c',
++  name: 'GPU page',
++  pages: [{ id: 'p', name: 'Main' }],
++  frames: Array.from({ length: FRAMES }, (_, i): Frame => ({
++    id: `f${i}`,
++    canvasId: 'c',
++    pageId: 'p',
++    name: `Frame ${i}`,
++    x: (i % 8) * 1600,
++    y: Math.floor(i / 8) * 1100,
++    width: 1440,
++    height: 900,
++    html: `<!doctype html><html><body style="margin:0;background:#fff"><h1>Screen ${i}</h1></body></html>`,
++    createdAt: 0,
++    updatedAt: 1,
++    updatedBy: 'User',
++  })),
++  createdAt: 0,
++  updatedAt: 0,
++}
++
++/** the colour every preview is served in */
++const PICTURE = [200, 220, 255]
++
++const store = (page: Page, call: string) =>
++  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
++const drawn = (page: Page) =>
++  page.evaluate(
++    `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => [...useGpuPictures.getState().drawn].sort())`,
++  ) as Promise<string[]>
++const selected = (page: Page) =>
++  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().selectedIds)`) as Promise<
++    string[]
++  >
++const previews = (page: Page) => page.evaluate(() => document.querySelectorAll('[data-doop-frame-preview]').length)
++const shells = (page: Page) => page.evaluate(() => document.querySelectorAll('[data-frame-shell]').length)
++const shellIds = (page: Page) =>
++  page.evaluate(() =>
++    [...document.querySelectorAll('[data-frame-shell]')].map((el) => el.getAttribute('data-frame-shell')!).sort(),
++  )
++const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
++
++/** the colours on screen in a box, from a screenshot (the canvas keeps no drawing buffer) */
++async function pixels(page: Page, x: number, y: number, width = 1, height = 1): Promise<number[][]> {
++  const png = await page.screenshot({ clip: { x, y, width, height }, encoding: 'base64' })
++  return page.evaluate(
++    async (src, w, h) => {
++      const img = new Image()
++      img.src = `data:image/png;base64,${src}`
++      await img.decode()
++      const c = document.createElement('canvas')
++      c.width = w
++      c.height = h
++      const g = c.getContext('2d')!
++      g.drawImage(img, 0, 0)
++      const d = g.getImageData(0, 0, w, h).data
++      const out: number[][] = []
++      for (let i = 0; i < d.length; i += 4) out.push([d[i]!, d[i + 1]!, d[i + 2]!])
++      return out
++    },
++    png,
++    width,
++    height,
++  )
++}
++const pixel = async (page: Page, x: number, y: number) => (await pixels(page, x, y))[0]!
++
++/** the screen box of a frame at the test's camera (20, 60) at 8% */
++function box(stage: { left: number; top: number }, i: number) {
++  const left = stage.left + 20 + (i % 8) * 1600 * 0.08
++  const top = stage.top + 60 + Math.floor(i / 8) * 1100 * 0.08
++  return { left, top, right: left + 1440 * 0.08, bottom: top + 900 * 0.08 }
++}
++
++describe.skipIf(!findBrowserPath())('GPU pictures', () => {
++  let browser: TestBrowser
++  let page: Page
++  let webgl = false
++  let stage = { left: 0, top: 0 }
++  beforeAll(async () => {
++    browser = await openBrowser()
++    page = await browser.newPage()
++    await page.setViewport({ width: 1600, height: 1000 })
++    await page.goto(fixtureUrl('pages.html'))
++    webgl = await page.evaluate(() => !!document.createElement('canvas').getContext('webgl2'))
++    const png = await page.evaluate((rgb) => {
++      const c = document.createElement('canvas')
++      c.width = 144
++      c.height = 90
++      const g = c.getContext('2d')!
++      g.fillStyle = `rgb(${rgb.join(',')})`
++      g.fillRect(0, 0, 144, 90)
++      return c.toDataURL('image/png').split(',')[1]!
++    }, PICTURE)
++    const body = Buffer.from(png, 'base64')
++    await page.setRequestInterception(true)
++    page.on('request', (req) => {
++      if (/\/i\/[^/]+\.webp\?preview/.test(req.url())) void req.respond({ status: 200, contentType: 'image/png', body })
++      else void req.continue()
++    })
++    await page.evaluate(() => localStorage.setItem('doop:gpu', 'force'))
++    await page.reload()
++    await page.waitForFunction(() => typeof window.seedPages === 'function')
++    await page.evaluate((c) => window.seedPages(c), canvas)
++    await store(page, 'setViewport({ x: 20, y: 60, zoom: 0.08 })')
++    stage = await page.evaluate(() => {
++      const r = document.querySelector('.stage')!.getBoundingClientRect()
++      return { left: r.left, top: r.top }
++    })
++    if (webgl)
++      await page.waitForFunction(
++        `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.size === ${FRAMES})`,
++        { timeout: 30_000 },
++      )
++    await sleep(200)
++  }, 120_000)
++  afterAll(async () => {
++    await page?.evaluate(() => localStorage.removeItem('doop:gpu')).catch(() => {})
++    await page?.close()
++    await browser?.close()
++  })
++
++  it('draws every culled frame on the canvas, with nothing of it in the DOM', async (ctx) => {
++    if (!webgl) ctx.skip()
++    expect(await page.evaluate(() => !!document.querySelector('canvas[data-stage-pictures]'))).toBe(true)
++    expect(await drawn(page)).toHaveLength(FRAMES)
++    expect(await shells(page)).toBe(0)
++    expect(await previews(page)).toBe(0)
++    expect(await page.evaluate(() => document.querySelectorAll('[data-frame-title]').length)).toBe(0)
++  }, 30_000)
++
++  it('paints a frame where the DOM would, its name above it, and nothing between frames', async (ctx) => {
++    if (!webgl) ctx.skip()
++    const f = box(stage, 9)
++    const mid = await pixel(page, Math.round((f.left + f.right) / 2), Math.round((f.top + f.bottom) / 2))
++    for (const [i, c] of mid.entries()) expect(Math.abs(c - PICTURE[i]!)).toBeLessThanOrEqual(2)
++    /* the gap between frames 8 and 9 is the stage's paper */
++    const paper = await pixel(page, Math.round(f.left - 6), Math.round(f.top + 30))
++    expect(paper).not.toEqual(mid)
++    /* the name: ink in the line LABEL_GAP above the frame, none in the gap */
++    const ink = (px: number[][]) => Math.min(...px.map(([r = 0, g = 0, b = 0]) => (r + g + b) / 3))
++    expect(ink(await pixels(page, Math.round(f.left), Math.round(f.top - 24), 60, 18))).toBeLessThan(150)
++    expect(ink(await pixels(page, Math.round(f.left), Math.round(f.top - 4), 60, 3))).toBeGreaterThan(200)
++    /* and nothing past the name, inside the strip */
++    expect(ink(await pixels(page, Math.round(f.left + 70), Math.round(f.top - 24), 30, 18))).toBeGreaterThan(200)
++  }, 30_000)
++
++  it('draws the hover ring on a frame under the mouse', async (ctx) => {
++    if (!webgl) ctx.skip()
++    const f = box(stage, 12)
++    const edge = { x: Math.floor(f.left) - 1, y: Math.round((f.top + f.bottom) / 2) }
++    const before = await pixel(page, edge.x, edge.y)
++    await page.mouse.move(f.left + 40, edge.y)
++    await sleep(100)
++    const [r = 0, , b = 0] = await pixel(page, edge.x, edge.y)
++    expect(b - r).toBeGreaterThan(60)
++    expect(before[2]! - before[0]!).toBeLessThan(10)
++    await page.mouse.move(5, 995)
++    await sleep(100)
++    expect(await pixel(page, edge.x, edge.y)).toEqual(before)
++  }, 30_000)
++
++  it('selects a drawn frame on a press, and it is a FrameView then', async (ctx) => {
++    if (!webgl) ctx.skip()
++    const f = box(stage, 9)
++    await page.mouse.click((f.left + f.right) / 2, (f.top + f.bottom) / 2)
++    await sleep(200)
++    expect(await selected(page)).toEqual(['f9'])
++    expect(await drawn(page)).not.toContain('f9')
++    expect(await page.evaluate(() => !!document.querySelector('iframe[title="Frame 9"]'))).toBe(true)
++    /* the others stay drawn, but for the ones whose name lies on it: at 8% a
++       name (24 screen px over its frame) reaches into the row above, and
++       the canvas is under the DOM. Each of those is a shell, so the one
++       below it is too: the column under f9. */
++    expect(await shellIds(page)).toEqual(['f17', 'f25', 'f33'])
++  }, 30_000)
++
++  it('selects a drawn frame on a press on its name', async (ctx) => {
++    if (!webgl) ctx.skip()
++    await store(page, 'select(null)')
++    const f = box(stage, 10)
++    await page.mouse.click(f.left + 10, f.top - 15)
++    await sleep(200)
++    expect(await selected(page)).toEqual(['f10'])
++    expect(await page.evaluate(() => !!document.querySelector('iframe[title="Frame 10"]'))).toBe(true)
++  }, 30_000)
++
++  it('moves a drawn frame with one drag: the press that wakes it also starts the drag', async (ctx) => {
++    if (!webgl) ctx.skip()
++    await store(page, 'select(null)')
++    const f = box(stage, 13)
++    const at = { x: (f.left + f.right) / 2, y: (f.top + f.bottom) / 2 }
++    await page.mouse.move(at.x, at.y)
++    await page.mouse.down()
++    await page.mouse.move(at.x + 20, at.y + 12, { steps: 4 })
++    await page.mouse.move(at.x + 40, at.y + 24, { steps: 4 })
++    await page.mouse.up()
++    await sleep(200)
++    const moved = (await page.evaluate(
++      `import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().canvas.frames.find((f) => f.id === 'f13'))`,
++    )) as { x: number; y: number }
++    expect(moved.x).toBeGreaterThan(5 * 1600 + 300)
++    expect(moved.y).toBeGreaterThan(1100 + 150)
++  }, 30_000)
++
++  it('opens the frame menu on a right press', async (ctx) => {
++    if (!webgl) ctx.skip()
++    await store(page, 'select(null)')
++    const f = box(stage, 11)
++    await page.mouse.click((f.left + f.right) / 2, (f.top + f.bottom) / 2, { button: 'right' })
++    await page.waitForSelector('[role="menu"]', { timeout: 5000 })
++    expect(await selected(page)).toEqual(['f11'])
++    await page.keyboard.press('Escape')
++    await page.waitForSelector('[role="menu"]', { hidden: true })
++  }, 30_000)
++
++  it('hands a frame back to the canvas once it is no longer in the DOM', async (ctx) => {
++    if (!webgl) ctx.skip()
++    await store(page, "select('f20')")
++    await sleep(300)
++    expect(await drawn(page)).not.toContain('f20')
++    await store(page, 'select(null)')
++    await sleep(300)
++    /* selected by the store, not woken by a press: drawn again */
++    expect(await drawn(page)).toContain('f20')
++  }, 30_000)
++
++  it('gives every frame back to the DOM when the context is lost, and takes them again on restore', async (ctx) => {
++    if (!webgl) ctx.skip()
++    const before = { drawn: await drawn(page), shells: await shells(page) }
++    const woken = (await page.evaluate(
++      `import('/src/lib/liveFrames.ts').then(({ useLiveFrames }) => useLiveFrames.getState().woken.length)`,
++    )) as number
++    await page.evaluate(() => {
++      const gl = document.querySelector<HTMLCanvasElement>('canvas[data-stage-pictures]')!.getContext('webgl2')!
++      const lose = gl.getExtension('WEBGL_lose_context')!
++      ;(window as unknown as { lose: WEBGL_lose_context }).lose = lose
++      lose.loseContext()
++    })
++    await sleep(300)
++    expect(await drawn(page)).toEqual([])
++    expect(await shells(page)).toBe(FRAMES - woken)
++    /* every shell shows its <img> again (a woken FrameView without its document does too) */
++    expect(await previews(page)).toBeGreaterThanOrEqual(FRAMES - woken)
++    await page.evaluate(() => (window as unknown as { lose: WEBGL_lose_context }).lose.restoreContext())
++    await page.waitForFunction(
++      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.size === ${before.drawn.length})`,
++      { timeout: 15_000 },
++    )
++    expect(await drawn(page)).toEqual(before.drawn)
++    expect(await shells(page)).toBe(before.shells)
++  }, 30_000)
++})

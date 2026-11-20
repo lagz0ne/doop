@@ -1,0 +1,764 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 15:44:07 +0000
+Subject: [PATCH 36/55] fix(canvas): the GPU layer at any screen density, and
+ shells where the GPU falls short
+
+For the GPU picture layer (doop:gpu): it fixes what that commit left
+untested (DPR > 1) and covers the paths it did not test (touch, remote
+changes, marquee), before a render trial may turn the layer on for a
+browser. Nothing changes where the layer is off.
+
+Names at DPR > 1. Chromium shapes a 12px title at 12 * dpr device px, and
+those hinted advances are not the 12px ones scaled, so a name measured at
+12px was cut at another letter than its title and drifted by pixels. The
+atlas now sets the font at its device size and divides the widths back
+(gpuLabels.ts). Measured against the DOM title with
+--force-device-scale-factor, 80 names: CSS-size measure off by a mean of
+1.7 / 1.9 / 0.9 / 1.2 / 0.7 px (max 6.4 / 6 / 5.3 / 5 / 2.7) at 1.25 / 1.5 /
+1.75 / 2 / 3; device-size measure 0 at all but 3 (mean 0.09, max 0.67).
+Screenshots of the 188-frame page, DOM shells against drawn frames, 40 name
+boxes: at 2x mean |diff| 12.3 -> 0.8 /255 with 25 -> 0 boxes shifted; at 3x
+11.2 -> 0.5 with 26 -> 0; at 1.5x 0.7, none shifted. Pictures were already
+in place (0 shifted at 1.5, 2, 3 now; mean 0.1-1.0 /255).
+
+A backing store the GPU will not give. Chromium hands a WebGL canvas less
+than asked past its limits, capped by area and not in proportion (9000x5400
+asked came back 7094x4676 with SwiftShader), and the draw, laid out for the
+size asked, put every picture in the wrong place. Sizing moves out of draw
+into resize(): a size past MAX_VIEWPORT_DIMS, or a drawing buffer that is
+not the size asked, drops the canvas to 1x1 and fitsStage goes false, so
+StagePictures draws nothing and every frame is its shell until a resize
+fits again. Context restore resizes before drawing.
+
+A density change at run time. The resolution media query is still watched,
+but under emulation it fired one change late, so devicePixelRatio is also
+compared on every camera move and scene update (a read, no layout), and a
+change re-measures the stage and rebuilds the names.
+
+Rejected: drawing at the reduced density the GPU did give (the cap is not
+proportional, so x and y would need their own scale, and the shaders and
+the hit arithmetic take one u_dpr; shells are the safe fallback and the
+case is rare: 1600x1000 CSS px needs past 5x to reach 8192); measuring at
+12px and scaling the drawn glyphs (the advances are what differ, not the
+glyph size).
+
+Checked in Chromium with SwiftShader, drawn frames against shells: double
+click, shift click, Hand and middle drag, Comment click, alt drag,
+Prototype click, right click (menu), marquee and shift marquee;
+a phone at 390x844 (tap selects, a hold opens the menu only after
+TOUCH_HOLD_MS, one finger pans from a drawn frame in the Hand and Comment
+tools); a touch laptop (tap, drag, pinch); a peer's drag, rename, hide,
+restack, delete, create and HTML edit, an agent's stream; panning at 60%
+and 20% with shell culling: 0 frames neither drawn nor shelled, 0 both.
+
+Tests (gpuPicturesBrowser.test.ts): marquee and shift press; a peer's
+move, hide, delete, create and an agent's stream; a density change to 2x
+and past the GPU's limit (every frame a shell, the canvas 1 px) and back;
+names measured at 1.25x, 1.5x and 2x (a guard: setViewport's emulated
+density does not shape text at the device size, so it cannot fail the old
+measure); a phone: pan in the Hand and Comment tools, tap, long hold.
+Pixel reads stay within the viewport: a capture beyond it rendered white
+where the screen shows paper.
+
+Camera cost unchanged, 188-frame page at fit, SwiftShader, wheel pan,
+off / force interleaved, two rounds (load 8-11): layers 9 with doop:gpu
+forced (as before); main thread 274-329 -> 115-173 ms, Layerize 140-158
+-> 10-17 ms, compositor 182-240 -> 87-113 ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/components/StagePictures.tsx |  57 ++++--
+ src/lib/gpuLabels.ts             |  43 ++--
+ src/lib/gpuPictures.ts           |  47 ++++-
+ tests/gpuPicturesBrowser.test.ts | 328 +++++++++++++++++++++++++++++--
+ 4 files changed, 418 insertions(+), 57 deletions(-)
+
+diff --git a/src/components/StagePictures.tsx b/src/components/StagePictures.tsx
+index 70aa56b..a4ebf84 100644
+--- a/src/components/StagePictures.tsx
++++ b/src/components/StagePictures.tsx
+@@ -5,7 +5,7 @@ import { isCanvasElement } from '../lib/drawing'
+ import { isSyncedFrame } from '../lib/sync'
+ import { isGithubFrame } from '../lib/github'
+ import { cullingEnabled, useLiveFrames } from '../lib/liveFrames'
+-import { NameAtlas, type NameStyle } from '../lib/gpuLabels'
++import { NameAtlas, nameFont, type NameStyle } from '../lib/gpuLabels'
+ import {
+   PictureRenderer,
+   frameAt,
+@@ -124,17 +124,21 @@ export function StagePictures({
+     function restyle() {
+       if (!probe || !text || !mark || !ringProbe) return
+       const cs = getComputedStyle(text)
+-      const font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`
+       const box = probe.getBoundingClientRect()
+       const next: NameStyle = {
+-        font,
+-        letterSpacing: cs.letterSpacing === 'normal' ? '0px' : cs.letterSpacing,
++        fontStyle: cs.fontStyle,
++        fontWeight: cs.fontWeight,
++        fontSize: parseFloat(cs.fontSize) || 12,
++        fontFamily: cs.fontFamily,
++        /* computed as 'normal' or a length in px */
++        letterSpacing: parseFloat(cs.letterSpacing) || 0,
+         color: cs.color,
+         lineHeight: box.height,
+         baseline: mark.getBoundingClientRect().top - box.top,
+       }
++      const font = nameFont(next)
+       const dpr = window.devicePixelRatio || 1
+-      const key = `${next.font}|${next.letterSpacing}|${next.color}|${next.lineHeight}|${next.baseline}|${dpr}`
++      const key = `${font}|${next.letterSpacing}|${next.color}|${next.lineHeight}|${next.baseline}|${dpr}`
+       /* drawn in a fallback font, the names would stay so: wait for the
+          page's own (once; a font that never comes is not waited for) */
+       if (fontAsked !== font && !document.fonts.check(font)) {
+@@ -170,7 +174,8 @@ export function StagePictures({
+       const live = useLiveFrames.getState()
+       const s = useStore.getState()
+       const ids = live.ids
+-      if (lost || ids === null || !style) {
++      densityMoved()
++      if (lost || !renderer.fitsStage || ids === null || !style) {
+         drawnList = []
+         renderer.setScene([])
+         useGpuPictures.getState().setDrawn(NONE)
+@@ -245,10 +250,34 @@ export function StagePictures({
+     el.addEventListener('pointerleave', onLeave)
+     el.addEventListener('pointerdown', onLeave, true)
+ 
++    let density = window.devicePixelRatio || 1
+     function measure() {
+       if (!renderer || !el) return
+-      renderer.setStage({ width: el.clientWidth, height: el.clientHeight }, window.devicePixelRatio || 1)
++      const fitted = renderer.fitsStage
++      density = window.devicePixelRatio || 1
++      renderer.setStage({ width: el.clientWidth, height: el.clientHeight }, density)
+       readOrigin()
++      /* a backing store the GPU would not give hands every frame to the DOM */
++      if (renderer.fitsStage !== fitted) update()
++    }
++
++    /* A window moved to a screen of another density: the media query below
++       says so, but not always in time (Chromium's emulation fired it a step
++       late), so the density is also compared on every camera move and
++       update, a read that costs no layout. */
++    let densityQuery: MediaQueryList | null = null
++    function watchDensity() {
++      densityQuery?.removeEventListener('change', onDensity)
++      densityQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`)
++      densityQuery.addEventListener('change', onDensity)
++    }
++    function onDensity() {
++      watchDensity()
++      measure()
++      restyle()
++    }
++    function densityMoved() {
++      if ((window.devicePixelRatio || 1) !== density) onDensity()
+     }
+ 
+     /* Names are cut at the frame's width and kept a set size on screen, so
+@@ -256,6 +285,7 @@ export function StagePictures({
+        is worked out again once the camera rests, not per frame. */
+     let rest = 0
+     function camera(vp: { x: number; y: number; zoom: number }) {
++      densityMoved()
+       renderer!.setCamera(vp)
+       window.clearTimeout(rest)
+       rest = window.setTimeout(() => {
+@@ -285,16 +315,7 @@ export function StagePictures({
+     const theme = new MutationObserver(restyle)
+     theme.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style'] })
+     document.fonts.addEventListener('loadingdone', restyle)
+-    /* a window moved to a screen of another density */
+-    let dpr = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
+-    const onDpr = () => {
+-      dpr.removeEventListener('change', onDpr)
+-      dpr = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
+-      dpr.addEventListener('change', onDpr)
+-      measure()
+-      restyle()
+-    }
+-    dpr.addEventListener('change', onDpr)
++    watchDensity()
+     return () => {
+       control.current = null
+       setGpuHitTest(null)
+@@ -304,7 +325,7 @@ export function StagePictures({
+       resize.disconnect()
+       theme.disconnect()
+       document.fonts.removeEventListener('loadingdone', restyle)
+-      dpr.removeEventListener('change', onDpr)
++      densityQuery?.removeEventListener('change', onDensity)
+       el.removeEventListener('pointermove', onMove)
+       el.removeEventListener('pointerleave', onLeave)
+       el.removeEventListener('pointerdown', onLeave, true)
+diff --git a/src/lib/gpuLabels.ts b/src/lib/gpuLabels.ts
+index 7bfcf92..75acb1f 100644
+--- a/src/lib/gpuLabels.ts
++++ b/src/lib/gpuLabels.ts
+@@ -16,9 +16,13 @@
+ 
+ /** The title's look, read off the probe (StagePictures). */
+ export interface NameStyle {
+-  /** the canvas `font` shorthand: style, weight, size, family */
+-  font: string
+-  letterSpacing: string
++  fontStyle: string
++  fontWeight: string
++  /** CSS px */
++  fontSize: number
++  fontFamily: string
++  /** CSS px */
++  letterSpacing: number
+   /** the computed CSS colour of the name */
+   color: string
+   /** the title row's height, CSS px */
+@@ -41,6 +45,11 @@ export interface NameCell {
+   count: number
+ }
+ 
++/** The canvas `font` shorthand of a style, its size scaled by `scale`. */
++export function nameFont(style: NameStyle, scale = 1): string {
++  return `${style.fontStyle} ${style.fontWeight} ${style.fontSize * scale}px ${style.fontFamily}`
++}
++
+ /** Device px around each cell's text, for ink outside the advance. */
+ export const PAD = 2
+ 
+@@ -94,16 +103,22 @@ export class NameAtlas {
+   version = 0
+   private measured = new Map<string, { advance: number; prefix: Float32Array; count: number }>()
+   private measuredFont = ''
++  /** the density the names are measured at */
++  private measuredDpr = 1
+ 
+   constructor() {
+     this.canvas = document.createElement('canvas')
+     this.ctx = this.canvas.getContext('2d')!
+   }
+ 
+-  private applyFont(style: NameStyle) {
++  /** The font at its device size, where the DOM's text is shaped: Chromium lays a 12px title out at
++      12 * dpr px, whose hinted advances are not the 12px ones scaled (up to 6 px wider or narrower over
++      a name at 1.25x and 1.5x, so a name was cut at another letter than its title). Measured at the
++      device size and divided back, the widths match the title's to 0 px at 1x to 2x. */
++  private applyFont(style: NameStyle, dpr: number) {
+     const ctx = this.ctx
+-    ctx.font = style.font
+-    ctx.letterSpacing = style.letterSpacing
++    ctx.font = nameFont(style, dpr)
++    ctx.letterSpacing = `${style.letterSpacing * dpr}px`
+     ctx.fontKerning = 'normal'
+     ctx.textBaseline = 'alphabetic'
+     ctx.textAlign = 'left'
+@@ -114,7 +129,8 @@ export class NameAtlas {
+     if (known) return known
+     const ends = graphemeEnds(name)
+     const prefix = new Float32Array(ends.length + 1)
+-    for (let k = 0; k < ends.length; k++) prefix[k + 1] = this.ctx.measureText(name.slice(0, ends[k])).width
++    const dpr = this.measuredDpr
++    for (let k = 0; k < ends.length; k++) prefix[k + 1] = this.ctx.measureText(name.slice(0, ends[k])).width / dpr
+     const m = { advance: prefix[ends.length] ?? 0, prefix, count: ends.length }
+     this.measured.set(name, m)
+     return m
+@@ -123,12 +139,13 @@ export class NameAtlas {
+   /** Lays out and draws `names` (no empty ones) in `style` at `dpr`. */
+   build(names: Iterable<string>, style: NameStyle, dpr: number, maxSide: number) {
+     const ctx = this.ctx
+-    const font = `${style.font}|${style.letterSpacing}`
++    const font = `${nameFont(style, dpr)}|${style.letterSpacing}|${dpr}`
+     if (font !== this.measuredFont) {
+       this.measured.clear()
+       this.measuredFont = font
++      this.measuredDpr = dpr
+     }
+-    this.applyFont(style)
++    this.applyFont(style, dpr)
+     const side = Math.min(ATLAS_SIDE, maxSide)
+     const cellH = Math.ceil(style.lineHeight * dpr) + 2 * PAD
+     const cells = new Map<string, NameCell>()
+@@ -157,17 +174,13 @@ export class NameAtlas {
+     /* a resize clears the canvas and resets its state */
+     this.canvas.width = side
+     this.canvas.height = height
+-    this.applyFont(style)
++    this.applyFont(style, dpr)
+     ctx.fillStyle = style.color
+     /* the baseline on a whole device pixel, as the DOM lays text out */
+     const base = Math.round(style.baseline * dpr)
+-    const drawCell = (name: string, c: NameCell) => {
+-      ctx.setTransform(dpr, 0, 0, dpr, c.x + PAD, c.y + PAD + base)
+-      ctx.fillText(name, 0, 0)
+-    }
++    const drawCell = (name: string, c: NameCell) => ctx.fillText(name, c.x + PAD, c.y + PAD + base)
+     if (ellipsis) drawCell('…', ellipsis)
+     for (const [name, c] of cells) drawCell(name, c)
+-    ctx.setTransform(1, 0, 0, 1, 0, 0)
+     this.cells = cells
+     this.ellipsis = ellipsis
+     this.style = style
+diff --git a/src/lib/gpuPictures.ts b/src/lib/gpuPictures.ts
+index f0aa299..bc070fd 100644
+--- a/src/lib/gpuPictures.ts
++++ b/src/lib/gpuPictures.ts
+@@ -441,6 +441,9 @@ export class PictureRenderer {
+   private loadTimer = 0
+   private frameNo = 0
+   private maxSide = 4096
++  private maxView = [4096, 4096]
++  /** the backing store is the size asked for: see resize */
++  private fits = true
+   private lost = false
+   private disposed = false
+   private texturesChanged = false
+@@ -550,6 +553,8 @@ export class PictureRenderer {
+     this.atlasUploaded = -1
+ 
+     this.maxSide = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number
++    const view = gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array | null
++    this.maxView = [view?.[0] ?? 4096, view?.[1] ?? 4096]
+     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true)
+     gl.enable(gl.BLEND)
+     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+@@ -582,10 +587,18 @@ export class PictureRenderer {
+       return
+     }
+     this.lost = false
++    this.resize()
+     this.events.lost(false)
+     this.invalidate()
+   }
+ 
++  /** False while the GPU could not give the canvas a backing store of the
++   *  stage's size at the screen's density: nothing is drawn then, and every
++   *  frame stays in the DOM (StagePictures). */
++  get fitsStage() {
++    return this.fits
++  }
++
+   /** True once a picture of this frame (any version) is on the GPU. */
+   hasPicture(id: string): boolean {
+     return this.textures.has(id)
+@@ -678,10 +691,34 @@ export class PictureRenderer {
+   setStage(stage: Size, dpr: number) {
+     this.stage = stage
+     this.dpr = dpr
++    this.resize()
+     this.invalidate()
+     this.scheduleLoad(0)
+   }
+ 
++  /* Sizes the backing store to the stage at the screen's density. A browser
++     gives a WebGL canvas less than it asks for past its limits (Chromium caps
++     the drawing buffer by area, and not in proportion: 9000×5400 asked at 3x
++     came back 7094×4676 with SwiftShader), and a draw laid out for the size
++     asked for would then put every picture in the wrong place. So a store
++     that is not the size asked for, or a size past the viewport's limit, is
++     given up: the canvas goes down to one pixel (the memory goes back) and
++     draws nothing, and its frames are shells, until a resize asks again. */
++  private resize() {
++    if (this.lost) return
++    const { canvas, gl, dpr, stage } = this
++    const w = Math.max(1, Math.round(stage.width * dpr))
++    const h = Math.max(1, Math.round(stage.height * dpr))
++    const allowed = w <= (this.maxView[0] ?? 0) && h <= (this.maxView[1] ?? 0)
++    if (allowed && (canvas.width !== w || canvas.height !== h)) {
++      canvas.width = w
++      canvas.height = h
++    }
++    const fits = allowed && gl.drawingBufferWidth === w && gl.drawingBufferHeight === h
++    if (!fits) canvas.width = canvas.height = 1
++    this.fits = fits
++  }
++
+   /** Draw now: for a change the DOM shows in this same frame (a frame that
+    *  leaves the DOM must not leave a hole until the next one). */
+   drawNow() {
+@@ -710,15 +747,11 @@ export class PictureRenderer {
+   }
+ 
+   private draw() {
+-    if (this.lost || this.disposed) return
++    if (this.lost || this.disposed || !this.fits) return
+     const gl = this.gl
+     const { canvas, dpr, stage, camera } = this
+-    const w = Math.max(1, Math.round(stage.width * dpr))
+-    const h = Math.max(1, Math.round(stage.height * dpr))
+-    if (canvas.width !== w || canvas.height !== h) {
+-      canvas.width = w
+-      canvas.height = h
+-    }
++    const w = canvas.width
++    const h = canvas.height
+     if (this.uploads.length) this.upload()
+     this.frameNo++
+     const atlas = this.atlas
+diff --git a/tests/gpuPicturesBrowser.test.ts b/tests/gpuPicturesBrowser.test.ts
+index b5ebfba..67a2ed2 100644
+--- a/tests/gpuPicturesBrowser.test.ts
++++ b/tests/gpuPicturesBrowser.test.ts
+@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+ import type { Page } from 'puppeteer-core'
+ import { findBrowserPath } from '../server/screenshot'
+ import { fixtureUrl, openBrowser, type TestBrowser } from './browser'
++import { TOUCH_HOLD_MS } from '../src/lib/touchHold'
+ import type { Canvas, Frame } from '../shared/types'
+ 
+ /* The GPU picture layer (src/lib/gpuPictures.ts, localStorage['doop:gpu']):
+@@ -61,9 +62,10 @@ const shellIds = (page: Page) =>
+   )
+ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+ 
+-/** the colours on screen in a box, from a screenshot (the canvas keeps no drawing buffer) */
++/** the colours on screen in a box, from a screenshot (the canvas keeps no drawing buffer). Within the
++    viewport: a capture beyond it renders the page again and showed white where the screen has paper. */
+ async function pixels(page: Page, x: number, y: number, width = 1, height = 1): Promise<number[][]> {
+-  const png = await page.screenshot({ clip: { x, y, width, height }, encoding: 'base64' })
++  const png = await page.screenshot({ clip: { x, y, width, height }, encoding: 'base64', captureBeyondViewport: false })
+   return page.evaluate(
+     async (src, w, h) => {
+       const img = new Image()
+@@ -86,6 +88,25 @@ async function pixels(page: Page, x: number, y: number, width = 1, height = 1):
+ }
+ const pixel = async (page: Page, x: number, y: number) => (await pixels(page, x, y))[0]!
+ 
++/** answers every preview request with one flat PICTURE image */
++async function servePreviews(page: Page) {
++  const png = await page.evaluate((rgb) => {
++    const c = document.createElement('canvas')
++    c.width = 144
++    c.height = 90
++    const g = c.getContext('2d')!
++    g.fillStyle = `rgb(${rgb.join(',')})`
++    g.fillRect(0, 0, 144, 90)
++    return c.toDataURL('image/png').split(',')[1]!
++  }, PICTURE)
++  const body = Buffer.from(png, 'base64')
++  await page.setRequestInterception(true)
++  page.on('request', (req) => {
++    if (/\/i\/[^/]+\.webp\?preview/.test(req.url())) void req.respond({ status: 200, contentType: 'image/png', body })
++    else void req.continue()
++  })
++}
++
+ /** the screen box of a frame at the test's camera (20, 60) at 8% */
+ function box(stage: { left: number; top: number }, i: number) {
+   const left = stage.left + 20 + (i % 8) * 1600 * 0.08
+@@ -104,21 +125,7 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
+     await page.setViewport({ width: 1600, height: 1000 })
+     await page.goto(fixtureUrl('pages.html'))
+     webgl = await page.evaluate(() => !!document.createElement('canvas').getContext('webgl2'))
+-    const png = await page.evaluate((rgb) => {
+-      const c = document.createElement('canvas')
+-      c.width = 144
+-      c.height = 90
+-      const g = c.getContext('2d')!
+-      g.fillStyle = `rgb(${rgb.join(',')})`
+-      g.fillRect(0, 0, 144, 90)
+-      return c.toDataURL('image/png').split(',')[1]!
+-    }, PICTURE)
+-    const body = Buffer.from(png, 'base64')
+-    await page.setRequestInterception(true)
+-    page.on('request', (req) => {
+-      if (/\/i\/[^/]+\.webp\?preview/.test(req.url())) void req.respond({ status: 200, contentType: 'image/png', body })
+-      else void req.continue()
+-    })
++    await servePreviews(page)
+     await page.evaluate(() => localStorage.setItem('doop:gpu', 'force'))
+     await page.reload()
+     await page.waitForFunction(() => typeof window.seedPages === 'function')
+@@ -271,4 +278,291 @@ describe.skipIf(!findBrowserPath())('GPU pictures', () => {
+     expect(await drawn(page)).toEqual(before.drawn)
+     expect(await shells(page)).toBe(before.shells)
+   }, 30_000)
++
++  it('selects drawn frames with a marquee and a shift press, as it selects shells', async (ctx) => {
++    if (!webgl) ctx.skip()
++    await store(page, 'select(null)')
++    await sleep(200)
++    /* from the empty stage right of the last column, row 1, to the middle of f22 */
++    const row1 = box(stage, 15)
++    const end = box(stage, 22)
++    await page.mouse.move(stage.left + 1100, (row1.top + row1.bottom) / 2)
++    await page.mouse.down()
++    await page.mouse.move((end.left + end.right) / 2, (end.top + end.bottom) / 2, { steps: 8 })
++    await page.mouse.up()
++    await sleep(200)
++    expect([...(await selected(page))].sort()).toEqual(['f14', 'f15', 'f22', 'f23'])
++    expect(await drawn(page)).toContain('f28')
++    const f = box(stage, 28)
++    await page.keyboard.down('Shift')
++    await page.mouse.click((f.left + f.right) / 2, (f.top + f.bottom) / 2)
++    await page.keyboard.up('Shift')
++    await sleep(200)
++    expect([...(await selected(page))].sort()).toEqual(['f14', 'f15', 'f22', 'f23', 'f28'])
++    await store(page, 'select(null)')
++  }, 30_000)
++
++  it("follows a peer's moves, hides, deletes, creations and an agent's stream", async (ctx) => {
++    if (!webgl) ctx.skip()
++    const frame = (id: string) => canvas.frames.find((f) => f.id === id)!
++    const paper = await pixel(page, Math.round(stage.left + 1100), Math.round(box(stage, 0).top + 30))
++    const centre = (i: number) => {
++      const f = box(stage, i)
++      return pixel(page, Math.round((f.left + f.right) / 2), Math.round((f.top + f.bottom) / 2))
++    }
++    expect(await drawn(page)).toEqual(expect.arrayContaining(['f2', 'f5', 'f6', 'f7']))
++    /* frame:drag, as the room applies it: drawn at once at the new place */
++    const f5 = box(stage, 5)
++    await store(page, `patchFrameLocal('f5', { x: ${frame('f5').x + 400} })`)
++    await sleep(50)
++    expect(await pixel(page, Math.round(f5.right + 400 * 0.08 - 4), Math.round((f5.top + f5.bottom) / 2))).toEqual(
++      PICTURE,
++    )
++    expect(await pixel(page, Math.round(f5.left + 4), Math.round((f5.top + f5.bottom) / 2))).toEqual(paper)
++    await store(page, `patchFrameLocal('f5', { x: ${frame('f5').x} })`)
++    /* hidden, deleted: neither drawn nor a shell, the paper where they were */
++    await store(page, `upsertFrame({ ...useStore.getState().canvas.frames.find((f) => f.id === 'f6'), hidden: true })`)
++    await store(page, "removeFrame('f7')")
++    await sleep(200)
++    expect(await drawn(page)).not.toContain('f6')
++    expect(await drawn(page)).not.toContain('f7')
++    expect(await shellIds(page)).not.toContain('f6')
++    expect(await centre(6)).toEqual(paper)
++    expect(await centre(7)).toEqual(paper)
++    /* created by a peer, in a row of its own (column 0, under frames never woken) */
++    await store(
++      page,
++      `upsertFrame({ ...useStore.getState().canvas.frames.find((f) => f.id === 'f3'), id: 'f40', x: 0, y: 5500 })`,
++    )
++    await page.waitForFunction(
++      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.has('f40'))`,
++      { timeout: 10_000 },
++    )
++    expect(await centre(40)).toEqual(PICTURE)
++    /* streamed into by an agent: a live FrameView while it lasts */
++    await store(page, "setStream('f2', { name: 'Agent', color: '#f0f' })")
++    await sleep(200)
++    expect(await drawn(page)).not.toContain('f2')
++    expect(await page.evaluate(() => !!document.querySelector('iframe[title="Frame 2"]'))).toBe(true)
++    await store(page, "setStream('f2', null)")
++    await sleep(300)
++    expect(await drawn(page)).toContain('f2')
++    await store(page, "removeFrame('f40')")
++    await store(page, `upsertFrame(${JSON.stringify(frame('f6'))})`)
++    await store(page, `upsertFrame(${JSON.stringify(frame('f7'))})`)
++    await page.waitForFunction(
++      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => ['f6', 'f7'].every((id) => useGpuPictures.getState().drawn.has(id)))`,
++      { timeout: 10_000 },
++    )
++  }, 30_000)
++
++  /* A density change is emulated (setViewport's deviceScaleFactor), which
++     moves devicePixelRatio at once but fires the resolution query late, so
++     the camera is nudged as a person's next move would. What emulation
++     cannot show: a real screen change, and a GPU's own drawing-buffer limits
++     (SwiftShader takes 8192 px a side; real GPUs often 16384 or more, where
++     the check is skipped). */
++  it('draws at a new screen density, and gives every frame to the DOM past what the GPU allows', async (ctx) => {
++    if (!webgl) ctx.skip()
++    const nudge = async () => {
++      await store(page, 'setViewport({ x: 21, y: 60, zoom: 0.08 })')
++      await store(page, 'setViewport({ x: 20, y: 60, zoom: 0.08 })')
++    }
++    const backing = () =>
++      page.evaluate(() => {
++        const c = document.querySelector<HTMLCanvasElement>('canvas[data-stage-pictures]')!
++        const gl = c.getContext('webgl2')!
++        return {
++          width: c.width,
++          height: c.height,
++          css: c.clientWidth,
++          maxView: (gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array)[0]!,
++        }
++      })
++    expect(await drawn(page)).toContain('f24')
++    const f = box(stage, 24)
++    const mid = { x: Math.round((f.left + f.right) / 2), y: Math.round((f.top + f.bottom) / 2) }
++    try {
++      await page.setViewport({ width: 1600, height: 1000, deviceScaleFactor: 2 })
++      await nudge()
++      await sleep(300)
++      const two = await backing()
++      expect(two.width).toBe(two.css * 2)
++      expect(await drawn(page)).toContain('f24')
++      for (const [i, c] of (await pixel(page, mid.x, mid.y)).entries())
++        expect(Math.abs(c - PICTURE[i]!)).toBeLessThanOrEqual(2)
++      const past = Math.ceil((two.maxView + 1) / two.css)
++      if (past <= 8) {
++        await page.setViewport({ width: 1600, height: 1000, deviceScaleFactor: past })
++        await nudge()
++        await sleep(300)
++        expect(await drawn(page)).toEqual([])
++        expect((await backing()).width).toBe(1)
++        expect(await shells(page)).toBeGreaterThan(FRAMES / 2)
++      }
++    } finally {
++      await page.setViewport({ width: 1600, height: 1000, deviceScaleFactor: 1 })
++      await nudge()
++    }
++    await page.waitForFunction(
++      `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => useGpuPictures.getState().drawn.has('f24'))`,
++      { timeout: 15_000 },
++    )
++    expect((await backing()).width).toBe(1600)
++  }, 60_000)
++})
++
++/* Names are measured where the DOM lays its title out: at the screen's
++   density (zoom for device scale), not at the CSS size, whose advances
++   differ from it by pixels at a fractional density. A guard only: the
++   density setViewport emulates does not shape text at the device size, so
++   here the CSS-size measure matches too; a browser started with
++   --force-device-scale-factor shows the difference. */
++describe.skipIf(!findBrowserPath())('GPU picture names', () => {
++  let browser: TestBrowser
++  beforeAll(async () => {
++    browser = await openBrowser()
++  }, 60_000)
++  afterAll(async () => {
++    await browser?.close()
++  })
++
++  for (const dpr of [1.25, 1.5, 2])
++    it(`measures a name as wide as the title at ${dpr}x`, async () => {
++      const page = await browser.newPage()
++      await page.setViewport({ width: 800, height: 600, deviceScaleFactor: dpr })
++      await page.goto(fixtureUrl('pages.html'))
++      const r = (await page.evaluate(`import('/src/lib/gpuLabels.ts').then(({ NameAtlas }) => {
++        const names = ['Frame 1', 'Checkout, step 2 of 3', 'Linh joined (Linh)', 'Onboarding / Welcome back, Ana', 'WWW iii lll 0123456789']
++        const span = document.createElement('span')
++        span.style.cssText = 'position:absolute;left:0;top:0;white-space:nowrap;font:600 12px sans-serif'
++        document.body.append(span)
++        const atlas = new NameAtlas()
++        atlas.build(names, { fontStyle: 'normal', fontWeight: '600', fontSize: 12, fontFamily: 'sans-serif', letterSpacing: 0, color: '#000', lineHeight: 16, baseline: 12 }, devicePixelRatio, 4096)
++        let atlasOff = 0
++        for (const n of names) {
++          span.textContent = n
++          atlasOff = Math.max(atlasOff, Math.abs(span.getBoundingClientRect().width - atlas.cells.get(n).advance))
++        }
++        span.remove()
++        return { dpr: devicePixelRatio, atlasOff }
++      })`)) as { dpr: number; atlasOff: number }
++      await page.close()
++      expect(r.dpr).toBe(dpr)
++      expect(r.atlasOff).toBeLessThan(0.1)
++    }, 30_000)
++})
++
++/* A phone in the reviewer layout (tests/phoneReviewBrowser.test.ts) over
++   drawn frames: a finger pans from one in the Hand and the Comment tool, a
++   tap selects it, a long hold opens its menu, as on a shell. */
++describe.skipIf(!findBrowserPath())('GPU pictures on a phone', () => {
++  let browser: TestBrowser
++  let page: Page
++  let webgl = false
++  let stage = { left: 0, top: 0 }
++  const menuOpen = () => page.evaluate(() => !!document.querySelector('[role="menu"]'))
++  const viewport = () =>
++    page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => useStore.getState().viewport)`) as Promise<{
++      x: number
++      y: number
++    }>
++  const centre = (i: number) => {
++    const f = box(stage, i)
++    return { x: (f.left + f.right) / 2, y: (f.top + f.bottom) / 2 }
++  }
++  beforeAll(async () => {
++    browser = await openBrowser()
++    page = await browser.newPage()
++    await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true })
++    await page.evaluateOnNewDocument(() => {
++      localStorage.setItem('doop:full-ui', 'off')
++      localStorage.setItem('doop:gpu', 'force')
++      document.addEventListener('readystatechange', () => {
++        if (document.readyState !== 'interactive') return
++        const meta = document.createElement('meta')
++        meta.name = 'viewport'
++        meta.content = 'width=device-width, initial-scale=1.0, viewport-fit=cover'
++        document.head.append(meta)
++      })
++    })
++    await page.goto(fixtureUrl('canvasClipboard.html'))
++    webgl = await page.evaluate(() => !!document.createElement('canvas').getContext('webgl2'))
++    await servePreviews(page)
++    type Harness = { canvasClipboardHarness: { seed: (frames: Frame[]) => void } }
++    await page.waitForFunction(
++      () => !!(window as unknown as Harness).canvasClipboardHarness && !!document.querySelector('.stage'),
++    )
++    /* the harness's canvas has no pages, so the frames go on its default one */
++    const frames = canvas.frames.map(({ pageId: _page, ...frame }) => frame)
++    await page.evaluate((list) => (window as unknown as Harness).canvasClipboardHarness.seed(list), frames)
++    await page.evaluate(
++      `import('/src/lib/store.ts').then(({ useStore }) => useStore.setState({ uiHidden: false, viewport: { x: 20, y: 60, zoom: 0.08 } }))`,
++    )
++    stage = await page.evaluate(() => {
++      const r = document.querySelector('.stage')!.getBoundingClientRect()
++      return { left: r.left, top: r.top }
++    })
++    if (webgl)
++      await page.waitForFunction(
++        `import('/src/lib/gpuPictures.ts').then(({ useGpuPictures }) => ['f2', 'f8', 'f16', 'f17'].every((id) => useGpuPictures.getState().drawn.has(id)))`,
++        { timeout: 30_000 },
++      )
++  }, 60_000)
++  afterAll(async () => {
++    await page?.close()
++    await browser?.close()
++  })
++
++  /* columns 0-2 are on this screen; a press wakes its frame, and the column
++     under a woken frame goes to shells, so each test takes a frame no earlier
++     one has put under a woken one */
++  for (const [tool, i] of [
++    ['hand', 16],
++    ['comment', 17],
++  ] as const)
++    it(`pans with a finger dragged from a drawn frame in the ${tool} tool`, async (ctx) => {
++      if (!webgl) ctx.skip()
++      await store(page, `setTool('${tool}')`)
++      expect(await drawn(page)).toContain(`f${i}`)
++      const at = centre(i)
++      const before = await viewport()
++      await page.touchscreen.touchStart(at.x, at.y)
++      for (let k = 1; k <= 8; k++) {
++        await sleep(30)
++        await page.touchscreen.touchMove(at.x + k * 6, at.y + k * 5)
++      }
++      await page.touchscreen.touchEnd()
++      await sleep(300)
++      const after = await viewport()
++      expect(after.x).toBeGreaterThan(before.x + 30)
++      expect(await selected(page)).toEqual([])
++      expect(await menuOpen()).toBe(false)
++      await store(page, 'setViewport({ x: 20, y: 60, zoom: 0.08 })')
++      await sleep(200)
++    }, 20_000)
++
++  it('selects a drawn frame on a tap in the comment tool', async (ctx) => {
++    if (!webgl) ctx.skip()
++    await store(page, "setTool('comment')")
++    expect(await drawn(page)).toContain('f2')
++    const at = centre(2)
++    await page.touchscreen.tap(at.x, at.y)
++    await sleep(400)
++    expect(await selected(page)).toEqual(['f2'])
++    await store(page, 'select(null)')
++  }, 20_000)
++
++  it('opens the frame menu on a drawn frame only after the long hold', async (ctx) => {
++    if (!webgl) ctx.skip()
++    await store(page, "setTool('hand')")
++    expect(await drawn(page)).toContain('f8')
++    const at = centre(8)
++    await page.touchscreen.touchStart(at.x, at.y)
++    await sleep(1000)
++    expect(await menuOpen()).toBe(false)
++    await page.waitForSelector('[role="menu"]', { timeout: TOUCH_HOLD_MS + 2000 })
++    await page.touchscreen.touchEnd()
++    expect(await selected(page)).toEqual(['f8'])
++  }, 20_000)
+ })

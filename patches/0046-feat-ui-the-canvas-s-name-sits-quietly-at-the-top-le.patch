@@ -1,0 +1,294 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 06:48:14 +0000
+Subject: [PATCH 46/55] feat(ui): the canvas's name sits quietly at the top
+ left, the dock gives its room to the page
+
+The reviewer dock opened on back, the canvas's name and its id menu:
+about 300px of a bar meant for moving around and reviewing, for a name
+people read once. They move to the top left (CanvasLabel), on a pill
+that stays faint (surface at 70%, no ring) until the pointer or focus
+comes to it, beside Present at the top right; the name truncates at
+240px and is whole in its tooltip, and it is still the rename field for
+those who may edit. The id menu opens downward from there.
+
+The dock is now Hand, Comment, the zoom, the page picker and the people
+menu, and the page picker's name may run to 320px (200px before). Fits
+keep 52px clear at the top for the label (LABEL_CLEAR). Phones keep
+their dock as it was: the name is in their canvas actions sheet.
+
+Test: reviewerLayoutBrowser finds the label in the top-left corner,
+under 340px wide, holding the id menu, and no back or id in the dock;
+phoneReviewBrowser finds no label on a phone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/components/CanvasDock.tsx       | 59 +++++++++++++++++++----------
+ src/lib/i18n/en/canvas.ts           |  1 +
+ src/lib/i18n/pt-BR/canvas.ts        |  1 +
+ src/pages/CanvasPage.tsx            | 31 ++++++++++-----
+ tests/phoneReviewBrowser.test.ts    |  2 +
+ tests/reviewerLayoutBrowser.test.ts | 15 ++++++++
+ 6 files changed, 80 insertions(+), 29 deletions(-)
+
+diff --git a/src/components/CanvasDock.tsx b/src/components/CanvasDock.tsx
+index 55e32a6..2dc48ca 100644
+--- a/src/components/CanvasDock.tsx
++++ b/src/components/CanvasDock.tsx
+@@ -41,13 +41,15 @@ import {
+  * bottom of the canvas, icons only with their names on hover. The bar keeps to
+  * moving around and reviewing; everything else is one menu away.
+  *
+- * In order: back to the canvases, the canvas's name and id; Hand and
+- * Comment; the zoom (the Stage draws its own control into `zoomSlot`, keeping
++ * In order: Hand and Comment; the zoom (the Stage draws its own control into `zoomSlot`, keeping
+  * its menu and handlers); the page picker (the canvas's pages, in place of a
+  * Pages panel); and the faces of who is here, which open the one menu for the
+  * rest: the comments panel, import, export, share, the design panel, settings
+  * and your name. The page decides what each may do and passes null for what
+- * this person is not offered.
++ * this person is not offered. Back to the canvases and the canvas's name and
++ * id are not in the bar: `CanvasLabel` puts them quietly at the top left,
++ * where a glance tells what this is, and the bar's room goes to the page's
++ * name.
+  *
+  * No tool list, no Prototype mode, no AI activity and no Connect AI: a
+  * reviewer moves around and comments, and the agents work over MCP, not from
+@@ -84,9 +86,6 @@ type PhoneDockProps = PanelProps & {
+ }
+ 
+ type DockProps = PanelProps & {
+-  title: ReactNode
+-  idMenu: ReactNode
+-  onBack: (() => void) | null
+   /** receives the element the zoom control is drawn into */
+   zoomSlot: (el: HTMLElement | null) => void
+   me: { name: string; image?: string; color: string }
+@@ -149,9 +148,6 @@ function PanelButtons({
+ }
+ 
+ function DesktopDock({
+-  title,
+-  idMenu,
+-  onBack,
+   zoomSlot,
+   me,
+   others,
+@@ -166,20 +162,11 @@ function DesktopDock({
+   onShare,
+ }: DockProps) {
+   const t = useT()
+-  const side = 'top' as const
+   return (
+     <Toolbar
+       aria-label={t('canvas.dock')}
+       className="pointer-events-auto absolute bottom-3.5 left-1/2 z-[38] max-w-[calc(100%-28px)] -translate-x-1/2 overflow-x-auto"
+     >
+-      {onBack && (
+-        <ToolbarControl side={side} label={t('canvas.allCanvases')} onClick={onBack}>
+-          <ChevronLeftIcon />
+-        </ToolbarControl>
+-      )}
+-      <span className="flex min-w-0 max-w-[220px] items-center">{title}</span>
+-      {idMenu}
+-      <ToolbarDivider />
+       <DockTools />
+       <ToolbarDivider />
+       <span ref={zoomSlot} className="flex items-center" />
+@@ -203,6 +190,40 @@ function DesktopDock({
+   )
+ }
+ 
++/** The reviewer layout's top left, on a desktop: back to the canvases, the
++ *  canvas's name (its rename field where this person may edit) and its id
++ *  menu, on a pill that stays faint until the pointer comes to it. People
++ *  read it once and move on, so it takes the least room that names the
++ *  canvas: the name truncates at 240px, whole in its tooltip. */
++export function CanvasLabel({
++  title,
++  idMenu,
++  onBack,
++}: {
++  title: ReactNode
++  idMenu: ReactNode
++  onBack: (() => void) | null
++}) {
++  const t = useT()
++  const name = useStore((s) => s.canvas?.name)
++  return (
++    <Toolbar
++      aria-label={t('canvas.canvasLabel')}
++      className="pointer-events-auto absolute top-2.5 left-3.5 z-[38] h-9 gap-0.5 bg-surface/70 px-1 py-0 shadow-none backdrop-blur-sm transition-[background-color,box-shadow] duration-150 hover:bg-surface hover:shadow-ring focus-within:bg-surface focus-within:shadow-ring"
++    >
++      {onBack && (
++        <ToolbarControl side="bottom" label={t('canvas.allCanvases')} onClick={onBack}>
++          <ChevronLeftIcon />
++        </ToolbarControl>
++      )}
++      <span className="flex min-w-0 max-w-[240px] items-center" title={name}>
++        {title}
++      </span>
++      {idMenu}
++    </Toolbar>
++  )
++}
++
+ /** The canvas's pages as a pick-one menu, in place of a Pages panel: the
+  *  trigger names the page shown (a phone shows the icon alone). Adding,
+  *  renaming and ordering pages stay with the full editor's Pages panel. */
+@@ -221,7 +242,7 @@ function PagePicker({ phone = false }: { phone?: boolean }) {
+           <DropdownMenuTrigger asChild>
+             <ToolbarButton
+               aria-label={t('canvas.pagePicker', { page: active.name })}
+-              className={phone ? undefined : 'flex w-auto max-w-[200px] gap-1.5 px-2 sm:w-auto sm:px-2'}
++              className={phone ? undefined : 'flex w-auto max-w-[320px] gap-1.5 px-2 sm:w-auto sm:px-2'}
+             >
+               <PageIcon />
+               {!phone && <span className="min-w-0 truncate">{active.name}</span>}
+diff --git a/src/lib/i18n/en/canvas.ts b/src/lib/i18n/en/canvas.ts
+index 643b32c..8d94ee2 100644
+--- a/src/lib/i18n/en/canvas.ts
++++ b/src/lib/i18n/en/canvas.ts
+@@ -108,6 +108,7 @@ export const canvas = {
+   /* the reviewer dock (CanvasDock.tsx): the page picker and the one menu for the rest */
+   pagePicker: 'Page: {page}',
+   dockMenu: 'Comments, people, share and settings',
++  canvasLabel: 'Canvas',
+   hereNow: 'Here now: {names}',
+   commentsClose: 'Close comments',
+   changeYourName: 'Change your name',
+diff --git a/src/lib/i18n/pt-BR/canvas.ts b/src/lib/i18n/pt-BR/canvas.ts
+index ebf2650..afb6799 100644
+--- a/src/lib/i18n/pt-BR/canvas.ts
++++ b/src/lib/i18n/pt-BR/canvas.ts
+@@ -107,6 +107,7 @@ export const canvas: Catalog['canvas'] = {
+   commentsOpen: 'Comentários · {open} abertos',
+   pagePicker: 'Página: {page}',
+   dockMenu: 'Comentários, pessoas, compartilhar e configurações',
++  canvasLabel: 'Canvas',
+   hereNow: 'Aqui agora: {names}',
+   commentsClose: 'Fechar comentários',
+   changeYourName: 'Mudar seu nome',
+diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
+index 43259dc..8c8bdd3 100644
+--- a/src/pages/CanvasPage.tsx
++++ b/src/pages/CanvasPage.tsx
+@@ -49,7 +49,7 @@ import { ConnectModal } from '../components/ConnectModal'
+ import { LimitWall, isResidentLimit } from '../components/TeamAllowance'
+ import { WorkingNow } from '../components/WorkingNow'
+ import { MobilePanelTabs, SideRail } from '../components/SideRail'
+-import { CanvasDock } from '../components/CanvasDock'
++import { CanvasDock, CanvasLabel } from '../components/CanvasDock'
+ import { LayersPanel, LayersRailToggle } from '../components/LayersPanel'
+ import { IosAppPrompt } from '../components/NativeAppPromo'
+ import { Onboarding } from '../components/Onboarding'
+@@ -170,6 +170,8 @@ const FLOAT_GAP = 10
+ const DOCKED_STAGE_MIN = 320
+ /* the reviewer layout's dock: its height and the gaps above and below it */
+ const DOCK_CLEAR = 66
++/* the reviewer layout's top: the canvas label and Present (36px, 10px down) and a gap */
++const LABEL_CLEAR = 52
+ const AGENTS_W = 280
+ const PANEL_WIDTH_KEY = 'doop:canvas-panel-widths'
+ 
+@@ -899,7 +901,12 @@ export function CanvasPage({
+         ? /* fits keep clear of the phone's dock */
+           { top: 0, right: 0, bottom: DOCK_CLEAR, left: 0 }
+         : reviewerLayout
+-          ? { top: rulerInset, right: chrome.island, bottom: DOCK_CLEAR, left: chrome.toolRail + rulerInset }
++          ? {
++              top: LABEL_CLEAR + rulerInset,
++              right: chrome.island,
++              bottom: DOCK_CLEAR,
++              left: chrome.toolRail + rulerInset,
++            }
+           : { top: BAR_H + rulerInset, right: chrome.right, bottom: 0, left: chrome.left + rulerInset }
+   /* docked, the stage is the gap between the bar and the columns; ⌘. gives
+      it the whole window back */
+@@ -1301,9 +1308,16 @@ export function CanvasPage({
+             <>
+               {/* a phone's Present is in the canvas actions sheet: its dock is the one control on screen */}
+               {!isMobile && (
+-                <BarPill className="pointer-events-auto absolute top-2.5 right-[var(--chrome-right)] z-[38] transition-[right] duration-150">
+-                  {presentButton}
+-                </BarPill>
++                <>
++                  <CanvasLabel
++                    title={<CanvasName readOnly={readOnly} />}
++                    idMenu={<CanvasIdMenu canvasId={canvasId} onCopied={showToast} compact />}
++                    onBack={guest || linkGuest ? null : () => navigate('/')}
++                  />
++                  <BarPill className="pointer-events-auto absolute top-2.5 right-[var(--chrome-right)] z-[38] transition-[right] duration-150">
++                    {presentButton}
++                  </BarPill>
++                </>
+               )}
+               {isMobile ? (
+                 <CanvasDock
+@@ -1317,9 +1331,6 @@ export function CanvasPage({
+                 />
+               ) : (
+                 <CanvasDock
+-                  title={<CanvasName readOnly={readOnly} />}
+-                  idMenu={<CanvasIdMenu canvasId={canvasId} onCopied={showToast} compact />}
+-                  onBack={guest || linkGuest ? null : () => navigate('/')}
+                   zoomSlot={setZoomSlot}
+                   me={meFace}
+                   others={others}
+@@ -2644,7 +2655,7 @@ function CanvasIdMenu({
+ }: {
+   canvasId: string
+   onCopied: (msg: string) => void
+-  /** the dock's form: a # that shows the id on hover, the menu above it */
++  /** the reviewer layout's form: a # that shows the id on hover */
+   compact?: boolean
+ }) {
+   const t = useT()
+@@ -2675,7 +2686,7 @@ function CanvasIdMenu({
+           {compact ? '#' : canvasId}
+         </Pressable>
+       </DropdownMenuTrigger>
+-      <DropdownMenuContent side={compact ? 'top' : 'bottom'} align="start" width="sm">
++      <DropdownMenuContent side="bottom" align="start" width="sm">
+         <DropdownMenuItem onSelect={() => void copy(canvasId, t('canvas.idCopied'))}>
+           <CopyIcon size="rail" />
+           {t('canvas.copyId')}
+diff --git a/tests/phoneReviewBrowser.test.ts b/tests/phoneReviewBrowser.test.ts
+index cb9ebe6..8edcd7f 100644
+--- a/tests/phoneReviewBrowser.test.ts
++++ b/tests/phoneReviewBrowser.test.ts
+@@ -104,6 +104,8 @@ describe.skipIf(!findBrowserPath())('a phone in the reviewer layout', () => {
+     expect(await shown('Zoom level')).toBe(1)
+     /* the pages are a picker in the dock, not a sheet */
+     expect(await page.$(`${dock} [aria-label="Page: Page 1"]`)).not.toBe(null)
++    /* nor the desktop's canvas label at the top: the name is in the actions sheet */
++    expect(await page.$('[aria-label="Canvas"][role="toolbar"]')).toBe(null)
+   })
+ 
+   it('holds the page still: no browser zoom, no double-tap zoom', async () => {
+diff --git a/tests/reviewerLayoutBrowser.test.ts b/tests/reviewerLayoutBrowser.test.ts
+index 8cf4c4e..129ba44 100644
+--- a/tests/reviewerLayoutBrowser.test.ts
++++ b/tests/reviewerLayoutBrowser.test.ts
+@@ -110,6 +110,21 @@ describe.skipIf(!findBrowserPath())('the reviewer layout', () => {
+     expect(await page.$(`${dock} [data-renderer]`)).toBe(null)
+   })
+ 
++  it('names the canvas quietly at the top left, out of the dock', async () => {
++    const label = '[aria-label="Canvas"][role="toolbar"]'
++    await page.waitForSelector(label)
++    const box = await page.$eval(label, (el) => {
++      const r = el.getBoundingClientRect()
++      return { left: r.left, top: r.top, width: r.width }
++    })
++    expect(box.left).toBeLessThan(30)
++    expect(box.top).toBeLessThan(30)
++    expect(box.width).toBeLessThanOrEqual(340)
++    expect(await page.$(`${label} [aria-label="Canvas id"]`)).not.toBe(null)
++    expect(await page.$(`${dock} [aria-label="Canvas id"]`)).toBe(null)
++    expect(await page.$(`${dock} [aria-label="All canvases"]`)).toBe(null)
++  })
++
+   it('has no left panel: no pages, layer tree or tokens beside the canvas', async () => {
+     expect(await page.$('[data-slot="page-section-heading"]')).toBe(null)
+     expect(await page.$('[role="tree"]')).toBe(null)

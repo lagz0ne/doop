@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 05:55:14 +0000
+Subject: [PATCH 30/55] fix(frames): offer inline text editing only where its
+ save is accepted
+
+The previous patch refuses doop:edited saves from any frame whose HTML
+carries a script, an inline event handler or a javascript: URL, but inline
+editing was still offered on frames with handlers (canEdit tested <script>
+only), so text typed there showed in the frame and was silently dropped.
+canEdit now uses the same test, hasExecutableContent.
+
+Still open, as upstream has it: the Design panel's style and image edits
+save through the same message, so on such frames they also apply live and
+are not stored.
+
+Also a test for AGENT_GUIDELINE_WRITES=false: an agent's set_guidelines is
+refused over MCP with a pointer to a comment, and the guide is not written.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/components/FrameView.tsx       |  2 +-
+ tests/agentGuidelineWrites.test.ts | 48 ++++++++++++++++++++++++++++++
+ 2 files changed, 49 insertions(+), 1 deletion(-)
+ create mode 100644 tests/agentGuidelineWrites.test.ts
+
+diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
+index 330f96e..919656a 100644
+--- a/src/components/FrameView.tsx
++++ b/src/components/FrameView.tsx
+@@ -1486,7 +1486,7 @@ export const FrameView = memo(function FrameView({
+   }, [selected]) // eslint-disable-line react-hooks/exhaustive-deps
+ 
+   /* ---- inline text editing ---- */
+-  const canEdit = !!frame.html && !stream && !frame.locked && !readOnly && !/<script/i.test(frame.html)
++  const canEdit = !!frame.html && !stream && !frame.locked && !readOnly && !hasExecutableContent(frame.html)
+ 
+   async function enterGroup(at: { x: number; y: number }): Promise<boolean> {
+     const selected = pickedHere()
+diff --git a/tests/agentGuidelineWrites.test.ts b/tests/agentGuidelineWrites.test.ts
+new file mode 100644
+index 0000000..15c4ddf
+--- /dev/null
++++ b/tests/agentGuidelineWrites.test.ts
+@@ -0,0 +1,48 @@
++import { afterAll, beforeAll, describe, expect, it } from 'vitest'
++import { Client, startServer, type Server } from './harness.ts'
++
++/* AGENT_GUIDELINE_WRITES=false: an agent's set_guidelines is refused over
++   MCP, and a person still writes the guide through REST. */
++
++let server: Server
++
++beforeAll(async () => {
++  server = await startServer({ AGENT_GUIDELINE_WRITES: 'false' })
++}, 70_000)
++
++afterAll(() => server?.stop())
++
++async function mcpCall(secret: string, name: string, args: Record<string, unknown>) {
++  const res = await fetch(`${server.base}/mcp`, {
++    method: 'POST',
++    headers: {
++      'Content-Type': 'application/json',
++      Accept: 'application/json, text/event-stream',
++      Authorization: `Bearer ${secret}`,
++    },
++    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }),
++  })
++  expect(res.status).toBe(200)
++  const body = (await res.json()) as { result: { isError?: boolean; content: { text?: string }[] } }
++  return { isError: !!body.result.isError, text: body.result.content.map((block) => block.text ?? '').join('\n') }
++}
++
++describe('AGENT_GUIDELINE_WRITES=false', () => {
++  it('refuses an agent’s style guide and points to a comment', async () => {
++    const owner = new Client(server)
++    await owner.signUp('guides-owner@test.dev', 'Owner')
++    const canvas = await (await owner.post('/api/canvases', { name: 'Guides' })).json()
++    const key = (await (await owner.post('/api/agent-keys', { name: 'agent' })).json()).secret
++    const result = await mcpCall(key, 'set_guidelines', {
++      canvas_id: canvas.id,
++      name: 'brand',
++      markdown: '# Always do this',
++      agent_name: 'Agent',
++    })
++    expect(result.isError).toBe(true)
++    expect(result.text).toContain('AGENT_GUIDELINE_WRITES=false')
++    expect(result.text).toContain('comment')
++    const guides = await mcpCall(key, 'get_canvas', { canvas_id: canvas.id, agent_name: 'Agent' })
++    expect(guides.text).not.toContain('Always do this')
++  })
++})

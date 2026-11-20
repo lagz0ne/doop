@@ -1,0 +1,1220 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 04:59:34 +0000
+Subject: [PATCH 41/55] feat(ui): the reviewer layout keeps to reviewing
+
+A review of the reviewer layout's controls, state by state, asked for less:
+only the Hand and Comment in the dock, nothing of the agents, no design
+tokens, the pages instead of the layer tree, and one bar on a phone. The
+layout is for people who look and comment; agents design over MCP.
+
+With FULL_UI off and the floating panel layout:
+
+- The dock's tools are the Hand and Comment. The More tools menu is gone.
+  A tool picked by its key (V, R, ...) shows as a pressed button in the
+  tool group while it is active, and a click on it goes back to the Hand.
+  Prototype mode, when it is on, shows the same way, as a way out.
+- No AI activity and no Connect AI, on the desktop dock and in the phone's
+  canvas actions. The side panel is the comments alone: no Tasks, Activity
+  or Memory tabs, no memory proposal pill or decision toast, no "working
+  now" line, and Cmd+K does not open the agent composer.
+- The left panel is the pages, the panel's full height, with its collapse
+  button in the heading. The layer tree and the Tokens tab are gone, with
+  their rail buttons; tokens stay reachable to agents over MCP. The fold
+  between Pages and Layers (and its two strings) is removed.
+- A phone has one bar: back, Hand, Comment | zoom level | Comments, Pages,
+  ...  The floating zoom pill's -/+ and the Present button at the top
+  right go; Present is the first item of the canvas actions sheet.
+
+Everything comes back with the docked panel layout (Settings, Appearance)
+or with localStorage doop:full-ui='on' and a reload.
+
+Tests: reviewerLayoutBrowser (the dock's two tools, a key-picked tool and
+its way back, Prototype mode only while on, pages alone, one comments tab)
+and phoneReviewBrowser (one bar: the zoom level in the dock, no -/+, no
+Present on screen).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/components/ActivityPanel.tsx    |  11 +-
+ src/components/CanvasDock.tsx       | 192 +++++++++-------------------
+ src/components/LayersPanel.tsx      | 190 +++++++++++----------------
+ src/components/PagesPanel.tsx       |  59 +++++++--
+ src/components/ZoomControls.tsx     |  19 ++-
+ src/lib/i18n/en/canvas.ts           |   1 +
+ src/lib/i18n/en/panels.ts           |   2 -
+ src/lib/i18n/pt-BR/canvas.ts        |   1 +
+ src/lib/i18n/pt-BR/panels.ts        |   2 -
+ src/pages/CanvasPage.tsx            | 143 +++++++++++----------
+ tests/phoneReviewBrowser.test.ts    |  11 ++
+ tests/reviewerLayoutBrowser.test.ts |  61 +++++----
+ 12 files changed, 332 insertions(+), 360 deletions(-)
+
+diff --git a/src/components/ActivityPanel.tsx b/src/components/ActivityPanel.tsx
+index 61b8941..c1b6432 100644
+--- a/src/components/ActivityPanel.tsx
++++ b/src/components/ActivityPanel.tsx
+@@ -61,9 +61,13 @@ export function ActivityPanel({
+   className,
+   style,
+   resize,
++  commentsOnly = false,
+ }: {
+   canvasId: string
+   onClose: () => void
++  /** the reviewer layout: the comments alone, as a viewer or commenter sees
++   *  them; the agents' tasks, activity and memory are for the full layout */
++  commentsOnly?: boolean
+   /* 'inline' when the panel is filling a mobile Sheet rather than floating */
+   surface?: PanelSurface
+   className?: string
+@@ -74,7 +78,8 @@ export function ActivityPanel({
+   const setTab = useStore((s) => s.setPanelTab)
+   const canEdit = useStore(canEditOpenCanvas)
+   /* someone who cannot edit sees the comments only (PanelTabButtons) */
+-  const tab = useStore((s) => (canEdit ? s.panelTab : 'comments'))
++  const agentTabs = canEdit && !commentsOnly
++  const tab = useStore((s) => (agentTabs ? s.panelTab : 'comments'))
+   const [, tick] = useState(0)
+   const openThreads = useOpenThreadCount()
+   const working = useStore((s) => s.tasks.filter((t) => t.agentName && !t.endedAt && !t.failedAt).length)
+@@ -101,7 +106,7 @@ export function ActivityPanel({
+       <PanelTabsRoot value={tab} onValueChange={(next) => setTab(next as typeof tab)}>
+         <PanelHeader className="pl-2">
+           <PanelTabs aria-label={t('panels.activityPanelAria')}>
+-            {canEdit && (
++            {agentTabs && (
+               <PanelIconTab value="tasks" icon={<SparkIcon />} title={t('panels.activityAgents')}>
+                 {t('panels.activityAgents')}
+                 {working > 0 && (
+@@ -128,7 +133,7 @@ export function ActivityPanel({
+             >
+               {t('panels.activityComments')}
+             </PanelIconTab>
+-            {canEdit && (
++            {agentTabs && (
+               <>
+                 <PanelIconTab value="activity" icon={<PulseIcon />} title={t('panels.activityActivity')}>
+                   {t('panels.activityActivity')}
+diff --git a/src/components/CanvasDock.tsx b/src/components/CanvasDock.tsx
+index 26d551c..fa86666 100644
+--- a/src/components/CanvasDock.tsx
++++ b/src/components/CanvasDock.tsx
+@@ -1,36 +1,23 @@
+ import type { ReactNode } from 'react'
+-import { canEditOpenCanvas, roleOf, toolAllowed, useStore, type PanelTab } from '../lib/store'
++import { roleOf, toolAllowed, useStore, type PanelTab } from '../lib/store'
+ import { TOOLS, type Tool } from '../lib/tools'
+ import { useOpenThreadCount } from '../lib/comments'
+ import { useT } from '../lib/i18n'
+-import { cn } from '@/lib/utils'
+ import { TOOL_ICONS } from './Stage'
+ import { PeerAvatars, PresenceFace } from './PeerAvatars'
+-import { Toolbar, ToolbarButton, ToolbarControl, ToolbarDivider, ToolbarDot } from './ui/toolbar'
+-import { MenuHint } from './ui/menu'
+-import {
+-  DropdownMenu,
+-  DropdownMenuContent,
+-  DropdownMenuItem,
+-  DropdownMenuSeparator,
+-  DropdownMenuTrigger,
+-} from './ui/dropdown-menu'
++import { Toolbar, ToolbarControl, ToolbarDivider, ToolbarDot } from './ui/toolbar'
+ import { Tooltip } from './ui/tooltip'
+ import {
+-  CheckIcon,
+-  ChevronDownIcon,
+   ChevronLeftIcon,
+   CommentIcon,
+   ExportIcon,
+   GearIcon,
+   ImportIcon,
+-  LayersIcon,
+   MoreHorizontalIcon,
+-  PlusIcon,
++  PageIcon,
+   PrototypeModeIcon,
+   ShareUpIcon,
+   SlidersIcon,
+-  SparkIcon,
+ } from './ui/icons'
+ 
+ /**
+@@ -41,20 +28,25 @@ import {
+  * conversation with the agents; everything else is one click away, not in
+  * view.
+  *
+- * In order: back to the canvases, the canvas's name and id; Hand, Comment,
+- * Prototype mode and the rest of the tools in a list that opens upwards; the
+- * zoom (the Stage draws its own control into `zoomSlot`, keeping its menu and
+- * handlers); who is here; Import and Export; Comments and AI activity (the
+- * right-hand panel on that tab) and Connect AI; the design panel, settings
+- * and you. The page decides what each may do and passes null for what this
+- * person is not offered.
++ * In order: back to the canvases, the canvas's name and id; Hand and
++ * Comment; the zoom (the Stage draws its own control into `zoomSlot`, keeping
++ * its menu and handlers); who is here; Import, Export and Share; Comments (the
++ * right-hand panel, which holds the comments alone here); the design panel,
++ * settings and you. The page decides what each may do and passes null for
++ * what this person is not offered.
++ *
++ * No tool list, no Prototype mode, no AI activity and no Connect AI: a
++ * reviewer moves around and comments, and the agents work over MCP, not from
++ * this bar. A tool picked by its key (V, F, R…) still shows in the dock while
++ * it is the current one, and so does Prototype mode while it is on, so the
++ * mode the canvas is in is always in view and one click from leaving.
+  *
+  * On a phone (`phone`) the canvas is review-only (State.reviewOnly) and the
+- * same dock holds what reviewing needs within a thumb's reach, at the 40px
+- * touch size: back, Hand, Comment, the Comments sheet (whose tabs hold AI
+- * activity), Pages and layers, and ••• for the rest (the canvas actions
+- * sheet: its name, export, share, settings). No tool list: every other tool
+- * edits. Pinching zooms; the zoom pill floats above it.
++ * same dock is the one control on screen, within a thumb's reach at the 40px
++ * touch size: back, Hand, Comment, the zoom level (its menu has the steps
++ * and fits; pinching zooms), the Comments sheet, Pages, and ••• for the rest
++ * (the canvas actions sheet: its name, Present, share, export, your name,
++ * settings).
+  */
+ export function CanvasDock(props: DockProps & { phone?: false }): ReactNode
+ export function CanvasDock(props: PhoneDockProps & { phone: true }): ReactNode
+@@ -71,6 +63,8 @@ type PanelProps = {
+ 
+ type PhoneDockProps = PanelProps & {
+   onBack: (() => void) | null
++  /** receives the element the zoom control is drawn into */
++  zoomSlot: (el: HTMLElement | null) => void
+   /** the Pages and layers sheet */
+   onLayers: () => void
+   /** the canvas actions sheet */
+@@ -88,14 +82,13 @@ type DockProps = PanelProps & {
+   onRenameSelf: (() => void) | null
+   onImport: (() => void) | null
+   onExport: (() => void) | null
+-  onConnect: (() => void) | null
+   inspector: { open: boolean; label: string; onToggle: () => void } | null
+   onSettings: (() => void) | null
+   /** the owner's Share dialog (link level and password) */
+   onShare: (() => void) | null
+ }
+ 
+-function PhoneDock({ onBack, panelTab, panelOpen, onPanel, onLayers, onMore }: PhoneDockProps) {
++function PhoneDock({ onBack, zoomSlot, panelTab, panelOpen, onPanel, onLayers, onMore }: PhoneDockProps) {
+   const t = useT()
+   return (
+     <Toolbar
+@@ -109,9 +102,11 @@ function PhoneDock({ onBack, panelTab, panelOpen, onPanel, onLayers, onMore }: P
+       )}
+       <DockTools phone />
+       <ToolbarDivider />
+-      {onPanel && <PanelButtons panelTab={panelTab} panelOpen={panelOpen} onPanel={onPanel} aiActivity={false} />}
+-      <ToolbarControl side="top" label={t('canvas.layers')} onClick={onLayers}>
+-        <LayersIcon />
++      <span ref={zoomSlot} className="flex items-center" />
++      <ToolbarDivider />
++      {onPanel && <PanelButtons panelTab={panelTab} panelOpen={panelOpen} onPanel={onPanel} />}
++      <ToolbarControl side="top" label={t('panels.pagesTitle')} onClick={onLayers}>
++        <PageIcon />
+       </ToolbarControl>
+       <ToolbarControl side="top" label={t('canvas.canvasActions')} onClick={onMore}>
+         <MoreHorizontalIcon />
+@@ -120,49 +115,26 @@ function PhoneDock({ onBack, panelTab, panelOpen, onPanel, onLayers, onMore }: P
+   )
+ }
+ 
+-/** Comments, and AI activity for an editor: each opens the right-hand panel
+- *  (a sheet on a phone) on its tab, with a dot for what is waiting. */
++/** Comments: the right-hand panel (a sheet on a phone), with a dot while
++ *  threads are open. */
+ function PanelButtons({
+   panelTab,
+   panelOpen,
+   onPanel,
+-  aiActivity = true,
+-}: Omit<PanelProps, 'onPanel'> & {
+-  onPanel: (tab: PanelTab) => void
+-  /** off on a phone, where the panel's sheet has its own AI activity tab */
+-  aiActivity?: boolean
+-}) {
++}: Omit<PanelProps, 'onPanel'> & { onPanel: (tab: PanelTab) => void }) {
+   const t = useT()
+   const openThreads = useOpenThreadCount()
+-  const working = useStore((s) => s.tasks.filter((x) => x.agentName && !x.endedAt && !x.failedAt).length)
+-  /* a viewer or commenter's panel is Comments alone (ActivityPanel) */
+-  const canEdit = useStore(canEditOpenCanvas)
+-  const showing = (tab: PanelTab) => panelOpen && panelTab === tab
+   return (
+-    <>
+-      <ToolbarControl
+-        side="top"
+-        label={openThreads ? t('canvas.commentsOpen', { open: openThreads }) : t('canvas.comments')}
+-        aria-pressed={showing('comments')}
+-        className="aria-pressed:bg-paper-deep aria-pressed:text-ink"
+-        onClick={() => onPanel('comments')}
+-      >
+-        <CommentIcon />
+-        {openThreads > 0 && <ToolbarDot className="bg-brand" />}
+-      </ToolbarControl>
+-      {aiActivity && canEdit && (
+-        <ToolbarControl
+-          side="top"
+-          label={working ? t('canvas.agentsWorking', { working }) : t('canvas.aiActivity')}
+-          aria-pressed={showing('tasks')}
+-          className="aria-pressed:bg-paper-deep aria-pressed:text-ink"
+-          onClick={() => onPanel('tasks')}
+-        >
+-          <SparkIcon />
+-          {working > 0 && <ToolbarDot className="bg-success" />}
+-        </ToolbarControl>
+-      )}
+-    </>
++    <ToolbarControl
++      side="top"
++      label={openThreads ? t('canvas.commentsOpen', { open: openThreads }) : t('canvas.comments')}
++      aria-pressed={panelOpen && panelTab === 'comments'}
++      className="aria-pressed:bg-paper-deep aria-pressed:text-ink"
++      onClick={() => onPanel('comments')}
++    >
++      <CommentIcon />
++      {openThreads > 0 && <ToolbarDot className="bg-brand" />}
++    </ToolbarControl>
+   )
+ }
+ 
+@@ -179,7 +151,6 @@ function DesktopDock({
+   panelTab,
+   panelOpen,
+   onPanel,
+-  onConnect,
+   inspector,
+   onSettings,
+   onShare,
+@@ -228,18 +199,8 @@ function DesktopDock({
+           <ShareUpIcon />
+         </ToolbarControl>
+       )}
+-      {(onPanel || onConnect) && <ToolbarDivider />}
++      {onPanel && <ToolbarDivider />}
+       {onPanel && <PanelButtons panelTab={panelTab} panelOpen={panelOpen} onPanel={onPanel} />}
+-      {onConnect && (
+-        <ToolbarControl
+-          side={side}
+-          label={t('canvas.connectAi')}
+-          className="bg-ink text-paper hover:bg-ink hover:text-paper"
+-          onClick={onConnect}
+-        >
+-          <PlusIcon />
+-        </ToolbarControl>
+-      )}
+       <ToolbarDivider />
+       {inspector && (
+         <ToolbarControl
+@@ -266,9 +227,10 @@ function DesktopDock({
+   )
+ }
+ 
+-/** Hand, Comment and Prototype mode, as the rail's foot had them, and every
+- *  other tool in a list that opens upwards. A phone reviews, so it gets the
+- *  Hand and Comment alone. */
++/** Hand and Comment. A tool picked by its key shows beside them while it is
++ *  the current one, and Prototype mode while it is on, each pressed, so the
++ *  canvas's mode is always in view; a click on either goes back to the Hand
++ *  (or out of Prototype mode). A phone reviews: Hand and Comment alone. */
+ function DockTools({ phone = false }: { phone?: boolean }) {
+   const t = useT()
+   const tool = useStore((s) => s.tool)
+@@ -280,7 +242,6 @@ function DockTools({ phone = false }: { phone?: boolean }) {
+     return t('stage.toolTooltip', { label: t(entry.label), key: entry.key })
+   }
+   const pressed = 'aria-pressed:bg-paper-deep aria-pressed:text-ink'
+-  const listed = TOOLS.filter((e) => e.id !== 'zoom' && toolAllowed(e.id, role))
+   const picked = tool !== 'hand' && tool !== 'comment' && tool !== 'zoom'
+   return (
+     <>
+@@ -304,52 +265,21 @@ function DockTools({ phone = false }: { phone?: boolean }) {
+           {TOOL_ICONS.comment}
+         </ToolbarControl>
+       )}
+-      {/* a phone stops here: the rest is for editing */}
+-      {!phone && (
+-        <>
+-          <ToolbarControl
+-            side="top"
+-            label={t('stage.modePrototype')}
+-            aria-pressed={prototypeMode}
+-            className={pressed}
+-            onClick={() => useStore.getState().setPrototypeMode(!prototypeMode)}
+-          >
+-            <PrototypeModeIcon />
+-          </ToolbarControl>
+-          {/* a tool picked from the list shows here, so the current one is always in view */}
+-          {picked && (
+-            <ToolbarControl side="top" label={label(tool)} aria-pressed className={pressed}>
+-              {TOOL_ICONS[tool]}
+-            </ToolbarControl>
+-          )}
+-          <DropdownMenu>
+-            <Tooltip label={t('stage.moreTools')} side="top">
+-              <DropdownMenuTrigger asChild>
+-                <ToolbarButton
+-                  aria-label={t('stage.moreTools')}
+-                  className={cn('data-[state=open]:bg-paper-deep', pressed)}
+-                >
+-                  <ChevronDownIcon className={cn('rotate-180')} />
+-                </ToolbarButton>
+-              </DropdownMenuTrigger>
+-            </Tooltip>
+-            <DropdownMenuContent side="top" align="start" width="sm">
+-              {listed.map((entry) => (
+-                <DropdownMenuItem key={entry.id} onSelect={() => setTool(entry.id)}>
+-                  {TOOL_ICONS[entry.id]}
+-                  {t(entry.label)}
+-                  {tool === entry.id ? <CheckIcon size="rail" className="ml-auto" /> : <MenuHint>{entry.key}</MenuHint>}
+-                </DropdownMenuItem>
+-              ))}
+-              <DropdownMenuSeparator />
+-              <DropdownMenuItem onSelect={() => useStore.getState().setPrototypeMode(!prototypeMode)}>
+-                <PrototypeModeIcon size="rail" />
+-                {t('stage.modePrototypeShort')}
+-                {prototypeMode && <CheckIcon size="rail" className="ml-auto" />}
+-              </DropdownMenuItem>
+-            </DropdownMenuContent>
+-          </DropdownMenu>
+-        </>
++      {!phone && picked && (
++        <ToolbarControl side="top" label={label(tool)} aria-pressed className={pressed} onClick={() => setTool('hand')}>
++          {TOOL_ICONS[tool]}
++        </ToolbarControl>
++      )}
++      {!phone && prototypeMode && (
++        <ToolbarControl
++          side="top"
++          label={t('stage.modePrototype')}
++          aria-pressed
++          className={pressed}
++          onClick={() => useStore.getState().setPrototypeMode(false)}
++        >
++          <PrototypeModeIcon />
++        </ToolbarControl>
+       )}
+     </>
+   )
+diff --git a/src/components/LayersPanel.tsx b/src/components/LayersPanel.tsx
+index c8184a4..6a56222 100644
+--- a/src/components/LayersPanel.tsx
++++ b/src/components/LayersPanel.tsx
+@@ -222,23 +222,12 @@ function visibleRows(frames: Frame[], query: string, expanded: Set<string>): Vis
+ /** The Layers rail: every frame on the canvas, opening into the element tree
+  *  of its HTML. Selection runs both ways — a row selects the element in the
+  *  frame, a click in the frame highlights its row. */
+-/* the reviewer layout folds the Layers section under the pages by default;
+-   whether it is open is this browser's choice (CanvasDock.tsx) */
+-const LAYERS_SECTION_KEY = 'doop:layers-section'
+-function readLayersSection(): boolean {
+-  try {
+-    return localStorage.getItem(LAYERS_SECTION_KEY) === '1'
+-  } catch {
+-    return false
+-  }
+-}
+-
+ export function LayersPanel({
+   onAddFrame,
+   surface = 'floating',
+   onClose,
+   resize,
+-  foldLayers = false,
++  pagesOnly = false,
+ }: {
+   onAddFrame: () => void
+   /* 'inline' when the panel is filling a mobile Sheet rather than floating */
+@@ -246,27 +235,17 @@ export function LayersPanel({
+   /** inline only: the sheet's close, in the collapse control's place */
+   onClose?: () => void
+   resize?: PanelResize
+-  /** the reviewer layout: the Layers section can fold away under the pages,
+-   *  and starts folded, since someone reviewing moves between pages and
+-   *  frames rather than through a frame's layers */
+-  foldLayers?: boolean
++  /** the reviewer layout (CanvasDock.tsx): the pages alone, the whole height
++   *  of the panel. Someone reviewing moves between pages and frames on the
++   *  canvas, not through a frame's layer tree, and the design tokens are the
++   *  agents' (over MCP); both stay in the full layout */
++  pagesOnly?: boolean
+ }) {
+-  const [sectionOpen, setSectionOpen] = useState(readLayersSection)
+-  const layersShown = !foldLayers || sectionOpen
+-  function toggleSection() {
+-    const next = !sectionOpen
+-    setSectionOpen(next)
+-    try {
+-      localStorage.setItem(LAYERS_SECTION_KEY, next ? '1' : '0')
+-    } catch {
+-      /* the choice holds for this visit */
+-    }
+-  }
+   /* a row's pointerleave never fires if the panel goes away under it */
+   useEffect(() => () => useStore.getState().setHoveredLayer(null), [])
+   /* which of the panel's two faces shows: the layer tree, or the design
+      tokens; in the store so the collapsed rail can open straight onto one */
+-  const tab = useStore((s) => s.layersTab)
++  const tab = useStore((s) => (pagesOnly ? 'layers' : s.layersTab))
+   const setTab = useStore((s) => s.setLayersTab)
+   /* view and comment links browse the tree; nothing in it moves or changes */
+   const readOnly = useStore((s) => !canEditOpenCanvas(s))
+@@ -582,17 +561,37 @@ export function LayersPanel({
+     e.stopPropagation()
+   }
+ 
++  const collapse =
++    surface === 'inline' ? (
++      <PanelClose label={t('common.close')} onClick={onClose} />
++    ) : (
++      <Tooltip label={t('panels.layersCollapsePanel')} side="bottom" align="end">
++        <Button
++          variant="bare"
++          size="icon-sm"
++          className="size-7 shrink-0 rounded-[7px] text-ink-faint hover:bg-paper-deep hover:text-ink"
++          aria-label={t('panels.layersCollapsePanel')}
++          onClick={() => setLayersOpen(false)}
++        >
++          <PanelCollapseIcon className="size-3.5" />
++        </Button>
++      </Tooltip>
++    )
++  const panelClass = cn(
++    surface === 'floating' && 'top-2.5 bottom-3.5 left-3.5 w-[264px]',
++    surface === 'docked' && 'left-0 w-[264px] border-r',
++  )
++
++  if (pagesOnly) {
++    return (
++      <Panel surface={surface} resize={resize} className={panelClass}>
++        {pageCanvas && <PagesPanel key={pageCanvas.id} canvasId={pageCanvas.id} fill headerEnd={collapse} />}
++      </Panel>
++    )
++  }
++
+   return (
+-    <Panel
+-      surface={surface}
+-      resize={resize}
+-      className={cn(
+-        surface === 'floating' && 'top-2.5 left-3.5 w-[264px]',
+-        /* folded, the panel is as tall as its pages, not the window */
+-        surface === 'floating' && (layersShown || tab !== 'layers' ? 'bottom-3.5' : 'max-h-[calc(100%-24px)]'),
+-        surface === 'docked' && 'left-0 w-[264px] border-r',
+-      )}
+-    >
++    <Panel surface={surface} resize={resize} className={panelClass}>
+       {/* the panel's two faces as icon tabs, the collapse control at the far end */}
+       <PanelTabsRoot value={tab} onValueChange={(next) => setTab(next as typeof tab)} className="flex-none">
+         <PanelHeader className="h-10 pl-2">
+@@ -616,21 +615,7 @@ export function LayersPanel({
+               {t('panels.layersTabTokens')}
+             </PanelIconTab>
+           </PanelTabs>
+-          {surface === 'inline' ? (
+-            <PanelClose label={t('common.close')} onClick={onClose} />
+-          ) : (
+-            <Tooltip label={t('panels.layersCollapsePanel')} side="bottom" align="end">
+-              <Button
+-                variant="bare"
+-                size="icon-sm"
+-                className="size-7 shrink-0 rounded-[7px] text-ink-faint hover:bg-paper-deep hover:text-ink"
+-                aria-label={t('panels.layersCollapsePanel')}
+-                onClick={() => setLayersOpen(false)}
+-              >
+-                <PanelCollapseIcon className="size-3.5" />
+-              </Button>
+-            </Tooltip>
+-          )}
++          {collapse}
+         </PanelHeader>
+       </PanelTabsRoot>
+       {tab === 'components' && <ComponentsPanel />}
+@@ -644,38 +629,8 @@ export function LayersPanel({
+           {/* Figma's order: the pages at the top, the frames of the active page
+           under them, the search at the bottom within thumb's reach */}
+           {pageCanvas && <PagesPanel key={pageCanvas.id} canvasId={pageCanvas.id} />}
+-          {!layersShown && (
+-            <Button
+-              variant="bare"
+-              className="mx-2 mt-1 mb-2 h-9 flex-none justify-start gap-2 rounded-[7px] border-t border-line-soft px-2 font-medium text-ink hover:bg-paper-deep"
+-              aria-expanded={false}
+-              onClick={toggleSection}
+-            >
+-              <LayersIcon className="size-3.5 text-ink-faint" />
+-              {t('panels.layersTitle')}
+-              <ChevronRightIcon className="ml-auto size-3.5 text-ink-faint" />
+-            </Button>
+-          )}
+-        </>
+-      )}
+-      {tab === 'layers' && layersShown && (
+-        <>
+           <div className={cn('mt-1.5 flex h-6 flex-none items-center justify-between pr-2.5 pl-3.5', sectionHeading)}>
+-            <span data-slot="frame-section-heading" className={cn(sectionHeading, 'flex items-center gap-1')}>
+-              {foldLayers && (
+-                <Tooltip label={t('panels.layersHideSection')} side="bottom" align="start">
+-                  <Button
+-                    variant="bare"
+-                    size="icon-sm"
+-                    className={cn(sectionBtn, '-ml-1.5')}
+-                    aria-label={t('panels.layersHideSection')}
+-                    aria-expanded
+-                    onClick={toggleSection}
+-                  >
+-                    <ChevronDownIcon className="size-3.5" />
+-                  </Button>
+-                </Tooltip>
+-              )}
++            <span data-slot="frame-section-heading" className={sectionHeading}>
+               {t('panels.layersTitle')}
+             </span>
+             <span className="flex gap-1">
+@@ -766,7 +721,7 @@ export function LayersPanel({
+ 
+ /** The collapsed rail: a narrow column at the panel's spot with the expand
+  *  control and the Layers mark. The frame count lives in the tooltip only. */
+-export function LayersRailToggle({ docked = false }: { docked?: boolean }) {
++export function LayersRailToggle({ docked = false, pagesOnly = false }: { docked?: boolean; pagesOnly?: boolean }) {
+   const setLayersOpen = useStore((s) => s.setLayersOpen)
+   const count = usePageCanvas()?.frames.length ?? 0
+   const t = useT()
+@@ -784,36 +739,41 @@ export function LayersRailToggle({ docked = false }: { docked?: boolean }) {
+       <ToolbarControl label={t('panels.layersExpandPanel')} side="right" onClick={() => setLayersOpen(true)}>
+         <PanelExpandIcon />
+       </ToolbarControl>
+-      <ToolbarControl
+-        label={t('panels.layersRailCount', { count })}
+-        side="right"
+-        onClick={() => {
+-          useStore.getState().setLayersTab('layers')
+-          setLayersOpen(true)
+-        }}
+-      >
+-        <LayersIcon />
+-      </ToolbarControl>
+-      <ToolbarControl
+-        label={t('components.title')}
+-        side="right"
+-        onClick={() => {
+-          useStore.getState().setLayersTab('components')
+-          setLayersOpen(true)
+-        }}
+-      >
+-        <ComponentIcon />
+-      </ToolbarControl>
+-      <ToolbarControl
+-        label={t('panels.layersTabTokens')}
+-        side="right"
+-        onClick={() => {
+-          useStore.getState().setLayersTab('tokens')
+-          setLayersOpen(true)
+-        }}
+-      >
+-        <BracesIcon />
+-      </ToolbarControl>
++      {/* the reviewer layout's panel is the pages alone: expanding is all */}
++      {!pagesOnly && (
++        <>
++          <ToolbarControl
++            label={t('panels.layersRailCount', { count })}
++            side="right"
++            onClick={() => {
++              useStore.getState().setLayersTab('layers')
++              setLayersOpen(true)
++            }}
++          >
++            <LayersIcon />
++          </ToolbarControl>
++          <ToolbarControl
++            label={t('components.title')}
++            side="right"
++            onClick={() => {
++              useStore.getState().setLayersTab('components')
++              setLayersOpen(true)
++            }}
++          >
++            <ComponentIcon />
++          </ToolbarControl>
++          <ToolbarControl
++            label={t('panels.layersTabTokens')}
++            side="right"
++            onClick={() => {
++              useStore.getState().setLayersTab('tokens')
++              setLayersOpen(true)
++            }}
++          >
++            <BracesIcon />
++          </ToolbarControl>
++        </>
++      )}
+     </Toolbar>
+   )
+ }
+diff --git a/src/components/PagesPanel.tsx b/src/components/PagesPanel.tsx
+index fd16ff3..5eaf7d8 100644
+--- a/src/components/PagesPanel.tsx
++++ b/src/components/PagesPanel.tsx
+@@ -1,4 +1,4 @@
+-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
++import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
+ import { nanoid } from 'nanoid'
+ import { canvasPages } from '../../shared/pages'
+ import type { CanvasPageInfo } from '../../shared/types'
+@@ -28,7 +28,17 @@ import { useT } from '@/lib/i18n'
+ export const sectionHeading = 'text-[11px] font-normal text-ink-faint'
+ const sectionBtn = 'size-5 rounded-[5px] text-ink-faint hover:bg-paper-deep hover:text-ink'
+ 
+-export function PagesPanel({ canvasId }: { canvasId: string }) {
++export function PagesPanel({
++  canvasId,
++  fill = false,
++  headerEnd,
++}: {
++  canvasId: string
++  fill?: boolean
++  /** the pages are the whole panel (the reviewer layout): their heading is
++   *  the panel's header, ending in this (its collapse or close control) */
++  headerEnd?: ReactNode
++}) {
+   const [pagesPct, setPagesPct] = usePagesPct(canvasId)
+   const canvas = useStore((s) => s.canvas)
+   const activePageId = useStore((s) => s.activePageId)
+@@ -326,18 +336,45 @@ export function PagesPanel({ canvasId }: { canvasId: string }) {
+   return (
+     <div
+       data-slot="pages-panel"
+-      className="relative flex flex-none flex-col border-b border-line-soft"
++      className={cn('relative flex flex-none flex-col', fill ? 'min-h-0 flex-1' : 'border-b border-line-soft')}
+       style={
+-        pagesPct === null ? { maxHeight: pagesHeightCss(100, minPx) } : { height: pagesHeightCss(pagesPct, minPx) }
++        /* filling the panel (the reviewer layout), the pages have no split to keep */
++        fill
++          ? undefined
++          : pagesPct === null
++            ? { maxHeight: pagesHeightCss(100, minPx) }
++            : { height: pagesHeightCss(pagesPct, minPx) }
+       }
+     >
+-      <div className={cn('mt-1.5 flex h-6 flex-none items-center justify-between pr-2.5 pl-3.5', sectionHeading)}>
+-        <span data-slot="page-section-heading" className={sectionHeading}>
+-          {t('panels.pagesTitle')}
+-        </span>
+-        {!readOnly && addPage}
++      {headerEnd ? (
++        <div className="flex h-10 flex-none items-center gap-1 border-b border-line-soft pr-2 pl-3.5">
++          <span
++            data-slot="page-section-heading"
++            className="flex flex-1 items-center gap-[7px] text-[12px] font-medium text-ink"
++          >
++            <PageIcon className="size-3.5 text-ink-faint" />
++            {t('panels.pagesTitle')}
++          </span>
++          {!readOnly && addPage}
++          {headerEnd}
++        </div>
++      ) : (
++        <div className={cn('mt-1.5 flex h-6 flex-none items-center justify-between pr-2.5 pl-3.5', sectionHeading)}>
++          <span data-slot="page-section-heading" className={sectionHeading}>
++            {t('panels.pagesTitle')}
++          </span>
++          {!readOnly && addPage}
++        </div>
++      )}
++      <div
++        className={cn(
++          'min-h-0 overflow-y-auto px-2 pb-1',
++          headerEnd && 'pt-1.5',
++          fill ? 'flex-1' : pagesPct === null && 'max-h-[30vh]',
++        )}
++      >
++        {list}
+       </div>
+-      <div className={cn('min-h-0 overflow-y-auto px-2 pb-1', pagesPct === null && 'max-h-[30vh]')}>{list}</div>
+       {showMovePicker && (
+         /* the canvas shortcuts listen on window: ⌫ would delete the frames
+            being moved and typed letters would switch tools, so the picker's
+@@ -360,7 +397,7 @@ export function PagesPanel({ canvasId }: { canvasId: string }) {
+           </Select>
+         </div>
+       )}
+-      <PagesSplitHandle minPx={minPx} onChange={setPagesPct} />
++      {!fill && <PagesSplitHandle minPx={minPx} onChange={setPagesPct} />}
+     </div>
+   )
+ }
+diff --git a/src/components/ZoomControls.tsx b/src/components/ZoomControls.tsx
+index 77f0d7d..8e34b15 100644
+--- a/src/components/ZoomControls.tsx
++++ b/src/components/ZoomControls.tsx
+@@ -69,6 +69,9 @@ export function ZoomControls({
+   }
+   /* phones have no room for shortcut hints, and no keyboard to use them */
+   const hint = (keys: string) => !isMobile && <MenuHint>{keys}</MenuHint>
++  /* in a phone's dock the level alone: a pinch zooms, and the menu has the
++     steps, so the dock stays one row a thumb can reach */
++  const steps = !(inline && isMobile)
+   const stepBtn = 'min-h-0'
+ 
+   return (
+@@ -86,9 +89,11 @@ export function ZoomControls({
+       )}
+     >
+       {viewOptions.renderer && <RendererLabel />}
+-      <ToolbarButton aria-label={t('canvas.zoomOut')} className={stepBtn} onClick={onZoomOut}>
+-        <MinusIcon />
+-      </ToolbarButton>
++      {steps && (
++        <ToolbarButton aria-label={t('canvas.zoomOut')} className={stepBtn} onClick={onZoomOut}>
++          <MinusIcon />
++        </ToolbarButton>
++      )}
+       <DropdownMenu open={open} onOpenChange={onOpenChange}>
+         <DropdownMenuTrigger asChild>
+           <ToolbarButton
+@@ -168,9 +173,11 @@ export function ZoomControls({
+           </DropdownMenuItem>
+         </DropdownMenuContent>
+       </DropdownMenu>
+-      <ToolbarButton aria-label={t('canvas.zoomIn')} className={stepBtn} onClick={onZoomIn}>
+-        <PlusIcon />
+-      </ToolbarButton>
++      {steps && (
++        <ToolbarButton aria-label={t('canvas.zoomIn')} className={stepBtn} onClick={onZoomIn}>
++          <PlusIcon />
++        </ToolbarButton>
++      )}
+     </Toolbar>
+   )
+ }
+diff --git a/src/lib/i18n/en/canvas.ts b/src/lib/i18n/en/canvas.ts
+index c2bd5df..2609b40 100644
+--- a/src/lib/i18n/en/canvas.ts
++++ b/src/lib/i18n/en/canvas.ts
+@@ -82,6 +82,7 @@ export const canvas = {
+   /* panels */
+   resizeLayers: 'Resize Layers panel',
+   resizeAgents: 'Resize Agents panel',
++  canvasActionsReviewDescription: 'Present, share, export, or your settings.',
+   canvasActionsDescription: 'Layers, import, export, share, Prototype mode, or your account settings.',
+   layers: 'Layers',
+   importWebsite: 'Import website',
+diff --git a/src/lib/i18n/en/panels.ts b/src/lib/i18n/en/panels.ts
+index 2a8efd5..54a18c4 100644
+--- a/src/lib/i18n/en/panels.ts
++++ b/src/lib/i18n/en/panels.ts
+@@ -3,8 +3,6 @@
+ export const panels = {
+   layersTitle: 'Layers',
+   layersCollapsePanel: 'Collapse panel',
+-  layersShowSection: 'Show layers',
+-  layersHideSection: 'Hide layers',
+   layersExpandPanel: 'Expand panel',
+   layersCollapseAll: 'Collapse all',
+   layersNewFrame: 'New frame',
+diff --git a/src/lib/i18n/pt-BR/canvas.ts b/src/lib/i18n/pt-BR/canvas.ts
+index a738d25..1a20ca2 100644
+--- a/src/lib/i18n/pt-BR/canvas.ts
++++ b/src/lib/i18n/pt-BR/canvas.ts
+@@ -82,6 +82,7 @@ export const canvas: Catalog['canvas'] = {
+ 
+   resizeLayers: 'Redimensionar painel Camadas',
+   resizeAgents: 'Redimensionar painel Agentes',
++  canvasActionsReviewDescription: 'Apresentar, compartilhar, exportar ou as suas configurações.',
+   canvasActionsDescription:
+     'Camadas, importar, exportar, compartilhar, modo Protótipo ou as configurações da sua conta.',
+   layers: 'Camadas',
+diff --git a/src/lib/i18n/pt-BR/panels.ts b/src/lib/i18n/pt-BR/panels.ts
+index 1f65c4c..06ff2b8 100644
+--- a/src/lib/i18n/pt-BR/panels.ts
++++ b/src/lib/i18n/pt-BR/panels.ts
+@@ -3,8 +3,6 @@ import type { Catalog } from '..'
+ export const panels: Catalog['panels'] = {
+   layersTitle: 'Camadas',
+   layersCollapsePanel: 'Recolher painel',
+-  layersShowSection: 'Mostrar camadas',
+-  layersHideSection: 'Ocultar camadas',
+   layersExpandPanel: 'Expandir painel',
+   layersCollapseAll: 'Recolher tudo',
+   layersNewFrame: 'Novo frame',
+diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
+index 3d70603..6a8674a 100644
+--- a/src/pages/CanvasPage.tsx
++++ b/src/pages/CanvasPage.tsx
+@@ -137,7 +137,7 @@ import { AGENTS_MIN, LAYERS_MIN, fitPanelWidths } from '../lib/panelWidths'
+ import { loadCanvasFonts } from '../lib/customFonts'
+ import { t as translate, useT } from '../lib/i18n'
+ import { NO_INSETS, type StageInsets } from '../lib/viewFit'
+-import { usePanelLayout } from '../lib/panelLayout'
++import { getPanelLayout, usePanelLayout } from '../lib/panelLayout'
+ 
+ /* The floating chrome's geometry, in px from the canvas area's edges. The
+    panels sit 14px in from the edge; on the right the resizable Agents panel
+@@ -636,6 +636,8 @@ export function CanvasPage({
+     const state = useStore.getState()
+     /* the composer is an editor's: readers (and guests) have none */
+     if (guest || !state.canvas || !canEditOpenCanvas(state)) return
++    /* the reviewer layout's panel is the comments alone (CanvasDock.tsx) */
++    if (!FULL_UI && getPanelLayout() !== 'docked') return
+     setShowActivity(true)
+     if (state.uiHidden) state.toggleUiHidden()
+     state.setPanelTab('tasks')
+@@ -773,11 +775,14 @@ export function CanvasPage({
+   const docked = usePanelLayout() === 'docked' && !isMobile
+   const panelSurface = docked ? 'docked' : 'floating'
+   /* The reviewer layout (FULL_UI off, floating panels): no top bar, no tool
+-     rail, no side rail; one dock along the bottom holds them (CanvasDock.tsx),
+-     the Layers section folds under the pages, the right panel starts closed
+-     and the Hand is the first tool. Present stays at the top right. A phone
+-     gets the same, its dock trimmed to reviewing with the rest in the canvas
+-     actions sheet, its panels still sheets. The docked layout keeps its own. */
++     rail, no side rail; one dock along the bottom holds what reviewing needs
++     (CanvasDock.tsx), the left panel is the pages alone, the right panel the
++     comments alone and starts closed, and the Hand is the first tool. The
++     agents' chrome (AI activity, Connect AI, memory, the composer) stays in
++     the full layout: agents work over MCP. Present stays at the top right. A
++     phone gets the same with its dock as the one control on screen, the zoom
++     level in it and Present in the canvas actions sheet, its panels still
++     sheets. The docked layout keeps its own. */
+   const reviewerLayout = !FULL_UI && !docked
+   const deskReview = reviewerLayout && !isMobile
+   const [zoomSlot, setZoomSlot] = useState<HTMLElement | null>(null)
+@@ -1132,8 +1137,8 @@ export function CanvasPage({
+           bounds={stageBounds}
+           docked={docked}
+           toolsElsewhere={reviewerLayout}
+-          /* a phone pinches; its zoom pill floats above the dock */
+-          zoomSlot={deskReview ? zoomSlot : null}
++          /* in the reviewer layout the zoom is drawn into the dock, a phone's too */
++          zoomSlot={reviewerLayout ? zoomSlot : null}
+         />
+         <div
+           className={cn(
+@@ -1145,31 +1150,34 @@ export function CanvasPage({
+           style={rulerInset || docked || reviewerLayout ? { top: 'var(--chrome-top)', left: rulerInset } : undefined}
+         >
+           <div className="pointer-events-none absolute top-3.5 right-[var(--chrome-right)] z-30 flex flex-col items-end gap-2 transition-[right] duration-150 [&>*]:pointer-events-auto max-md:top-[56px] max-md:right-2 max-md:left-2">
+-            {pendingProposal && mutedProposal !== pendingProposal.id && !(showActivity && panelTab === 'memory') && (
+-              <div className="flex items-center rounded-[10px] bg-surface shadow-ring">
+-                <Button
+-                  variant="bare"
+-                  className="h-8 pr-1 pl-3 text-[12px] font-medium text-ink hover:bg-transparent hover:text-ink"
+-                  onClick={() => {
+-                    useStore.getState().setPanelTab('memory')
+-                    setShowActivity(true)
+-                  }}
+-                >
+-                  <DoopMark size={12} /> {t('canvas.memorySuggestionReview')}
+-                </Button>
+-                <Button
+-                  variant="bare"
+-                  size="icon-sm"
+-                  className="mr-1 size-6 rounded-[6px] text-ink-faint"
+-                  title={t('canvas.hideForNow')}
+-                  aria-label={t('canvas.hideForNow')}
+-                  onClick={() => setMutedProposal(pendingProposal.id)}
+-                >
+-                  <XIcon className="size-3" />
+-                </Button>
+-              </div>
+-            )}
+-            {decisionToast && (
++            {!reviewerLayout &&
++              pendingProposal &&
++              mutedProposal !== pendingProposal.id &&
++              !(showActivity && panelTab === 'memory') && (
++                <div className="flex items-center rounded-[10px] bg-surface shadow-ring">
++                  <Button
++                    variant="bare"
++                    className="h-8 pr-1 pl-3 text-[12px] font-medium text-ink hover:bg-transparent hover:text-ink"
++                    onClick={() => {
++                      useStore.getState().setPanelTab('memory')
++                      setShowActivity(true)
++                    }}
++                  >
++                    <DoopMark size={12} /> {t('canvas.memorySuggestionReview')}
++                  </Button>
++                  <Button
++                    variant="bare"
++                    size="icon-sm"
++                    className="mr-1 size-6 rounded-[6px] text-ink-faint"
++                    title={t('canvas.hideForNow')}
++                    aria-label={t('canvas.hideForNow')}
++                    onClick={() => setMutedProposal(pendingProposal.id)}
++                  >
++                    <XIcon className="size-3" />
++                  </Button>
++                </div>
++              )}
++            {!reviewerLayout && decisionToast && (
+               <Button
+                 variant="bare"
+                 className="max-w-full items-center gap-2.5 whitespace-normal rounded-[12px] bg-surface px-3.5 py-2.5 text-left font-normal shadow-pop transition-shadow hover:bg-surface hover:shadow-ring-hover sm:max-w-[320px] [&_svg]:text-ink-soft"
+@@ -1190,7 +1198,7 @@ export function CanvasPage({
+           </div>
+           {/* the presence pill in the bar already carries each agent's status
+               line; this per-agent stack is only for windows too narrow for it */}
+-          <WorkingNow style={{ left: chrome.left }} className="min-[1180px]:hidden" />
++          {!reviewerLayout && <WorkingNow style={{ left: chrome.left }} className="min-[1180px]:hidden" />}
+           {!readOnly && <Onboarding canvasId={canvasId} />}
+           <IosAppPrompt />
+           <AccessBanner guest={guest} onSignUp={onSignUp} onSignIn={onSignIn} />
+@@ -1199,7 +1207,7 @@ export function CanvasPage({
+               <LayersPanel
+                 onAddFrame={addFrame}
+                 surface={panelSurface}
+-                foldLayers={reviewerLayout}
++                pagesOnly={reviewerLayout}
+                 resize={{
+                   label: t('canvas.resizeLayers'),
+                   edge: 'right',
+@@ -1213,7 +1221,7 @@ export function CanvasPage({
+                 }}
+               />
+             ) : (
+-              <LayersRailToggle docked={docked} />
++              <LayersRailToggle docked={docked} pagesOnly={reviewerLayout} />
+             ))}
+           {isMobile && !reviewerLayout && !showActivity && !guest && (
+             <MobilePanelTabs
+@@ -1247,6 +1255,7 @@ export function CanvasPage({
+             <ActivityPanel
+               canvasId={canvasId}
+               onClose={() => setShowActivity(false)}
++              commentsOnly={reviewerLayout}
+               surface={panelSurface}
+               style={{ right: docked ? 0 : EDGE, ...belowDock }}
+               resize={{
+@@ -1277,18 +1286,17 @@ export function CanvasPage({
+           )}
+           {reviewerLayout && (
+             <>
+-              <BarPill
+-                className={cn(
+-                  'pointer-events-auto absolute top-2.5 z-[38] transition-[right] duration-150',
+-                  isMobile ? 'right-2.5' : 'right-[var(--chrome-right)]',
+-                )}
+-              >
+-                {presentButton}
+-              </BarPill>
++              {/* a phone's Present is in the canvas actions sheet: its dock is the one control on screen */}
++              {!isMobile && (
++                <BarPill className="pointer-events-auto absolute top-2.5 right-[var(--chrome-right)] z-[38] transition-[right] duration-150">
++                  {presentButton}
++                </BarPill>
++              )}
+               {isMobile ? (
+                 <CanvasDock
+                   phone
+                   onBack={guest || linkGuest ? null : () => navigate('/')}
++                  zoomSlot={setZoomSlot}
+                   panelTab={panelTab}
+                   panelOpen={showActivity}
+                   onPanel={guest ? null : openPanel}
+@@ -1309,7 +1317,6 @@ export function CanvasPage({
+                   panelTab={panelTab}
+                   panelOpen={showActivity}
+                   onPanel={guest ? null : openPanel}
+-                  onConnect={readOnly || linkGuest ? null : openConnect}
+                   inspector={
+                     readOnly
+                       ? null
+@@ -1342,16 +1349,30 @@ export function CanvasPage({
+                   {reviewerLayout ? canvas?.name || t('canvas.canvasActions') : t('canvas.canvasActions')}
+                 </SheetTitle>
+                 <SheetDescription className="mt-1 text-xs text-ink-soft">
+-                  {t('canvas.canvasActionsDescription')}
++                  {t(reviewerLayout ? 'canvas.canvasActionsReviewDescription' : 'canvas.canvasActionsDescription')}
+                 </SheetDescription>
+               </div>
+               {/* the same glyphs as the desktop bar and islands; pages live
+                   in the Layers sheet, as on desktop. In the reviewer layout
+-                  the dock has Layers, and this sheet takes what the desktop
+-                  dock holds beyond it that reviewing uses: share, export, your
+-                  name and settings (a phone is review-only, so no import,
+-                  Connect AI or Prototype mode) */}
++                  the dock has Pages, and this sheet takes what the desktop
++                  dock and the top right hold beyond it that reviewing uses:
++                  Present, share, export, your name and settings (a phone is
++                  review-only, so no import or Prototype mode, and the
++                  reviewer layout has no Connect AI) */}
+               <div className="grid gap-2 p-4 [&_svg]:size-3.5 [&_svg]:text-ink-soft">
++                {reviewerLayout && (
++                  <Button
++                    variant="ghost"
++                    className="h-11 justify-start gap-2.5 border-line bg-surface px-4"
++                    disabled={!playFrom}
++                    onClick={() => {
++                      setShowMobileActions(false)
++                      setPresenting(playFrom)
++                    }}
++                  >
++                    <PlayIcon /> {playFrom ? t('canvas.presentPrototype') : t('canvas.addFrameToPresent')}
++                  </Button>
++                )}
+                 {!reviewerLayout && (
+                   <Button
+                     variant="ghost"
+@@ -1400,19 +1421,6 @@ export function CanvasPage({
+                     <ExportIcon /> {t('canvas.export')}
+                   </Button>
+                 )}
+-                {/* the top bar's Connect AI, which this layout does not show */}
+-                {reviewerLayout && !readOnly && !linkGuest && (
+-                  <Button
+-                    variant="ghost"
+-                    className="h-11 justify-start gap-2.5 border-line bg-surface px-4"
+-                    onClick={() => {
+-                      setShowMobileActions(false)
+-                      openConnect()
+-                    }}
+-                  >
+-                    <PlusIcon /> {t('canvas.connectAi')}
+-                  </Button>
+-                )}
+                 {/* the phone's tool strip has no room for the Edit / Prototype
+                     switch, so Prototype mode toggles here */}
+                 {!reviewerLayout && (
+@@ -1468,7 +1476,7 @@ export function CanvasPage({
+               <LayersPanel
+                 onAddFrame={addFrame}
+                 surface="inline"
+-                foldLayers={reviewerLayout}
++                pagesOnly={reviewerLayout}
+                 onClose={() => setShowMobileLayers(false)}
+               />
+             </SheetContent>
+@@ -1498,7 +1506,12 @@ export function CanvasPage({
+               className="max-h-[calc(100svh-56px)] gap-0 rounded-t-2xl border-line bg-surface p-0 shadow-pop data-[side=bottom]:h-[min(78svh,680px)]"
+             >
+               <SheetTitle className="sr-only">{t('canvas.canvasActivity')}</SheetTitle>
+-              <ActivityPanel canvasId={canvasId} onClose={() => setShowActivity(false)} surface="inline" />
++              <ActivityPanel
++                canvasId={canvasId}
++                onClose={() => setShowActivity(false)}
++                commentsOnly={reviewerLayout}
++                surface="inline"
++              />
+             </SheetContent>
+           </Sheet>
+         </>
+diff --git a/tests/phoneReviewBrowser.test.ts b/tests/phoneReviewBrowser.test.ts
+index 8ee1693..fd04c3a 100644
+--- a/tests/phoneReviewBrowser.test.ts
++++ b/tests/phoneReviewBrowser.test.ts
+@@ -93,6 +93,17 @@ describe.skipIf(!findBrowserPath())('a phone in the reviewer layout', () => {
+     expect(await page.$('[role="status"]')).toBe(null)
+   })
+ 
++  it('is one bar: the zoom level in the dock, Present in the canvas actions', async () => {
++    expect(await page.$eval(dock, (el) => !!el.querySelector('[aria-label="Zoom level"]'))).toBe(true)
++    /* what is on screen: the top bar stays mounted, hidden */
++    const shown = (label: string) =>
++      page.$$eval(`[aria-label="${label}"]`, (els) => els.filter((el) => el.getClientRects().length > 0).length)
++    expect(await shown('Zoom out')).toBe(0)
++    expect(await shown('Zoom in')).toBe(0)
++    expect(await shown('Present prototype')).toBe(0)
++    expect(await shown('Zoom level')).toBe(1)
++  })
++
+   it('holds the page still: no browser zoom, no double-tap zoom', async () => {
+     const meta = await page.$eval('meta[name="viewport"]', (el) => (el as HTMLMetaElement).content)
+     expect(meta).toContain('user-scalable=no')
+diff --git a/tests/reviewerLayoutBrowser.test.ts b/tests/reviewerLayoutBrowser.test.ts
+index 6dc4ae9..68d6d38 100644
+--- a/tests/reviewerLayoutBrowser.test.ts
++++ b/tests/reviewerLayoutBrowser.test.ts
+@@ -5,9 +5,11 @@ import { findBrowserPath } from '../server/screenshot'
+ import { fixtureUrl, openBrowser, type TestBrowser } from './browser'
+ 
+ /* The reviewer layout (FULL_UI off, a desktop, floating panels): one dock
+-   along the bottom instead of the top bar, the tool rail and the side rail;
+-   the Hand first; Layers folded under the pages; the right-hand panel opened
+-   from the dock. The editor page itself, mounted by the clipboard fixture. */
++   along the bottom instead of the top bar, the tool rail and the side rail,
++   with Hand and Comment as its tools and nothing of the agents'; the Hand
++   first; the left panel the pages alone; the right-hand panel the comments
++   alone, opened from the dock. The editor page itself, mounted by the
++   clipboard fixture. */
+ 
+ /* the harness's own type is declared in canvasClipboardBrowser.test.ts */
+ type Harness = { canvasClipboardHarness: { seed: (frames: Frame[]) => void } }
+@@ -42,10 +44,7 @@ async function open(page: Page, fullUi: 'on' | 'off') {
+   await page.waitForFunction(
+     () => !!(window as unknown as Harness).canvasClipboardHarness && !!document.querySelector('.stage'),
+   )
+-  await page.evaluate((frame) => {
+-    localStorage.removeItem('doop:layers-section')
+-    ;(window as unknown as Harness).canvasClipboardHarness.seed([frame])
+-  }, FRAME)
++  await page.evaluate((frame) => (window as unknown as Harness).canvasClipboardHarness.seed([frame]), FRAME)
+   /* the harness hides the chrome and closes Layers; this test is about them */
+   await store(page, `(useStore.setState({ uiHidden: false }), s.setLayersOpen(true), true)`)
+ }
+@@ -71,26 +70,36 @@ describe.skipIf(!findBrowserPath())('the reviewer layout', () => {
+     expect(await page.$eval(dock, (el) => !!el.querySelector('[aria-label="Zoom out"]'))).toBe(true)
+   })
+ 
+-  it('folds Layers under the pages, and remembers when it is opened', async () => {
+-    await page.waitForSelector('button[aria-expanded="false"]')
+-    expect(await page.$('[data-slot="frame-section-heading"]')).toBe(null)
+-    await page.evaluate(() =>
+-      [...document.querySelectorAll<HTMLButtonElement>('button[aria-expanded="false"]')]
+-        .find((b) => b.textContent?.trim() === 'Layers')!
+-        .click(),
+-    )
+-    await page.waitForSelector('[data-slot="frame-section-heading"]')
+-    expect(await page.evaluate(() => localStorage.getItem('doop:layers-section'))).toBe('1')
++  it('offers Hand and Comment alone, and nothing of the agents', async () => {
++    const labels = await page.$$eval(`${dock} [aria-label]`, (els) => els.map((el) => el.getAttribute('aria-label')))
++    expect(labels).toEqual(expect.arrayContaining(['Hand (H)', 'Comment (C)']))
++    for (const gone of ['More tools', 'Prototype', 'AI activity', 'Connect AI'])
++      expect(labels.some((label) => label?.startsWith(gone))).toBe(false)
++  })
++
++  it('shows a tool picked by its key while it is the current one, and goes back to the Hand', async () => {
++    await store(page, `(s.setTool('select'), true)`)
++    const picked = `${dock} [aria-label^="Select"][aria-pressed="true"]`
++    await page.waitForSelector(picked)
++    await page.click(picked)
++    expect(await store(page, 's.tool')).toBe('hand')
++    expect(await page.$(picked)).toBe(null)
++  })
++
++  it('shows Prototype mode only while it is on, as the way out', async () => {
++    await store(page, `(s.setPrototypeMode(true), true)`)
++    const mode = `${dock} [aria-label^="Prototype mode"]`
++    await page.waitForSelector(mode)
++    await page.click(mode)
++    expect(await store(page, 's.prototypeMode')).toBe(false)
++    expect(await page.$(mode)).toBe(null)
+   })
+ 
+-  it('lists every tool upwards and shows the one picked in the dock', async () => {
+-    await page.click('[aria-label="More tools"]')
+-    await page.waitForSelector('[role="menuitem"]')
+-    const select = (await page.$$('[role="menuitem"]')).at(0)!
+-    expect(await select.evaluate((el) => el.textContent)).toContain('Select')
+-    await select.click()
+-    expect(await store(page, 's.tool')).toBe('select')
+-    expect(await page.$eval(dock, (el) => !!el.querySelector('[aria-label^="Select"][aria-pressed="true"]'))).toBe(true)
++  it('gives the left panel to the pages alone: no layer tree, no tokens', async () => {
++    await page.waitForSelector('[data-slot="page-section-heading"]')
++    expect(await page.$('[data-slot="frame-section-heading"]')).toBe(null)
++    expect(await page.$('[role="tree"]')).toBe(null)
++    expect(await page.$('[role="tab"][id$="-trigger-tokens"]')).toBe(null)
+   })
+ 
+   it('opens the comments from the dock and closes them again', async () => {
+@@ -103,6 +112,8 @@ describe.skipIf(!findBrowserPath())('the reviewer layout', () => {
+       comments,
+     )
+     expect(await store(page, 's.panelTab')).toBe('comments')
++    /* the comments alone: no Agents, activity or memory tabs */
++    expect(await page.$$eval('[aria-label="Agents panel"] [role="tab"]', (tabs) => tabs.length)).toBe(1)
+     await page.click(comments)
+     await page.waitForFunction(
+       (sel) => document.querySelector(sel)?.getAttribute('aria-pressed') === 'false',

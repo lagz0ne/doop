@@ -1,0 +1,697 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 11:01:22 +0000
+Subject: [PATCH 34/55] perf(canvas): show frame pictures in place of live
+ documents while the zoom moves
+
+Off by default; localStorage['doop:zoom-pictures'] = 'on' plus a reload switches it on.
+
+Every step of a zoom changes each live frame's scale, so the frames' renderer re-rasters every
+document on every step. With the switch on, the first zoom step of a gesture (a pure pan does not
+count) shows each live frame's preview picture (the one patch 0009 mounts, at its usePreviewLevel /
+previewSrc, sharpPreviews included) and hides its iframe with visibility: hidden. The iframe stays
+mounted, so nothing reloads. When the camera settles (the 250 ms layout-zoom settle, plus a frame,
+so the new pixel density rasters once, under the picture) the documents are shown again first, and
+each picture is hidden only after its runtime answers doop:painted (two animation frames), so
+nothing flashes. A new gesture before that answer keeps the picture up.
+
+A frame keeps its document when:
+- its picture has not loaded (never a blank image), or the document has not shown yet
+- it is selected, or an element in it is picked
+- it is being edited inline, or a path in it is being edited
+- it is moved, resized, rotated, or a shape or element in it is moving
+- an agent is streaming into it, or a peer has it active
+- Prototype mode is on
+- it is a standalone canvas element
+A frame registers only while none of these hold; leaving mid-gesture gives its document back at
+once. A frame that registers mid-gesture is left alone until the next gesture.
+
+The writes touch only the swapped frames' iframe and picture wrapper: at gesture start one style
+recalc of 34 elements (0.7-0.9 ms), at the end two of 12 elements (0.4-1.1 ms).
+
+Measured on a page of 6 live frames, perf/trace-pinch.mjs + raster.mjs, swiftshader, two
+interleaved rounds off/on (counts; load 7.3 falling to 2.7):
+- frames-process RasterTask: B1 309/320 -> 30/25, B2 306/334 -> 26/26, all of them after rest
+- tiles per frame document layer (B1): 68-78 in 23-25 raster frames -> 5-7 in 2-3
+- frames-process compositor busy: B1 288/352 -> 45/32 ms, B2 288/331 -> 47/33 ms
+- editor main thread busy: B1 415/450 -> 347/360 ms, B2 462/519 -> 353/399 ms
+- editor RasterTask rises (B1 89 -> 137, B2 166 -> 209): the picture layers, under 1 ms each
+At rest the stage is pixel-identical on and off; a screencast after the last zoom step shows no
+frame off the settled view.
+
+Off, the behaviour is unchanged: no picture stays mounted under a shown document.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/components/FrameView.tsx      |  43 +++++++-
+ src/components/Stage.tsx          |  17 ++++
+ src/lib/frameRuntime.ts           |   8 ++
+ src/lib/zoomPictures.ts           | 163 ++++++++++++++++++++++++++++++
+ tests/zoomPictures.test.ts        | 156 ++++++++++++++++++++++++++++
+ tests/zoomPicturesBrowser.test.ts | 155 ++++++++++++++++++++++++++++
+ 6 files changed, 540 insertions(+), 2 deletions(-)
+ create mode 100644 src/lib/zoomPictures.ts
+ create mode 100644 tests/zoomPictures.test.ts
+ create mode 100644 tests/zoomPicturesBrowser.test.ts
+
+diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
+index 317c44c..1323bfb 100644
+--- a/src/components/FrameView.tsx
++++ b/src/components/FrameView.tsx
+@@ -19,6 +19,7 @@ import { getIdentity } from '../lib/identity'
+ import { previewSrc, useFrameAwake, useFrameLive, usePreviewLevel, usePreviews } from '../lib/liveFrames'
+ import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
+ import { trackShell } from '../lib/shellCull'
++import { keepsDocument, registerZoomPicture, zoomPicturesEnabled } from '../lib/zoomPictures'
+ 
+ /** `<script>`, inline event handlers or `javascript:` URLs: anything that runs inside the frame. */
+ export function hasExecutableContent(html: string): boolean {
+@@ -1288,6 +1289,35 @@ export const FrameView = memo(function FrameView({
+   )
+   const picked = JSON.parse(pickedKey) as string[]
+   const multiPick = picked.length > 1
++  /* ---- the picture in place of the document while the zoom moves ----
++     (zoomPictures.ts, off unless switched on). With the switch on, a live
++     frame keeps its picture mounted under the document, hidden, so a zoom
++     can show it at once; it registers while nobody works in it, and taking
++     it back (selected, edited, streamed into…) puts its document back. */
++  const [zoomPictures] = useState(zoomPicturesEnabled)
++  const pictureRef = useRef<HTMLDivElement>(null)
++  const prototypeMode = useStore((s) => s.prototypeMode)
++  const pictureStandby = zoomPictures && live && previews && documentShown && !stream
++  const keepDocument = keepsDocument({
++    documentShown,
++    canvasElement: isCanvasElement(frame.html),
++    selected,
++    elementPicked: !!wantedSel,
++    editing,
++    pathEditing: !!pathEdit,
++    moving: dragging || resizing || shapeMoving || elementMove.moving,
++    streaming: !!stream,
++    peerEditing: editors.length > 0,
++    prototypeMode,
++  })
++  useEffect(() => {
++    if (!pictureStandby || keepDocument) return
++    return registerZoomPicture(frame.id, {
++      iframe: () => iframeRef.current,
++      picture: () => pictureRef.current,
++      painted: () => requestFrame(frame.id, 'doop:painted', {}, ZOOM_PICTURE_PAINT_MS),
++    })
++  }, [pictureStandby, keepDocument, frame.id])
+   /* the picked element's grips and rotate zones: only where a drag can
+      change the box, and never on a locked layer or frame, or under the
+      Comment tool — nor on a multi-element pick, where a drag would size
+@@ -2010,8 +2040,14 @@ export const FrameView = memo(function FrameView({
+             them. A frame being streamed into has no picture of what is
+             arriving, and shows its document as it comes. It sits at the
+             frame's box, not out by the bleed. */}
+-            {(!live || (!documentShown && previews && !stream)) && (
+-              <div className={live ? 'pointer-events-none absolute inset-0' : undefined}>
++            {(!live || (!documentShown && previews && !stream) || pictureStandby) && (
++              <div
++                ref={pictureRef}
++                className={live ? 'pointer-events-none absolute inset-0' : undefined}
++                /* under a shown document the picture waits hidden for a zoom
++                   (zoomPictures.ts), which shows it by writing this style */
++                style={pictureStandby ? { visibility: 'hidden' } : undefined}
++              >
+                 <FramePreview frame={frame} />
+               </div>
+             )}
+@@ -2357,6 +2393,9 @@ export const FrameView = memo(function FrameView({
+ })
+ 
+ const PREVIEW_RETRIES = 4
++/* how long a document shown again after a zoom has to say it painted before
++   its picture goes anyway (zoomPictures.ts) */
++const ZOOM_PICTURE_PAINT_MS = 1000
+ 
+ /** What a frame shows without its document: the persisted preview image.
+  *  Lazy and async, so a page of hundreds fetches and decodes the ones near
+diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
+index b5a76f8..a57c4cf 100644
+--- a/src/components/Stage.tsx
++++ b/src/components/Stage.tsx
+@@ -53,6 +53,7 @@ import { CommentThreadLayer, FrameLabelLayer } from './FrameLabelLayer'
+ import { pixelGridLines } from './PixelGrid'
+ import { chromeZoomStale, layoutZoomFor } from '../lib/layoutZoom'
+ import { DOT_PERIOD, GRID_ZOOM_DRIFT, gridPaintZoom, gridStale, gridTransform } from '../lib/stageGrid'
++import { zoomPicturesActive, zoomPicturesEnabled, zoomPicturesEnd, zoomPicturesStart } from '../lib/zoomPictures'
+ import { useT, type PlainMessageKey } from '../lib/i18n'
+ import { NO_INSETS, fitBox, fitColumnStart, type StageInsets } from '../lib/viewFit'
+ import { spaceWouldScroll } from '../lib/spaceScroll'
+@@ -450,6 +451,11 @@ export function Stage({
+     apply(useStore.getState().viewport, true)
+     let settle = 0
+     let chromeRest = 0
++    /* pictures in place of the live documents while the zoom moves, behind
++       a switch (zoomPictures.ts): from the first change of zoom, a pan alone
++       never, until the camera has settled */
++    const zoomPictures = zoomPicturesEnabled()
++    let picturesEnd = 0
+     const unsub = useStore.subscribe((s, prev) => {
+       const sameCanvas = s.canvas?.id === prev.canvas?.id
+       if (!sameCanvas) pageCameras.current.clear()
+@@ -470,6 +476,11 @@ export function Stage({
+       if (s.connected && !prev.connected && ref.current) sendViewport(s.viewport, ref.current)
+       if (s.viewOptions.pixelGrid !== prev.viewOptions.pixelGrid) apply(s.viewport)
+       if (s.viewport === prev.viewport) return
++      if (zoomPictures) {
++        window.cancelAnimationFrame(picturesEnd)
++        /* before the camera moves, so the documents never raster this step */
++        if (s.viewport.zoom !== prev.viewport.zoom) zoomPicturesStart()
++      }
+       apply(s.viewport)
+       if (ref.current) sendViewport(s.viewport, ref.current)
+       window.clearTimeout(chromeRest)
+@@ -479,12 +490,18 @@ export function Stage({
+       window.clearTimeout(settle)
+       settle = window.setTimeout(() => {
+         setLayoutZoom(layoutZoomFor(useStore.getState().viewport.zoom, MAX_ZOOM))
++        /* the documents come back a frame after the world takes its settled
++           layout zoom, so one whose density changes rasters once, under its
++           picture, rather than twice */
++        if (zoomPictures && zoomPicturesActive()) picturesEnd = window.requestAnimationFrame(zoomPicturesEnd)
+       }, 250)
+     })
+     return () => {
+       unsub()
+       window.clearTimeout(settle)
+       window.clearTimeout(chromeRest)
++      window.cancelAnimationFrame(picturesEnd)
++      if (zoomPictures) zoomPicturesEnd()
+     }
+   }, [])
+ 
+diff --git a/src/lib/frameRuntime.ts b/src/lib/frameRuntime.ts
+index c42d4a0..2f9a6dd 100644
+--- a/src/lib/frameRuntime.ts
++++ b/src/lib/frameRuntime.ts
+@@ -1825,6 +1825,14 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
+       }
+       parent.postMessage({ type: 'doop:settle-result', reqId: d.reqId }, '*')
+     }
++    /* answered once two animation frames have passed, which puts a paint
++       behind it: the editor takes a picture off a document shown again
++       (zoomPictures.ts) only when the document is there to see */
++    if (d.type === 'doop:painted') {
++      requestAnimationFrame(function () {
++        requestAnimationFrame(function () { parent.postMessage({ type: 'doop:painted-result', reqId: d.reqId }, '*') })
++      })
++    }
+     if (d.type === 'doop:style' && d.styles && typeof d.styles === 'object') {
+       var applied = applyStyle(d.selector, d.styles, d.uniformText === true)
+       parent.postMessage({ type: 'doop:style-result', reqId: d.reqId, ok: applied, info: applied ? inspect(d.selector) : null }, '*')
+diff --git a/src/lib/zoomPictures.ts b/src/lib/zoomPictures.ts
+new file mode 100644
+index 0000000..ac3e638
+--- /dev/null
++++ b/src/lib/zoomPictures.ts
+@@ -0,0 +1,163 @@
++/* Pictures in place of documents while the zoom moves.
++
++   A live frame is a document in another process, and every step of a zoom
++   rasters it again at the new scale: a pinch over a page rastered the
++   frames' process some 350 times, against a few dozen for the editor itself.
++   Nobody reads a document while it grows or shrinks under a pinch, and each
++   live frame has a picture of itself already (its preview, liveFrames.ts),
++   the one it shows while its document boots. So, behind a switch, a zoom
++   shows the pictures: from the camera's first change of zoom until it
++   settles, each live frame nobody is working in hides its iframe
++   (`visibility: hidden`, which stops its raster) under its picture. When the
++   camera settles the iframe is shown again under the picture, and the
++   picture goes once the document has painted, so there is no blank between
++   them. A pan alone changes nothing.
++
++   Off by default: the pictures are the last saved state of each frame, a
++   little softer than the document and without what only runs live
++   (animation, video, scroll position). On with
++   `localStorage['doop:zoom-pictures'] = 'on'`.
++
++   The swap is a few style writes on the live frames' own elements, never a
++   class or a variable on the stage, which would restyle the whole canvas. */
++
++/** The switch, read when it is needed: on only with
++ *  `localStorage['doop:zoom-pictures'] === 'on'`. */
++export function zoomPicturesEnabled(): boolean {
++  try {
++    return localStorage.getItem('doop:zoom-pictures') === 'on'
++  } catch {
++    return false
++  }
++}
++
++/** What a frame is doing, for the decision below. */
++export interface ZoomPictureState {
++  /** it has a live document, and that document has painted */
++  documentShown: boolean
++  /** a standalone shape or text: transparent, with no picture of its own */
++  canvasElement: boolean
++  selected: boolean
++  /** an element inside it is picked (the element panel talks to it) */
++  elementPicked: boolean
++  /** inline text editing */
++  editing: boolean
++  /** the path editor is open on one of its shapes */
++  pathEditing: boolean
++  /** dragged, resized or turned, or an element in it moved or resized */
++  moving: boolean
++  /** an agent is streaming into it */
++  streaming: boolean
++  /** another person has it open */
++  peerEditing: boolean
++  /** the canvas is in Prototype mode, whose links and overlays live in documents */
++  prototypeMode: boolean
++}
++
++/** True when a frame keeps its document through a zoom: everything a person
++ *  or an agent is working in, everything that has no document showing yet,
++ *  and everything without a picture. Conservative on purpose: a swapped
++ *  frame is a picture, and a picture cannot be clicked into or follow an
++ *  edit. */
++export function keepsDocument(s: ZoomPictureState): boolean {
++  return (
++    !s.documentShown ||
++    s.canvasElement ||
++    s.selected ||
++    s.elementPicked ||
++    s.editing ||
++    s.pathEditing ||
++    s.moving ||
++    s.streaming ||
++    s.peerEditing ||
++    s.prototypeMode
++  )
++}
++
++/** A live frame that may show its picture through a zoom (registered by its
++ *  FrameView only while keepsDocument is false for it). */
++export interface ZoomPictureFrame {
++  iframe(): HTMLElement | null
++  picture(): HTMLElement | null
++  /** resolves once the document has painted after being shown again (or
++   *  has not answered in time, when the picture goes anyway) */
++  painted(): Promise<unknown>
++}
++
++const frames = new Map<string, ZoomPictureFrame>()
++/* the frames showing their picture, each with the swap it belongs to: a
++   paint that answers after a newer swap must not take the picture down */
++const swapped = new Map<string, number>()
++let active = false
++let swaps = 0
++
++/** True when the picture has loaded, so showing it never shows a blank. */
++export function pictureReady(picture: HTMLElement | null): boolean {
++  const img = picture?.querySelector('img')
++  return !!img && img.complete && img.naturalWidth > 0
++}
++
++/** The registered frames to swap: those whose picture is ready. */
++export function framesToSwap(candidates: ReadonlyMap<string, ZoomPictureFrame>): string[] {
++  return [...candidates].filter(([, f]) => !!f.iframe() && pictureReady(f.picture())).map(([id]) => id)
++}
++
++/** Registers a live frame that may swap; the returned call takes it back,
++ *  putting its document back first if it was showing its picture. */
++export function registerZoomPicture(id: string, frame: ZoomPictureFrame): () => void {
++  frames.set(id, frame)
++  return () => {
++    if (frames.get(id) !== frame) return
++    release(id, frame)
++    frames.delete(id)
++  }
++}
++
++/** The camera's zoom has changed: the frames that may swap show their
++ *  picture until zoomPicturesEnd. Once per gesture; the Stage calls it only
++ *  with the switch on. */
++export function zoomPicturesStart(): void {
++  if (active) return
++  active = true
++  swaps += 1
++  for (const id of framesToSwap(frames)) {
++    const frame = frames.get(id)
++    const iframe = frame?.iframe()
++    const picture = frame?.picture()
++    if (!iframe || !picture) continue
++    picture.style.visibility = 'visible'
++    iframe.style.visibility = 'hidden'
++    swapped.set(id, swaps)
++  }
++}
++
++/** True from zoomPicturesStart until zoomPicturesEnd. */
++export function zoomPicturesActive(): boolean {
++  return active
++}
++
++/** The camera has settled: every swapped frame shows its document again. */
++export function zoomPicturesEnd(): void {
++  if (!active) return
++  active = false
++  for (const [id, frame] of frames) release(id, frame)
++}
++
++function release(id: string, frame: ZoomPictureFrame) {
++  const swap = swapped.get(id)
++  if (swap === undefined) return
++  const iframe = frame.iframe()
++  if (iframe) iframe.style.visibility = ''
++  void frame.painted().then(() => {
++    /* a new gesture took the frame again meanwhile: its picture stays */
++    if (swapped.get(id) !== swap) return
++    swapped.delete(id)
++    const picture = frame.picture()
++    if (picture) picture.style.visibility = 'hidden'
++  })
++}
++
++/** The frames showing their picture now, for tests. */
++export function swappedFrames(): string[] {
++  return [...swapped.keys()]
++}
+diff --git a/tests/zoomPictures.test.ts b/tests/zoomPictures.test.ts
+new file mode 100644
+index 0000000..3787b47
+--- /dev/null
++++ b/tests/zoomPictures.test.ts
+@@ -0,0 +1,156 @@
++import { afterEach, describe, expect, it } from 'vitest'
++import {
++  framesToSwap,
++  keepsDocument,
++  registerZoomPicture,
++  swappedFrames,
++  zoomPicturesActive,
++  zoomPicturesEnd,
++  zoomPicturesStart,
++  type ZoomPictureFrame,
++  type ZoomPictureState,
++} from '../src/lib/zoomPictures'
++
++/* While the zoom moves, a live frame nobody works in shows its picture in
++   place of its document (zoomPictures.ts). */
++
++const idle: ZoomPictureState = {
++  documentShown: true,
++  canvasElement: false,
++  selected: false,
++  elementPicked: false,
++  editing: false,
++  pathEditing: false,
++  moving: false,
++  streaming: false,
++  peerEditing: false,
++  prototypeMode: false,
++}
++
++describe('keepsDocument', () => {
++  it('lets a shown frame nobody works in swap', () => {
++    expect(keepsDocument(idle)).toBe(false)
++  })
++
++  it.each([
++    'canvasElement',
++    'selected',
++    'elementPicked',
++    'editing',
++    'pathEditing',
++    'moving',
++    'streaming',
++    'peerEditing',
++    'prototypeMode',
++  ] as const)('keeps the document while %s', (flag) => {
++    expect(keepsDocument({ ...idle, [flag]: true })).toBe(true)
++  })
++
++  it('keeps a document that has not shown yet', () => {
++    expect(keepsDocument({ ...idle, documentShown: false })).toBe(true)
++  })
++})
++
++/* elements just real enough for the registry: a style to write and, for a
++   picture, an <img> that has or has not loaded */
++interface FakeEl {
++  style: { visibility: string }
++  querySelector: (s: string) => { complete: boolean; naturalWidth: number } | null
++}
++const el = (img?: { complete: boolean; naturalWidth: number }): FakeEl => ({
++  style: { visibility: '' },
++  querySelector: () => img ?? null,
++})
++const asEl = (e: FakeEl) => e as unknown as HTMLElement
++
++function fakeFrame(ready = true) {
++  const iframe = el()
++  const picture = el(ready ? { complete: true, naturalWidth: 100 } : { complete: false, naturalWidth: 0 })
++  picture.style.visibility = 'hidden'
++  let paint: () => void = () => {}
++  const frame: ZoomPictureFrame = {
++    iframe: () => asEl(iframe),
++    picture: () => asEl(picture),
++    painted: () => new Promise<void>((r) => (paint = r)),
++  }
++  return { iframe, picture, frame, paint: () => paint() }
++}
++const tick = () => new Promise((r) => setTimeout(r, 0))
++
++describe('the zoom picture registry', () => {
++  const unregister: (() => void)[] = []
++  afterEach(() => {
++    zoomPicturesEnd()
++    unregister.splice(0).forEach((u) => u())
++  })
++  const register = (id: string, f: ReturnType<typeof fakeFrame>) => unregister.push(registerZoomPicture(id, f.frame))
++
++  it('swaps only frames whose picture has loaded', () => {
++    const a = fakeFrame()
++    const b = fakeFrame(false)
++    register('a', a)
++    register('b', b)
++    expect(
++      framesToSwap(
++        new Map([
++          ['a', a.frame],
++          ['b', b.frame],
++        ]),
++      ),
++    ).toEqual(['a'])
++    zoomPicturesStart()
++    expect(zoomPicturesActive()).toBe(true)
++    expect([a.iframe.style.visibility, a.picture.style.visibility]).toEqual(['hidden', 'visible'])
++    expect([b.iframe.style.visibility, b.picture.style.visibility]).toEqual(['', 'hidden'])
++    expect(swappedFrames()).toEqual(['a'])
++  })
++
++  it('shows the document again first and takes the picture down once it painted', async () => {
++    const a = fakeFrame()
++    register('a', a)
++    zoomPicturesStart()
++    zoomPicturesEnd()
++    expect(zoomPicturesActive()).toBe(false)
++    expect([a.iframe.style.visibility, a.picture.style.visibility]).toEqual(['', 'visible'])
++    a.paint()
++    await tick()
++    expect(a.picture.style.visibility).toBe('hidden')
++    expect(swappedFrames()).toEqual([])
++  })
++
++  it('starts once per gesture', () => {
++    const a = fakeFrame()
++    register('a', a)
++    zoomPicturesStart()
++    const late = fakeFrame()
++    register('late', late)
++    zoomPicturesStart()
++    /* a frame registered mid-gesture keeps its document until the next one */
++    expect(late.iframe.style.visibility).toBe('')
++    expect(swappedFrames()).toEqual(['a'])
++  })
++
++  it('keeps the picture when a new gesture took the frame before the old paint answered', async () => {
++    const a = fakeFrame()
++    register('a', a)
++    zoomPicturesStart()
++    zoomPicturesEnd()
++    const firstPaint = a.paint
++    zoomPicturesStart()
++    firstPaint()
++    await tick()
++    expect([a.iframe.style.visibility, a.picture.style.visibility]).toEqual(['hidden', 'visible'])
++  })
++
++  it('gives the document back when a frame leaves mid-gesture (selected, edited…)', async () => {
++    const a = fakeFrame()
++    const off = registerZoomPicture('a', a.frame)
++    zoomPicturesStart()
++    off()
++    expect(a.iframe.style.visibility).toBe('')
++    a.paint()
++    await tick()
++    expect(a.picture.style.visibility).toBe('hidden')
++    expect(swappedFrames()).toEqual([])
++  })
++})
+diff --git a/tests/zoomPicturesBrowser.test.ts b/tests/zoomPicturesBrowser.test.ts
+new file mode 100644
+index 0000000..90792a1
+--- /dev/null
++++ b/tests/zoomPicturesBrowser.test.ts
+@@ -0,0 +1,155 @@
++import { afterAll, beforeAll, describe, expect, it } from 'vitest'
++import type { Page } from 'puppeteer-core'
++import { findBrowserPath } from '../server/screenshot'
++import { fixtureUrl, openBrowser, type TestBrowser } from './browser'
++import type { Canvas, Frame } from '../shared/types'
++
++/* With localStorage['doop:zoom-pictures'] = 'on', a zoom shows each live
++   frame's picture in place of its document until the camera settles, except
++   on a frame someone works in (zoomPictures.ts). Off, nothing changes. */
++
++declare global {
++  interface Window {
++    seedPages: (canvas: Canvas) => void
++  }
++}
++
++const FRAMES = 3
++const canvas: Canvas = {
++  id: 'c',
++  name: 'Zoom pictures',
++  pages: [{ id: 'p', name: 'Main' }],
++  frames: Array.from({ length: FRAMES }, (_, i): Frame => ({
++    id: `f${i}`,
++    canvasId: 'c',
++    pageId: 'p',
++    name: `Frame ${i}`,
++    x: i * 500,
++    y: 0,
++    width: 400,
++    height: 300,
++    html: `<body style="margin:0;background:#3a6"><h1>Frame ${i}</h1></body>`,
++    createdAt: 0,
++    updatedAt: 1,
++    updatedBy: 'User',
++  })),
++  createdAt: 0,
++  updatedAt: 0,
++}
++
++/* a 2×2 PNG for every preview the frames ask for (the fixture has no renderer) */
++const PNG = Buffer.from(
++  'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGNkYPj/n4GBgYGJAQoYGQA9GwIEmBt0WQAAAABJRU5ErkJggg==',
++  'base64',
++)
++
++const store = (page: Page, call: string) =>
++  page.evaluate(`import('/src/lib/store.ts').then(({ useStore }) => { useStore.getState().${call} })`)
++const settle = () => new Promise((r) => setTimeout(r, 600))
++
++/** each frame's iframe visibility and its picture's, '-' when it has none */
++const looks = (page: Page) =>
++  page.evaluate((n) => {
++    const out: Record<string, { iframe: string; picture: string }> = {}
++    for (let i = 0; i < n; i++) {
++      const iframe = document.querySelector<HTMLElement>(`iframe[title="Frame ${i}"]`)
++      const wrapper = iframe?.parentElement?.querySelector('[data-doop-frame-preview]')?.parentElement
++      out[`f${i}`] = {
++        iframe: iframe ? iframe.style.visibility || 'shown' : '-',
++        picture: wrapper ? wrapper.style.visibility || 'shown' : '-',
++      }
++    }
++    return out
++  }, FRAMES)
++
++async function open(browser: TestBrowser, switchOn: boolean): Promise<Page> {
++  const page = await browser.newPage()
++  await page.setViewport({ width: 1600, height: 1000 })
++  /* the pages share one origin's storage: each says what it wants */
++  await page.evaluateOnNewDocument((on) => {
++    if (on) localStorage.setItem('doop:zoom-pictures', 'on')
++    else localStorage.removeItem('doop:zoom-pictures')
++  }, switchOn)
++  await page.setRequestInterception(true)
++  page.on('request', (request) => {
++    if (new URL(request.url()).pathname.startsWith('/i/'))
++      void request.respond({ status: 200, contentType: 'image/png', body: PNG })
++    else void request.continue()
++  })
++  await page.goto(fixtureUrl('pages.html'))
++  await page.waitForFunction(() => typeof window.seedPages === 'function')
++  await page.evaluate((c) => window.seedPages(c), canvas)
++  await store(page, 'setViewport({ x: 40, y: 40, zoom: 1 })')
++  await settle()
++  return page
++}
++
++describe.skipIf(!findBrowserPath())('pictures in place of documents while zooming', () => {
++  let browser: TestBrowser
++  beforeAll(async () => {
++    browser = await openBrowser()
++  }, 60_000)
++  afterAll(async () => {
++    await browser?.close()
++  })
++
++  it('switched on: shows the pictures during a zoom, the documents after it, and leaves a selected frame alone', async () => {
++    const page = await open(browser, true)
++    /* at rest every frame shows its document, its loaded picture hidden under it */
++    await page.waitForFunction(
++      (n) =>
++        Array.from({ length: n }, (_, i) => {
++          const iframe = document.querySelector(`iframe[title="Frame ${i}"]`)
++          const img = iframe?.parentElement?.querySelector<HTMLImageElement>('[data-doop-frame-preview] img')
++          return !!img && img.complete && img.naturalWidth > 0
++        }).every(Boolean),
++      { timeout: 15_000 },
++      FRAMES,
++    )
++    const resting = { iframe: 'shown', picture: 'hidden' }
++    expect(await looks(page)).toEqual({ f0: resting, f1: resting, f2: resting })
++
++    /* a selected frame is someone's work: it keeps its document */
++    await store(page, "select('f1')")
++    await settle()
++    await store(page, 'setViewport({ x: 40, y: 40, zoom: 0.9 })')
++    const swapped = { iframe: 'hidden', picture: 'visible' }
++    expect(await looks(page)).toEqual({ f0: swapped, f1: resting, f2: swapped })
++    /* the gesture goes on: still pictures */
++    await store(page, 'setViewport({ x: 40, y: 40, zoom: 0.8 })')
++    expect(await looks(page)).toEqual({ f0: swapped, f1: resting, f2: swapped })
++
++    await settle()
++    expect(await looks(page)).toEqual({ f0: resting, f1: resting, f2: resting })
++
++    /* a pan alone swaps nothing */
++    await store(page, 'setViewport({ x: 140, y: 60, zoom: 0.8 })')
++    expect(await looks(page)).toEqual({ f0: resting, f1: resting, f2: resting })
++    await settle()
++    await page.close()
++  }, 60_000)
++
++  it('switched off: a zoom changes nothing on the frames', async () => {
++    const page = await open(browser, false)
++    await page.waitForFunction(
++      (n) => document.querySelectorAll('iframe[data-doop-frame]').length === n,
++      { timeout: 15_000 },
++      FRAMES,
++    )
++    /* once shown, a document has no picture mounted with it at all */
++    await page.waitForFunction(
++      () =>
++        [...document.querySelectorAll('iframe[data-doop-frame]')].every(
++          (iframe) => !iframe.parentElement?.querySelector('[data-doop-frame-preview]'),
++        ),
++      { timeout: 15_000 },
++    )
++    const plain = { iframe: 'shown', picture: '-' }
++    expect(await looks(page)).toEqual({ f0: plain, f1: plain, f2: plain })
++    await store(page, 'setViewport({ x: 40, y: 40, zoom: 0.9 })')
++    expect(await looks(page)).toEqual({ f0: plain, f1: plain, f2: plain })
++    await settle()
++    expect(await looks(page)).toEqual({ f0: plain, f1: plain, f2: plain })
++    await page.close()
++  }, 60_000)
++})

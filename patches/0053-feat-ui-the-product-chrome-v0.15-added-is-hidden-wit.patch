@@ -1,0 +1,122 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 06:03:32 +0000
+Subject: [PATCH 53/55] feat(ui): the product chrome v0.15 added is hidden
+ without FULL_UI
+
+With FULL_UI off, as for the earlier team and product entry points:
+
+- the desktop app card in the rail and the iOS App Store sheet
+  (NativeAppPromo): the apps sign in to the hosted service, not to this
+  server;
+- Plan in Settings (the rail item and the phone tab) and the rail's
+  Upgrade to Pro buttons, as the account menu's already are;
+- the command palette's "ask the agent" row, outside the docked layout,
+  where the agent panel it opens does not exist.
+
+The palette, find and the shortcuts sheet stay: keys, not chrome.
+---
+ src/components/AppRail.tsx        |  2 +-
+ src/components/NativeAppPromo.tsx |  5 +++--
+ src/pages/CanvasPage.tsx          |  2 +-
+ src/pages/Settings.tsx            | 26 +++++++++++++++-----------
+ 4 files changed, 20 insertions(+), 15 deletions(-)
+
+diff --git a/src/components/AppRail.tsx b/src/components/AppRail.tsx
+index b064d4a..8677275 100644
+--- a/src/components/AppRail.tsx
++++ b/src/components/AppRail.tsx
+@@ -128,7 +128,7 @@ export function AppRail({
+   const t = useT()
+   const { data: session } = authClient.useSession()
+   const me = useMe(session?.user.id)
+-  const offerUpgrade = offersUpgrade(me)
++  const offerUpgrade = FULL_UI && offersUpgrade(me)
+   const [own, setOwn] = useState<RailLists | null>(() => lastLists)
+   const needsOwn = canvases === undefined || workspaces === undefined
+   useEffect(() => {
+diff --git a/src/components/NativeAppPromo.tsx b/src/components/NativeAppPromo.tsx
+index 2cd873a..c4edfa3 100644
+--- a/src/components/NativeAppPromo.tsx
++++ b/src/components/NativeAppPromo.tsx
+@@ -1,4 +1,5 @@
+ import { useEffect, useState } from 'react'
++import { FULL_UI } from '../lib/fullUi'
+ import { Button } from '@/components/ui/button'
+ import { IconButton } from '@/components/ui/icon-button'
+ import { AppIcon, BrandMark, type AppIconBrand } from '@/components/ui/brand-mark'
+@@ -86,7 +87,7 @@ const PLATFORM_NAMES: Record<DesktopPlatform, string> = { macos: 'macOS', window
+ /** The rail's desktop-app card, for a computer's browser. */
+ export function NativeAppCard({ className }: { className?: string }) {
+   const [platform] = useState(() => {
+-    const found = nativeAppPlatform()
++    const found = FULL_UI ? nativeAppPlatform() : null
+     return found && found !== 'ios' && !desktopCardDismissed() ? found : null
+   })
+   const [open, setOpen] = useState(true)
+@@ -158,7 +159,7 @@ export function IosAppPrompt({ held = false }: { held?: boolean }) {
+   const [due, setDue] = useState(false)
+   const [closed, setClosed] = useState(false)
+   useEffect(() => {
+-    if (nativeAppPlatform() !== 'ios' || iosPromptSnoozed()) return
++    if (!FULL_UI || nativeAppPlatform() !== 'ios' || iosPromptSnoozed()) return
+     const timer = window.setTimeout(() => setDue(true), PROMPT_DELAY_MS)
+     return () => window.clearTimeout(timer)
+   }, [])
+diff --git a/src/pages/CanvasPage.tsx b/src/pages/CanvasPage.tsx
+index 8c8bdd3..c56407a 100644
+--- a/src/pages/CanvasPage.tsx
++++ b/src/pages/CanvasPage.tsx
+@@ -1543,7 +1543,7 @@ export function CanvasPage({
+         <CommandPalette
+           onClose={() => setPaletteOpen(false)}
+           onAsk={
+-            guest || readOnly
++            guest || readOnly || (!FULL_UI && getPanelLayout() !== 'docked')
+               ? null
+               : (prompt) => {
+                   useStore.getState().setComposerDraft(canvasId, prompt)
+diff --git a/src/pages/Settings.tsx b/src/pages/Settings.tsx
+index 6a44142..ecd2424 100644
+--- a/src/pages/Settings.tsx
++++ b/src/pages/Settings.tsx
+@@ -130,14 +130,16 @@ export function Settings() {
+           >
+             {t('settings.accountTitle')}
+           </DashNavItem>
+-          <DashNavItem
+-            density="rail"
+-            icon={<CreditCardIcon size="rail" />}
+-            active={pane === 'plan'}
+-            onClick={() => setPane('plan')}
+-          >
+-            {t('plans.settingsTitle')}
+-          </DashNavItem>
++          {FULL_UI && (
++            <DashNavItem
++              density="rail"
++              icon={<CreditCardIcon size="rail" />}
++              active={pane === 'plan'}
++              onClick={() => setPane('plan')}
++            >
++              {t('plans.settingsTitle')}
++            </DashNavItem>
++          )}
+           <DashNavItem
+             density="rail"
+             icon={<MoonIcon size="rail" />}
+@@ -228,9 +230,11 @@ export function Settings() {
+               <TabsTrigger value="account">
+                 <UserIcon size="rail" /> {t('settings.accountTab')}
+               </TabsTrigger>
+-              <TabsTrigger value="plan">
+-                <CreditCardIcon size="rail" /> {t('plans.settingsTitle')}
+-              </TabsTrigger>
++              {FULL_UI && (
++                <TabsTrigger value="plan">
++                  <CreditCardIcon size="rail" /> {t('plans.settingsTitle')}
++                </TabsTrigger>
++              )}
+               <TabsTrigger value="appearance">
+                 <MoonIcon size="rail" /> {t('settings.appearanceTitle')}
+               </TabsTrigger>

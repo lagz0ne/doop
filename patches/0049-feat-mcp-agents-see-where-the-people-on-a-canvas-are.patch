@@ -1,0 +1,488 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 04:35:50 +0000
+Subject: [PATCH 49/55] feat(mcp): agents see where the people on a canvas are
+ looking
+
+An agent connected over MCP could read any frame it named, but not the
+one a person meant by "this frame" or "the one I'm on". The room already
+knows: each person's selected frame (the editing message), their camera
+(viewport, which follow uses) and their pointer. The MCP server never
+read any of it, so the agent had to guess or ask for a link.
+
+get_focus answers it. For each person on the canvas now: the selected
+frame, the page and world rect on their screen, the frames in view
+ranked by how much of the screen each fills (up to 12, with the share of
+each on screen), the frame under the pointer, and focus, the frame to
+take as theirs (the selection, else what fills the screen most). you:
+true marks the account the agent acts for. Without canvas_id it lists
+the readable canvases that have people on them. get_canvas carries the
+same list as people, and the agent instructions say when to call it.
+
+About 100-300 tokens of text per person, against 3-13k for a frame's
+HTML or ~1.7k for its screenshot: the agent can find the frame first,
+then look at only that one.
+
+Prior art: Figma's Dev Mode MCP server works on the current selection in
+the desktop app when no node id is given.
+
+People only: silent sessions (view-as, signed-out guests) and agents are
+left out, and access is the canvas's view role as for get_canvas. A
+viewer's selection is not tracked by the room (editing is editor-only),
+so for them focus comes from the camera. The room registers a reader at
+startup (server/roomFocus.ts), so mcp.ts does not import the room.
+
+Tests: mcpFocus.test.ts (a real socket's camera, pointer and selection
+read back over MCP; another account sees nothing), the parity list.
+---
+ .context/TECHSTACK.md         |   9 +++
+ server/index.ts               |   9 +++
+ server/mcp.ts                 |  54 ++++++++++++-
+ server/roomFocus.ts           | 119 ++++++++++++++++++++++++++++
+ tests/agentToolParity.test.ts |   1 +
+ tests/mcpFocus.test.ts        | 145 ++++++++++++++++++++++++++++++++++
+ 6 files changed, 335 insertions(+), 2 deletions(-)
+ create mode 100644 server/roomFocus.ts
+ create mode 100644 tests/mcpFocus.test.ts
+
+diff --git a/.context/TECHSTACK.md b/.context/TECHSTACK.md
+index 04af762..eee2478 100644
+--- a/.context/TECHSTACK.md
++++ b/.context/TECHSTACK.md
+@@ -243,6 +243,15 @@
+   with posthog-js: every export and Copy as PNG through `src/lib/exportEvents.ts` (`frames_exported`
+   with `source` and `target`, `png_copied`), `prototype_played`, `prototype_interactions_saved`,
+   `text_formatted`, `svg_imported`, `pdf_imported`.
++- Where people are looking, over MCP (`server/roomFocus.ts`): `get_focus` gives an agent each
++  person on a canvas now (people with a live room socket; never silent sessions or agents), the
++  frame they selected (`activeFrameId`, editors only), the page and world rect of their camera
++  (`viewport`), the frames in it ranked by how much of the screen each fills (up to 12, with the
++  share of each on screen), the frame under their pointer, and `focus` (the selection, else the
++  frame filling the screen most); `you` marks the agent's own account. Without `canvas_id` it lists
++  the readable canvases with people on them. `get_canvas` carries the same as `people`. The room
++  registers the reader at startup (`registerRoomReader`), so the MCP server never imports the
++  room. Tests: `mcpFocus.test.ts`.
+ - `ws` 8.18.0 - WebSocket server for realtime multiplayer (cursors, presence, frame edits,
+   activity feed) over one room per canvas.
+ - Custom fonts (`shared/fonts.ts`, `server/fonts.ts`, `server/fontFile.ts`): font libraries, one
+diff --git a/server/index.ts b/server/index.ts
+index efc39fe..4dfc9af 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -173,6 +173,7 @@ import { isPeerViewport } from '../shared/viewport.ts'
+ import { exportScaleSuffix, fitExportScale, parseExportScale } from '../shared/exportScale.ts'
+ import { emailShare } from './canvasShares.ts'
+ import * as userEvents from './userEvents.ts'
++import { registerRoomReader } from './roomFocus.ts'
+ import type { Actor, Canvas, ClientMessage, Presence, ServerMessage } from '../shared/types.ts'
+ 
+ const PORT = env.PORT
+@@ -317,6 +318,14 @@ function room(canvasId: string): Conn[] {
+   return [...conns.values()].filter((c) => c.canvasId === canvasId)
+ }
+ 
++/* MCP agents read where people are looking (server/roomFocus.ts): people
++   only, never a silent session (view-as, a signed-out guest) */
++registerRoomReader((canvasId) =>
++  [...conns.values()]
++    .filter((c) => !c.silent && c.presence.kind === 'user' && (!canvasId || c.canvasId === canvasId))
++    .map((c) => ({ canvasId: c.canvasId, presence: c.presence })),
++)
++
+ /** A changed profile photo reaches every room the person is in: their
+  *  presence is re-announced with the new face (a join for a known clientId
+  *  is an update on the client). */
+diff --git a/server/mcp.ts b/server/mcp.ts
+index 1c0c14d..f2214a5 100644
+--- a/server/mcp.ts
++++ b/server/mcp.ts
+@@ -93,6 +93,7 @@ import { embedsPreview, previewOf, previewToolMeta, registerFramePreview, type C
+ import * as persist from './db/persist.ts'
+ import type { FrameApproval } from '../shared/types.ts'
+ import { recordAgentFeedback } from './agentFeedback.ts'
++import { canvasFocus, occupiedCanvasIds } from './roomFocus.ts'
+ import {
+   AGENT_IDEA_CATEGORIES,
+   AGENT_ISSUE_CATEGORIES,
+@@ -129,7 +130,7 @@ export const INSTRUCTIONS = `Doop is a shared multiplayer design canvas: humans
+ 
+ You MUST call get_guide({ topic: "doop-instructions" }) before using other Doop tools, and again if a long conversation may have dropped it. It lists further topics (images, components, prototypes, redesigns…) to load when a task needs one.
+ 
+-- Call get_canvas before adding or editing frames. Pick one agent_name and pass it on every call; set_status says what you are working on.
++- Call get_canvas before adding or editing frames (get_focus: what people see). Pick one agent_name and pass it on every call; set_status says what you are working on.
+ - HUMAN FEEDBACK blocks in tool results are requests from people on the canvas: handle them before your own plan.
+ - Tokens: colours, fonts and sizes are var(--name) from the canvas's design tokens. No tokens yet: create_tokens before the first frame. Never a palette on a frame's :root.
+ - Components: before the first screen, set up the canvas's component system with create_components (primitives like Button and Input, patterns like nav and card), then compose screens from it. Anything get_canvas lists goes in as <doop-use component="Name" …>, never redrawn.
+@@ -174,7 +175,7 @@ function textWithNudge(data: unknown, nudge: string) {
+ const REVIEW_NUDGE =
+   'You have not seen this design yet. Call get_frame_screenshot on it now, judge it against the review checkpoints (fit, spacing, hierarchy, contrast, alignment, realism), and fix any issues before moving on.'
+ 
+-import type { Actor, Frame } from '../shared/types.ts'
++import type { Actor, Canvas, Frame } from '../shared/types.ts'
+ import { loadToolTargets } from './toolLoads.ts'
+ 
+ /** Reaches agents whose session predates set_status (or who skipped the guide). */
+@@ -406,6 +407,13 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
+   const noCanvas = (id: string) => err(`no canvas with id ${id} accessible to this account${readOnlyNote(id)}`)
+   const noFrame = (id: string) =>
+     err(`no frame with id ${id} accessible to this account${readOnlyNote(store.getFrame(id)?.canvasId)}`)
++  /* the people on a canvas now and what they look at; "you" marks the
++     account this agent acts for, who is most likely the one asking */
++  const focusOf = (canvas: Canvas) =>
++    canvasFocus(canvas).map(({ userId, ...focus }) => ({
++      ...focus,
++      ...(ownerId && userId === ownerId ? { you: true } : {}),
++    }))
+   /* Feedback is claimed, and set_status nudged, only for agents that may
+      act on it: claiming assigns a human's request to this agent, which a
+      read-only agent could never carry out. */
+@@ -628,6 +636,46 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
+     },
+   )
+ 
++  server.registerTool(
++    'get_focus',
++    {
++      title: 'See what people are looking at',
++      description:
++        'Where the people on a canvas are right now: for each person, the frame they selected (selectedFrame), the page and world rect on their screen (view), the frames in view with the share of each on screen (framesInView, the most visible first), the frame under their pointer (pointerFrame), and focus, the frame to take as theirs (the selection, else what fills their screen). you: true marks the account you act for. Call it when a human points at a frame without naming it ("this one", "the frame I am on"); then get_frame_screenshot or get_frame on focus.id. Without canvas_id it lists the canvases you can read that have people on them now. Empty when nobody has the canvas open.',
++      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
++      inputSchema: {
++        canvas_id: z
++          .string()
++          .optional()
++          .describe('The canvas to look at; omit to find canvases with people on them now'),
++        agent_name: agentName.optional(),
++      },
++    },
++    async ({ canvas_id, agent_name }) => {
++      if (!canvas_id) {
++        const open = occupiedCanvasIds().flatMap((id) => {
++          const canvas = canvasFor(id, 'view')
++          return canvas ? [{ id: canvas.id, name: canvas.name, people: focusOf(canvas) }] : []
++        })
++        return text(
++          open.length
++            ? { canvases: open }
++            : { canvases: [], note: 'Nobody has a canvas you can read open right now. Ask for a frame link or id.' },
++        )
++      }
++      const c = canvasFor(canvas_id, 'view')
++      if (!c) return noCanvas(canvas_id)
++      arrive(canvas_id, agent_name)
++      const people = focusOf(c)
++      return text({
++        id: c.id,
++        name: c.name,
++        people,
++        ...(people.length ? {} : { note: 'Nobody has this canvas open right now. Ask for a frame link or id.' }),
++      })
++    },
++  )
++
+   server.registerTool(
+     'get_canvas',
+     {
+@@ -706,12 +754,14 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
+             ]
+           : []),
+       ]
++      const people = focusOf(c)
+       return withPreview(
+         withFeedbackNotice(
+           text({
+             id: c.id,
+             name: c.name,
+             pages: canvasPages(c),
++            ...(people.length ? { people } : {}),
+             frames: shown.map((f) => frameSummary(f, images.get(f.id))),
+             guidelines: docs.map((d) => ({
+               name: d.name,
+diff --git a/server/roomFocus.ts b/server/roomFocus.ts
+new file mode 100644
+index 0000000..d7d13fa
+--- /dev/null
++++ b/server/roomFocus.ts
+@@ -0,0 +1,119 @@
++import { canvasPages, framePageId } from '../shared/pages.ts'
++import type { Canvas, Frame, Presence } from '../shared/types.ts'
++
++/* Where the people on a canvas are looking, for agents. The room keeps every
++   person's presence (their selected frame, camera and pointer) in the server
++   process that holds the socket; the MCP server reads it through this reader,
++   which the room registers at startup, so neither imports the other. */
++
++type RoomReader = (canvasId?: string) => { canvasId: string; presence: Presence }[]
++
++let readRoom: RoomReader = () => []
++
++/** The room's presences: people with a live socket, never silent sessions
++ *  (view-as, signed-out guests) and never agents. */
++export function registerRoomReader(reader: RoomReader): void {
++  readRoom = reader
++}
++
++/** How many frames in view are named per person; a zoomed-out camera can
++ *  hold a whole page, and the largest are the ones being looked at. */
++export const MAX_FRAMES_IN_VIEW = 12
++
++export interface FrameRef {
++  id: string
++  name: string
++}
++
++export interface PersonFocus {
++  name: string
++  /** the frame they have selected (editors only: the room drops a viewer's
++   *  selection), or null */
++  selectedFrame: FrameRef | null
++  /** the page their camera is on */
++  page: FrameRef | null
++  /** the world rect their screen shows, in design px */
++  view: { x: number; y: number; width: number; height: number; zoom: number } | null
++  /** frames on screen, the most visible first, with the share of each on screen */
++  framesInView: (FrameRef & { visible: number })[]
++  /** the frame under their pointer, as last moved */
++  pointerFrame: FrameRef | null
++  /** the frame to treat as theirs: the selection, else what fills the
++   *  screen most, else the one under the pointer */
++  focus: FrameRef | null
++}
++
++type Rect = { x: number; y: number; width: number; height: number }
++
++function overlap(a: Rect, b: Rect): number {
++  const w = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)
++  const h = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y)
++  return w > 0 && h > 0 ? w * h : 0
++}
++
++const ref = (f: Frame): FrameRef => ({ id: f.id, name: f.name })
++
++/** One person's focus on a canvas, from their presence. */
++export function personFocus(canvas: Canvas, presence: Presence): PersonFocus {
++  const pages = canvasPages(canvas)
++  const vp = presence.viewport
++  const pageId = vp?.pageId && pages.some((p) => p.id === vp.pageId) ? vp.pageId : pages[0]?.id
++  const page = pages.find((p) => p.id === pageId)
++  const onPage = canvas.frames.filter((f) => !f.demo && !f.hidden && framePageId(canvas, f) === pageId)
++  /* the camera maps world to screen as screen = world * zoom + offset */
++  const view = vp
++    ? { x: -vp.x / vp.zoom, y: -vp.y / vp.zoom, width: vp.width / vp.zoom, height: vp.height / vp.zoom }
++    : null
++  const inView = view
++    ? onPage
++        .map((f) => ({ f, shown: overlap(view, f), area: f.width * f.height }))
++        .filter((v) => v.shown > 0)
++        /* what fills the screen, not what is most fully inside it */
++        .sort((a, b) => b.shown - a.shown)
++        .map(({ f, shown, area }) => ({ ...ref(f), visible: Math.round((shown / Math.max(area, 1)) * 100) / 100 }))
++    : []
++  const cursor = presence.cursor
++  /* frames stack back to front, so the topmost under the point is the last */
++  const under = cursor
++    ? [...onPage]
++        .reverse()
++        .find((f) => cursor.x >= f.x && cursor.x <= f.x + f.width && cursor.y >= f.y && cursor.y <= f.y + f.height)
++    : undefined
++  const selected = presence.activeFrameId ? canvas.frames.find((f) => f.id === presence.activeFrameId) : undefined
++  const selectedFrame = selected ? ref(selected) : null
++  const pointerFrame = under ? ref(under) : null
++  const top = inView[0]
++  return {
++    name: presence.name,
++    selectedFrame,
++    page: page ? { id: page.id, name: page.name } : null,
++    view: view && vp ? { ...roundRect(view), zoom: Math.round(vp.zoom * 1000) / 1000 } : null,
++    framesInView: inView.slice(0, MAX_FRAMES_IN_VIEW),
++    pointerFrame,
++    focus: selectedFrame ?? (top ? { id: top.id, name: top.name } : pointerFrame),
++  }
++}
++
++function roundRect(r: Rect): Rect {
++  return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
++}
++
++/* a tab with a selection says more than one with only a camera */
++const telling = (p: Presence) => (p.activeFrameId ? 2 : 0) + (p.viewport ? 1 : 0)
++
++/** Everyone on a canvas now, one entry per person: of a person's open tabs,
++ *  the one with a selection, else one with a camera. */
++export function canvasFocus(canvas: Canvas): (PersonFocus & { userId?: string })[] {
++  const byPerson = new Map<string, Presence>()
++  for (const { presence } of readRoom(canvas.id)) {
++    const key = presence.userId ?? presence.clientId
++    const seen = byPerson.get(key)
++    if (!seen || telling(presence) > telling(seen)) byPerson.set(key, presence)
++  }
++  return [...byPerson.values()].map((p) => ({ userId: p.userId, ...personFocus(canvas, p) }))
++}
++
++/** The canvases that have people on them right now. */
++export function occupiedCanvasIds(): string[] {
++  return [...new Set(readRoom().map((r) => r.canvasId))]
++}
+diff --git a/tests/agentToolParity.test.ts b/tests/agentToolParity.test.ts
+index 3f4f9f8..c58189e 100644
+--- a/tests/agentToolParity.test.ts
++++ b/tests/agentToolParity.test.ts
+@@ -29,6 +29,7 @@ const BY_CONTEXT = [
+   'list_canvases', // a resident run is scoped to its canvas
+   'create_canvas',
+   'get_profile',
++  'get_focus', // a card carries the selection its person made (scope)
+ ]
+ 
+ /** Real gaps: MCP agents can do these and resident agents cannot yet. */
+diff --git a/tests/mcpFocus.test.ts b/tests/mcpFocus.test.ts
+new file mode 100644
+index 0000000..9c26668
+--- /dev/null
++++ b/tests/mcpFocus.test.ts
+@@ -0,0 +1,145 @@
++import { afterAll, beforeAll, expect, it } from 'vitest'
++import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js'
++import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
++import WebSocket from 'ws'
++import type { Canvas, Frame, Presence, ServerMessage } from '../shared/types'
++import { personFocus } from '../server/roomFocus.ts'
++import { Client, startServer, type Server } from './harness.ts'
++
++let server: Server
++let owner: Client
++let stranger: Client
++let agent: McpClient
++let strangerAgent: McpClient
++
++async function connect(client: Client, name: string): Promise<McpClient> {
++  const { secret } = await (await client.post('/api/agent-keys', { name })).json()
++  const mcp = new McpClient({ name: 'focus-test', version: '1.0.0' })
++  await mcp.connect(
++    new StreamableHTTPClientTransport(new URL('/mcp', server.base), {
++      requestInit: { headers: { Authorization: `Bearer ${secret}` } },
++    }),
++  )
++  return mcp
++}
++
++beforeAll(async () => {
++  server = await startServer()
++  owner = await new Client(server).signUp('focus@test.dev', 'Focus Owner')
++  stranger = await new Client(server).signUp('focus-stranger@test.dev', 'Stranger')
++  agent = await connect(owner, 'Focus agent')
++  strangerAgent = await connect(stranger, 'Stranger agent')
++}, 60_000)
++
++afterAll(async () => {
++  await agent?.close()
++  await strangerAgent?.close()
++  server?.stop()
++})
++
++async function call(mcp: McpClient, name: string, args: Record<string, unknown>) {
++  const result = await mcp.callTool({ name, arguments: args })
++  const content = result.content as { type: string; text?: string }[]
++  return { isError: !!result.isError, body: content.find((item) => item.type === 'text')!.text! }
++}
++
++async function json(mcp: McpClient, name: string, args: Record<string, unknown>) {
++  const { isError, body } = await call(mcp, name, args)
++  expect(isError, body).toBe(false)
++  return JSON.parse(body)
++}
++
++async function frame(canvas: Canvas, name: string, x: number, y: number): Promise<Frame> {
++  const res = await owner.post(`/api/canvases/${canvas.id}/frames`, {
++    name,
++    html: `<h1>${name}</h1>`,
++    x,
++    y,
++    width: 1000,
++    height: 800,
++  })
++  expect(res.status, await res.clone().text()).toBe(200)
++  return res.json()
++}
++
++async function join(canvas: Canvas) {
++  const ws = new WebSocket(`ws://localhost:${server.port}/ws`, { headers: { Cookie: owner.header() } })
++  const messages: ServerMessage[] = []
++  ws.on('message', (data) => messages.push(JSON.parse(String(data))))
++  await new Promise<void>((resolve) => ws.once('open', resolve))
++  ws.send(JSON.stringify({ type: 'join', canvasId: canvas.id, clientId: 'focus-tab', name: 'x', kind: 'user' }))
++  await expect.poll(() => messages.some((m) => m.type === 'init')).toBe(true)
++  return ws
++}
++
++it("tells an agent the frame a person selected and what is on their screen, and nobody else's", async () => {
++  const canvas: Canvas = await (await owner.post('/api/canvases', { name: 'Focus' })).json()
++  const left = await frame(canvas, 'Left', 0, 0)
++  const right = await frame(canvas, 'Right', 1200, 0)
++  const far = await frame(canvas, 'Far', 10_000, 0)
++
++  const empty = await json(agent, 'get_focus', { canvas_id: canvas.id })
++  expect(empty.people).toEqual([])
++  expect(empty.note).toMatch(/Nobody/)
++
++  const ws = await join(canvas)
++  try {
++    /* a 1600x900 screen at 50% from world (-100, 0): 3200x1800 of world,
++       all of Left and Right, none of Far */
++    ws.send(JSON.stringify({ type: 'viewport', viewport: { x: 50, y: 0, zoom: 0.5, width: 1600, height: 900 } }))
++    ws.send(JSON.stringify({ type: 'cursor', x: 1300, y: 100 }))
++    await expect
++      .poll(async () => (await json(agent, 'get_focus', { canvas_id: canvas.id })).people[0]?.view)
++      .toBeTruthy()
++    const [person] = (await json(agent, 'get_focus', { canvas_id: canvas.id })).people
++    expect(person).toMatchObject({
++      name: 'Focus Owner',
++      you: true,
++      selectedFrame: null,
++      view: { x: -100, y: 0, width: 3200, height: 1800, zoom: 0.5 },
++      pointerFrame: { id: right.id, name: 'Right' },
++    })
++    expect(person.framesInView.map((f: { id: string }) => f.id).sort()).toEqual([left.id, right.id].sort())
++    expect(person.framesInView.map((f: { id: string }) => f.id)).not.toContain(far.id)
++
++    /* a selection is the focus, whatever fills the screen */
++    ws.send(JSON.stringify({ type: 'editing', frameId: far.id }))
++    await expect
++      .poll(async () => (await json(agent, 'get_focus', { canvas_id: canvas.id })).people[0]?.focus?.id)
++      .toBe(far.id)
++
++    /* get_canvas carries the same */
++    const read = await json(agent, 'get_canvas', { canvas_id: canvas.id })
++    expect(read.people[0].selectedFrame).toEqual({ id: far.id, name: 'Far' })
++
++    /* without a canvas: the canvases with people on them */
++    const open = await json(agent, 'get_focus', {})
++    expect(open.canvases.map((c: { id: string }) => c.id)).toContain(canvas.id)
++
++    /* another account's agent learns nothing about this canvas */
++    expect((await call(strangerAgent, 'get_focus', { canvas_id: canvas.id })).isError).toBe(true)
++    const theirs = await json(strangerAgent, 'get_focus', {})
++    expect(theirs.canvases.map((c: { id: string }) => c.id)).not.toContain(canvas.id)
++  } finally {
++    ws.close()
++  }
++})
++
++it('ranks the frames in view by how much of the screen each fills', () => {
++  const at = (id: string, x: number, width: number) =>
++    ({ id, name: id, x, y: 0, width, height: 100, html: '', canvasId: 'c' }) as Frame
++  const canvas = { id: 'c', name: 'c', frames: [at('small', 0, 100), at('big', 200, 2000)] } as unknown as Canvas
++  const presence: Presence = {
++    clientId: 'p',
++    name: 'P',
++    color: '#000',
++    kind: 'user',
++    viewport: { x: 0, y: 0, zoom: 1, width: 1000, height: 500 },
++  }
++  const focus = personFocus(canvas, presence)
++  expect(focus.framesInView).toEqual([
++    { id: 'big', name: 'big', visible: 0.4 },
++    { id: 'small', name: 'small', visible: 1 },
++  ])
++  expect(focus.focus).toEqual({ id: 'big', name: 'big' })
++})
