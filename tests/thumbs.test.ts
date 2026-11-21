@@ -113,6 +113,19 @@ describe('thumbs', () => {
     expect(mocks.putObject).toHaveBeenCalledWith('thumb/versioned.ver', Buffer.from('1'), 'text/plain')
   })
 
+  it('records the version the render read, not the one an edit made while it ran', async () => {
+    const resolvers = deferredRenders()
+    const f = frame('edited-mid-render')
+    const p = thumbs.create(f, 0.25)
+    await tick()
+    f.updatedAt = 2
+    resolvers[0]!(Buffer.from('of 1'))
+    expect((await p).version).toBe(1)
+    await tick()
+    expect(mocks.putObject).toHaveBeenCalledWith('thumb/edited-mid-render.p25ver', Buffer.from('1'), 'text/plain')
+    expect(thumbs.shows(await p, f)).toBe(false)
+  })
+
   it('knows a stored thumbnail is current after a restart, and does not render it again', async () => {
     /* nothing in memory for this frame: only storage knows its version */
     mocks.getObject.mockImplementation((key: string) =>

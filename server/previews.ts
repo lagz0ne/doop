@@ -77,6 +77,18 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
      instantly even when stale (thumbs revalidates in the background), and
      costs no Chromium boot — so it isn't metered either */
   let fresh = true
+  /* A render reads the frame when it starts, and one already running is
+     shared: an edit landing meanwhile leaves its bytes a version behind.
+     They are still the best picture there is, but neither fresh (the route
+     would pin them for good under the new version) nor kept as this one. */
+  const current = (rendering: Promise<thumbs.Picture>): Promise<Buffer> =>
+    rendering.then((picture) => {
+      if (!thumbs.shows(picture, frame)) {
+        fresh = false
+        if (imgCache.get(key)?.buf === pending) imgCache.delete(key)
+      }
+      return picture.buf
+    })
   if (!pending && preview) {
     const stored = await thumbs.getStored(frame, level)
     /* A request for exactly this version, answered from a thumbnail on record
@@ -91,7 +103,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
       req.version === frame.updatedAt &&
       (await consumeRenderBudget(req.ip, req.isAuthenticated))
     if (mustRender) {
-      pending = thumbs.create(frame, level)
+      pending = current(thumbs.create(frame, level))
       remember(key, pending, frame.updatedAt)
     } else if (stored) {
       pending = Promise.resolve(stored.buf)
@@ -106,7 +118,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
     if (!(await consumeRenderBudget(req.ip, req.isAuthenticated))) return { status: 'rate-limited' }
     pending = preview
       ? /* renders AND persists — the next cold start serves from storage */
-        thumbs.create(frame, level)
+        current(thumbs.create(frame, level))
       : loadScreenshot().then(async ({ renderFrame }) =>
           renderFrame(await store.renderSource(frame), req.scale, {
             type: req.ext === 'jpg' ? 'jpeg' : 'png',

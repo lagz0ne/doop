@@ -38,8 +38,21 @@ const slot = (frameId: string, level?: PreviewScale) => (level === undefined ? f
 
 /** frame.updatedAt the stored thumb was rendered from; absent = unknown */
 const written = new Map<string, number>()
+
+/** A finished render: the bytes, and the version of the frame they show. That
+ *  is the version of the copy the render read when it started, which an edit
+ *  landing while it ran makes older than the frame's. */
+export interface Picture {
+  buf: Buffer
+  version: number
+}
+
+/** Whether a picture shows the frame as it is now. */
+export function shows(picture: { version: number }, frame: Frame): boolean {
+  return picture.version === frame.updatedAt
+}
 /** in-flight render+persist per frame — concurrent callers share it */
-const pending = new Map<string, Promise<Buffer>>()
+const pending = new Map<string, Promise<Picture>>()
 /** background revalidation throttle: an agent saving every few seconds
  *  must not turn each dashboard poll into a Chromium render */
 const lastAttempt = new Map<string, number>()
@@ -70,55 +83,65 @@ const loadScreenshot = () => (screenshot ??= import('./screenshot.ts'))
 
 /** The preview render: card-sized, clipped, cheap — matches what /i/?preview
  *  serves, because this IS what /i/?preview serves. */
-async function render(frame: Frame, level?: PreviewScale): Promise<Buffer> {
+async function render(frame: Frame, level?: PreviewScale): Promise<Picture> {
   if (active >= MAX_CONCURRENT_RENDERS) await new Promise<void>((r) => waiting.push(r))
   active++
   try {
     const { renderFrame } = await loadScreenshot()
     /* the html is read when the render starts, not when it was queued */
     const source = await store.renderSource(frame)
+    const version = source.updatedAt
     /* A level of the pyramid is the whole frame, unclipped, at that scale.
        WebP at 90 because the picture stands in for the live document right
        beside live ones: JPEG at 70 rings around every glyph and hairline,
        and WebP at 90 is clean at half the bytes of JPEG at 90 or PNG. */
     if (level !== undefined)
-      return await renderFrame(source, previewRenderScale(frame, level), { type: 'webp', quality: 90 })
-    return await renderFrame(source, Math.min(1, 640 / frame.width), {
+      return {
+        buf: await renderFrame(source, previewRenderScale(source, level), { type: 'webp', quality: 90 }),
+        version,
+      }
+    const buf = await renderFrame(source, Math.min(1, 640 / source.width), {
       type: 'jpeg',
       quality: 70,
       maxHeight: PREVIEW_MAX_HEIGHT,
       /* a dashboard tile can wait; an agent's screenshot should not */
       priority: 'background',
     })
+    return { buf, version }
   } finally {
     active--
     waiting.shift()?.()
   }
 }
 
-/** Render now, persist, and return the bytes. Deduped per frame; rejects on
- *  render failure (the caller decides what a failed render means). */
-export function create(frame: Frame, level?: PreviewScale): Promise<Buffer> {
+/** Render now, persist, and return the picture. Deduped per frame; rejects on
+ *  render failure (the caller decides what a failed render means). A caller
+ *  that joins a render already running may get an older version than the
+ *  frame it passed: check with `shows`. */
+export function create(frame: Frame, level?: PreviewScale): Promise<Picture> {
   const id = slot(frame.id, level)
   const inflight = pending.get(id)
   if (inflight) return inflight
   lastAttempt.set(id, Date.now())
-  const p = render(frame, level).then(async (buf) => {
+  const p = render(frame, level).then(async (picture) => {
+    const { buf, version } = picture
     /* persist is best-effort: a bucket hiccup must not fail the response
        that only needed the bytes */
     try {
       if (!dead.has(frame.id)) {
         await storage.putObject(keyFor(frame.id, level), buf, mimeFor(level))
-        written.set(id, frame.updatedAt)
+        /* the version rendered, not the frame's now: an edit during the
+           render left these bytes behind it, and they must read as stale */
+        written.set(id, version)
         /* purge may have run during the put — its delete can land before
            our write finishes, so re-check and clean up our own orphan */
         if (dead.has(frame.id)) await storage.deleteObject(keyFor(frame.id, level))
-        else await storage.putObject(versionKeyFor(frame.id, level), Buffer.from(String(frame.updatedAt)), 'text/plain')
+        else await storage.putObject(versionKeyFor(frame.id, level), Buffer.from(String(version)), 'text/plain')
       }
     } catch (e) {
       console.error(`thumb persist failed for ${id}:`, e)
     }
-    return buf
+    return picture
   })
   pending.set(id, p)
   p.catch(() => {}).finally(() => pending.delete(id))

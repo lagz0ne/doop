@@ -6,7 +6,11 @@ import type { Frame } from '../shared/types.ts'
    next edit, so a thumbnail on record as older must not be that answer. */
 
 const mocks = vi.hoisted(() => ({ getStored: vi.fn(), create: vi.fn() }))
-vi.mock('../server/thumbs.ts', () => ({ getStored: mocks.getStored, create: mocks.create }))
+vi.mock('../server/thumbs.ts', () => ({
+  getStored: mocks.getStored,
+  create: mocks.create,
+  shows: (picture: { version: number }, f: Frame) => picture.version === f.updatedAt,
+}))
 vi.mock('../server/screenshot.ts', () => ({ renderFrame: vi.fn() }))
 
 import { getImage, type ImageRequest } from '../server/previews.ts'
@@ -36,7 +40,7 @@ const request = (version?: number): ImageRequest => ({
 
 beforeEach(() => {
   mocks.getStored.mockReset()
-  mocks.create.mockReset().mockResolvedValue(Buffer.from('rendered'))
+  mocks.create.mockReset().mockResolvedValue({ buf: Buffer.from('rendered'), version: 7 })
 })
 
 it('serves a current thumbnail as it is', async () => {
@@ -62,4 +66,15 @@ it('serves a thumbnail of unknown age at once (stored before versions were recor
   mocks.getStored.mockResolvedValue({ buf: Buffer.from('legacy'), fresh: false, known: false })
   expect(await getImage(frame(7), request(7))).toEqual({ status: 'ok', buf: Buffer.from('legacy'), fresh: false })
   expect(mocks.create).not.toHaveBeenCalled()
+})
+
+it('does not call a render fresh when an edit landed while it ran', async () => {
+  mocks.getStored.mockResolvedValue({ buf: Buffer.from('old'), fresh: false, known: true })
+  const f = frame(7)
+  /* the render read version 7; the frame is at 8 by the time it is done */
+  mocks.create.mockImplementation(async () => {
+    f.updatedAt = 8
+    return { buf: Buffer.from('of 7'), version: 7 }
+  })
+  expect(await getImage(f, request(7))).toEqual({ status: 'ok', buf: Buffer.from('of 7'), fresh: false })
 })
