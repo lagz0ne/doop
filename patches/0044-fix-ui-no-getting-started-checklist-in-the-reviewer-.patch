@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 06:11:44 +0000
-Subject: [PATCH 44/55] fix(ui): no getting-started checklist in the reviewer
+Subject: [PATCH 44/56] fix(ui): no getting-started checklist in the reviewer
  UI, or before the canvas loads
 
 The getting-started checklist (connect an agent, give it a task) showed for

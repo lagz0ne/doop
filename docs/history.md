@@ -104,6 +104,7 @@ outside this repo.)
 | 0053 | fix(db): apply migrations by version set | drizzle 0.45 applies an entry only when it is newer than the last one applied, so upstream migrations dated before ours would be skipped on a database that has ours. `migrateBySet` applies every journal entry whose stamp is not recorded, in journal order, in one transaction (Rails, Django, Flyway `outOfOrder` work this way); node-postgres and pglite both use it |
 | 0054 | feat(ui): the product chrome v0.15 added is hidden without FULL_UI | the native-app card and iOS prompt, Plan in Settings, the rail's upgrade offer, and Ask in the command palette outside the docked layout. The palette, find bar and shortcuts sheet stay (keys, not chrome) |
 | 0055 | test: browser tests reach app modules through the fixture page | v0.15's fixtures are a production build, so tests call `window.testImport` (the page's own module instances) instead of importing `/src`; selectors follow the bleed wrapper and the paper grid, `pageCanvas` waits for 0048's later mount, `frameEdge` turns culling off |
+| 0056 | perf(canvas): a panel laid behind other frames is never live by distance | `backdrops.ts`: a frame that contains another document frame, is at least 1 Mpx with at most 8 elements per Mpx, and is static (no script, video, canvas, nested document, keyframes) shows its picture unless pinned. The live pick took such panels first (their centre is the view's). On a copy of a page with 22 nested panels behind 47 screens: zoom to 60% main thread 615 -> 313 ms and live documents 7 -> 4, pan at 60% slow frames 44 -> 24, zoom 60 > 95 > 60% GPU process 13.5 -> 3.7 s. No frame on 555 real frames qualifies. `doop:backdrops='live'` turns it off |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -439,3 +440,16 @@ and column exists before deploying.
 
 Upstreaming: not attempted yet. Patches 0001-0004 and 0007-0009 are generic enough to offer to
 kgoedecke/doop (0007 is a plain bug fix).
+
+Content-aware rendering (2026-11-21): can a frame's content and its place pick its render policy?
+Static traits of 555 real frames, then doop's own culling code replayed offline at sampled cameras,
+then a browser A/B of each candidate on copies (headless Chrome on a software GL, alternating runs,
+median of 2-3). Kept: 0056, backdrops told by containment plus sparse, static content (element
+count alone or containment alone each catch real screens; together they separate 22 panels at
+3.7 elements per Mpx or less from screens at 40 and up). Shelved, not in the series: margin
+pictures one level down (offline 11.4 -> 3.6 Mpx decoded at 60%, in the browser mixed: zoom
+60 > 95 > 60% GPU process 12.3 -> 7.1 s but pan away and back 230 -> 466 ms of main thread, and
+neutral on a page of long frames); holding endless animations unless the frame is pointed at or
+selected (five live frames pulsing cost 0.01 s of GPU process in 10 s, so nothing to save in this
+setup). Not tried: a fixed picture budget, live pick by on-screen area (worse offline), picture
+tiles for long frames.

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 06:01:53 +0000
-Subject: [PATCH 53/55] fix(db): apply migrations by version set
+Subject: [PATCH 53/56] fix(db): apply migrations by version set
 
 drizzle's migrator (0.45) applies a journal entry only when its timestamp is
 later than the newest one recorded in drizzle.__drizzle_migrations. A database

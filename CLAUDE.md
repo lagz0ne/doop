@@ -147,7 +147,8 @@ transform still applies, then `bin/doop check --test` and commit (`vendor/doop` 
   `doop:cull='off'` (0001: every frame a live document again), `doop:cull-shells='off'` (0033:
   far shells stay in the render tree), `doop:zoom-pictures='on'` or `'off'` (0035: pictures stand
   in for live documents while the zoom moves), `doop:gpu='on'`, `'force'` or `'off'` (0036: culled
-  frames drawn on one WebGL2 canvas; `on` needs hardware WebGL2). With either of the last two
+  frames drawn on one WebGL2 canvas; `on` needs hardware WebGL2), `doop:backdrops='live'` (0056: a
+  sparse, static panel holding other frames goes live by distance again, as any frame). With either of the last two
   unset, the render trial decides it per browser (0039): each page load gets a level, slow frames
   are counted in real pans and zooms, and the browser keeps what is smoother there (the GPU layer
   only ever on hardware WebGL2). `doop:render-trial='off'` turns the trial off (an unset switch is

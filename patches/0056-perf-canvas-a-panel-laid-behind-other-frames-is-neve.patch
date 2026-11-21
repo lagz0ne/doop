@@ -1,0 +1,295 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 03:16:01 +0000
+Subject: [PATCH 56/56] perf(canvas): a panel laid behind other frames is never
+ live by distance
+
+doop has no lightweight section, so a coloured panel with a title behind a group of screens is a
+full document like any other. Such backdrops are large and nearly empty, and the live pick liked
+them best: it takes the frames whose centre is nearest the view's, and a panel around the view
+has its centre there. On a page of 47 screens on 22 nested panels (three deep, up to 10280x5790,
+260 Mpx of canvas against the screens' 50), zooming to 60% booted the panels first; in headless
+Chrome on a software GL the page took 1.7-2.3 s to show everything (0.7 s without the panels) and
+3-5x the GPU-process time to zoom and pan.
+
+backdrops.ts tells one by its place and its content together: it fully contains another document
+frame (neither turned, canvas elements not counted), it is at least 1 Mpx and has at most 8
+elements per Mpx of its area, and it is static (no script, video, canvas, nested document or
+keyframes). On that page all 22 panels qualify (6-19 elements, at most 3.7 per Mpx) and no screen
+does (61.5 per Mpx and up); on every page of a real instance (555 frames) nothing does, including
+the two frames there that contain another (40 and 96 elements per Mpx). A backdrop shows its
+picture at the level the view gives it; a press, a selection or an edit still pins it live.
+
+On a copy of that page (production build, headless Chrome on a software GL, 1600x1000, off and
+on alternating, median of 3; ratios count, not absolutes): zoom 8% -> 60% main thread 615 -> 313
+ms, worst frame 324 -> 219 ms, live documents 7 -> 4; pan at 60% main thread 428 -> 183 ms, slow
+frames 44 -> 24, GPU process 18.8 -> 12.8 s; zoom 60 > 95 > 60% slow frames 30 -> 4, GPU process
+13.5 -> 3.7 s; pan away and back GPU process 13.4 -> 8.1 s. The fit jump (60% -> 8%) came out
+worse, 89 -> 147 ms of main thread, within the run-to-run spread of that scenario.
+localStorage['doop:backdrops'] = 'live' turns it off (read at load).
+---
+ src/components/Stage.tsx | 15 ++++++-
+ src/lib/backdrops.ts     | 95 ++++++++++++++++++++++++++++++++++++++++
+ src/lib/liveFrames.ts    |  7 ++-
+ tests/backdrops.test.ts  | 90 +++++++++++++++++++++++++++++++++++++
+ 4 files changed, 204 insertions(+), 3 deletions(-)
+ create mode 100644 src/lib/backdrops.ts
+ create mode 100644 tests/backdrops.test.ts
+
+diff --git a/src/components/Stage.tsx b/src/components/Stage.tsx
+index 62a5ec8..0506677 100644
+--- a/src/components/Stage.tsx
++++ b/src/components/Stage.tsx
+@@ -62,6 +62,7 @@ import { NO_INSETS, fitBox, type StageInsets } from '../lib/viewFit'
+ import { spaceWouldScroll } from '../lib/spaceScroll'
+ import { ZOOM_DRAG_MIN, ZOOM_TOOL_STEP, zoomAtPoint, zoomToBox } from '../lib/zoomTool'
+ import { isCanvasElement } from '../lib/drawing'
++import { backdropIds, backdropsEnabled } from '../lib/backdrops'
+ import {
+   computeLiveFrames,
+   cullingEnabled,
+@@ -526,9 +527,19 @@ export function Stage({
+      followed once it rests, so a pan never mounts documents it only passes. */
+   useEffect(() => {
+     if (!cullingEnabled()) return
+-    const frames: FrameBox[] = (canvas?.frames ?? [])
++    const shown = (canvas?.frames ?? [])
+       .filter((f) => !f.hidden)
+-      .map((f) => ({ id: f.id, x: f.x, y: f.y, width: f.width, height: f.height, element: isCanvasElement(f.html) }))
++      .map((f) => ({ ...f, element: isCanvasElement(f.html) }))
++    const backdrops = backdropsEnabled() ? backdropIds(shown) : new Set<string>()
++    const frames: FrameBox[] = shown.map((f) => ({
++      id: f.id,
++      x: f.x,
++      y: f.y,
++      width: f.width,
++      height: f.height,
++      element: f.element,
++      backdrop: backdrops.has(f.id),
++    }))
+     const elements = new Set(frames.filter((f) => f.element).map((f) => f.id))
+     let timer = 0
+     let pump = 0
+diff --git a/src/lib/backdrops.ts b/src/lib/backdrops.ts
+new file mode 100644
+index 0000000..d2e97dd
+--- /dev/null
++++ b/src/lib/backdrops.ts
+@@ -0,0 +1,95 @@
++/* Backdrops: frames used as a panel behind other frames.
++
++   doop has no lightweight section: a coloured panel with a title, laid
++   behind a group of screens, is a frame like any other, a full document.
++   Such panels are large (they span the group) and nearly empty, and the
++   live-frame pick (liveFrames.ts) liked them best, since it takes the frames
++   whose centre is nearest the view's and a panel around the view has its
++   centre there. On a page of 47 screens on 22 nested panels (three deep,
++   up to 10280x5790) the panels covered 260 Mpx of canvas against the
++   screens' 50, and zooming to 60% booted their documents first.
++
++   A backdrop is told by its place and its content together:
++   - it fully contains another document frame (not a canvas element), and
++     neither is turned;
++   - it is large (BACKDROP_MIN_AREA) and sparse: at most BACKDROP_MAX_DENSITY
++     elements per million px of its area. The panels above had 6 to 19
++     elements (at most 3.7 per Mpx); the screens on them at least 63 (61.5
++     per Mpx), and so did every frame of a real instance (555 frames) that
++     contains another;
++   - it is static: no script, video, canvas, nested document or keyframes,
++     so nothing in it moves or answers by itself.
++   A backdrop never goes live by distance (liveFrames.ts); it shows its
++   picture, at the level the view would give it, and a press, a selection or
++   an edit still makes it a live document as before. */
++
++/** a frame smaller than this is cheap whatever it is */
++export const BACKDROP_MIN_AREA = 1_000_000
++/** elements per million px of a backdrop's area, at most */
++export const BACKDROP_MAX_DENSITY = 8
++
++export interface BackdropCandidate {
++  id: string
++  x: number
++  y: number
++  width: number
++  height: number
++  rotation?: number
++  element?: boolean
++  html: string
++}
++
++/** Backdrops are on unless `localStorage['doop:backdrops'] === 'live'`
++ *  (the A side of a before/after measurement; read at load). */
++export function backdropsEnabled(): boolean {
++  try {
++    return localStorage.getItem('doop:backdrops') !== 'live'
++  } catch {
++    return true
++  }
++}
++
++const MOVING = /<(?:script|video|canvas|iframe|object|embed)\b|@keyframes\b/i
++const SKIPPED = /<(style|script|head|template)\b[\s\S]*?<\/\1\s*>/gi
++const TAG = /<[a-zA-Z]/g
++
++/* Frame HTML is immutable, so the answer is kept per string (as isCanvasElement does). */
++const elementCounts = new Map<string, number>()
++const ELEMENT_COUNTS_MAX = 2000
++
++/** The elements of a static document, or null when something in it moves
++ *  (script, media, a nested document, keyframes). */
++export function staticElementCount(html: string): number | null {
++  let known = elementCounts.get(html)
++  if (known === undefined) {
++    known = MOVING.test(html) ? -1 : (html.replace(SKIPPED, '').match(TAG)?.length ?? 0)
++    if (elementCounts.size >= ELEMENT_COUNTS_MAX) elementCounts.clear()
++    elementCounts.set(html, known)
++  }
++  return known < 0 ? null : known
++}
++
++function contains(outer: BackdropCandidate, inner: BackdropCandidate): boolean {
++  return (
++    inner.x >= outer.x &&
++    inner.y >= outer.y &&
++    inner.x + inner.width <= outer.x + outer.width &&
++    inner.y + inner.height <= outer.y + outer.height &&
++    inner.width * inner.height < outer.width * outer.height
++  )
++}
++
++/** The backdrops among one page's frames. */
++export function backdropIds(frames: readonly BackdropCandidate[]): Set<string> {
++  const out = new Set<string>()
++  const documents = frames.filter((f) => !f.element && !f.rotation)
++  for (const f of documents) {
++    const area = f.width * f.height
++    if (area < BACKDROP_MIN_AREA) continue
++    if (!documents.some((g) => g !== f && contains(f, g))) continue
++    const count = staticElementCount(f.html)
++    if (count === null || count > (BACKDROP_MAX_DENSITY * area) / 1_000_000) continue
++    out.add(f.id)
++  }
++  return out
++}
+diff --git a/src/lib/liveFrames.ts b/src/lib/liveFrames.ts
+index 2e862d1..3c8bed4 100644
+--- a/src/lib/liveFrames.ts
++++ b/src/lib/liveFrames.ts
+@@ -30,6 +30,8 @@ export interface FrameBox {
+   height: number
+   /** canvas elements (shapes, text) have no opaque preview: never imaged */
+   element?: boolean
++  /** a panel behind other frames (backdrops.ts): live only when pinned */
++  backdrop?: boolean
+ }
+ 
+ export interface Camera {
+@@ -124,8 +126,11 @@ export function computeLiveFrames(
+      is live whatever the zoom, and none of them counts against the cap */
+   for (const f of near) if (f.element) live.add(f.id)
+   if (!readable) return live
++  /* a backdrop is never live by distance: it would win the pick (its centre
++     is near the view's whenever the view is inside it) and it is the largest,
++     emptiest document on the page; its picture stands in for it */
+   const documents = near
+-    .filter((f) => !f.element)
++    .filter((f) => !f.element && !f.backdrop)
+     .map((f) => ({ id: f.id, d: Math.hypot(f.x + f.width / 2 - cx, f.y + f.height / 2 - cy) }))
+     .sort((a, b) => a.d - b.d)
+   for (const f of documents.slice(0, MAX_LIVE)) live.add(f.id)
+diff --git a/tests/backdrops.test.ts b/tests/backdrops.test.ts
+new file mode 100644
+index 0000000..123308f
+--- /dev/null
++++ b/tests/backdrops.test.ts
+@@ -0,0 +1,90 @@
++import { describe, expect, it } from 'vitest'
++import { backdropIds, staticElementCount, type BackdropCandidate } from '../src/lib/backdrops'
++import { computeLiveFrames, type FrameBox } from '../src/lib/liveFrames'
++
++const panelHtml = (title: string) =>
++  `<!doctype html><html><head><style>body{margin:0;background:var(--e-card)}</style></head>` +
++  `<body><div style="padding:48px"><h2>${title}</h2><p>Actor, need, trigger.</p></div></body></html>`
++const screenHtml = `<!doctype html><html><body>${'<div><span>row</span><button>Go</button></div>'.repeat(40)}</body></html>`
++
++const panel = (id: string, x: number, y: number, width: number, height: number): BackdropCandidate => ({
++  id,
++  x,
++  y,
++  width,
++  height,
++  html: panelHtml(id),
++})
++const screen = (id: string, x: number, y: number): BackdropCandidate => ({
++  id,
++  x,
++  y,
++  width: 1440,
++  height: 900,
++  html: screenHtml,
++})
++
++describe('staticElementCount', () => {
++  it('counts the elements outside head, style and script', () => {
++    expect(staticElementCount(panelHtml('a'))).toBe(5)
++  })
++  it('is null for a document with something that moves', () => {
++    expect(staticElementCount('<body><script>1</script></body>')).toBeNull()
++    expect(staticElementCount('<style>@keyframes p{}</style><body></body>')).toBeNull()
++    expect(staticElementCount('<body><video src="a.mp4"></video></body>')).toBeNull()
++  })
++})
++
++describe('backdropIds', () => {
++  it('finds nested panels behind screens', () => {
++    const frames = [
++      panel('journey', 0, 0, 10000, 5000),
++      panel('group', 200, 400, 4000, 1500),
++      screen('s1', 300, 500),
++      screen('s2', 1900, 500),
++    ]
++    expect([...backdropIds(frames)].sort()).toEqual(['group', 'journey'])
++  })
++  it('leaves a screen with a frame dropped on it alone', () => {
++    /* a real one: 5960x3028 with 728 elements, two screens laid over it */
++    const busy = `<body>${'<div><span>row</span><button>Go</button></div>'.repeat(250)}</body>`
++    const big = { ...screen('settings', 0, 0), width: 6000, height: 3000, html: busy }
++    expect(backdropIds([big, screen('s1', 100, 100)]).size).toBe(0)
++  })
++  it('leaves a sparse panel that contains nothing alone', () => {
++    expect(backdropIds([panel('header', 0, 0, 1600, 900), screen('s1', 0, 1000)]).size).toBe(0)
++  })
++  it('leaves a panel that moves, a small one and a turned one alone', () => {
++    const moving = { ...panel('m', 0, 0, 4000, 2000), html: '<body><canvas></canvas></body>' }
++    const small = panel('small', 0, 3000, 900, 900)
++    const turned = { ...panel('t', 0, 5000, 4000, 2000), rotation: 10 }
++    const frames = [
++      moving,
++      screen('a', 10, 10),
++      small,
++      { ...screen('b', 10, 3010), width: 400, height: 400 },
++      turned,
++      screen('c', 10, 5010),
++    ]
++    expect(backdropIds(frames).size).toBe(0)
++  })
++  it('does not count canvas elements (stickers, shapes) as content held', () => {
++    const shape = { ...screen('shape', 100, 100), element: true }
++    expect(backdropIds([panel('p', 0, 0, 4000, 2000), shape]).size).toBe(0)
++  })
++})
++
++describe('computeLiveFrames with backdrops', () => {
++  it('never makes a backdrop live by distance, only when pinned', () => {
++    const frames: FrameBox[] = [
++      { id: 'panel', x: 0, y: 0, width: 10000, height: 5000, backdrop: true },
++      { id: 's1', x: 300, y: 500, width: 1440, height: 900 },
++    ]
++    const camera = { x: -100, y: -300, zoom: 0.6 }
++    const stage = { width: 1600, height: 1000 }
++    const live = computeLiveFrames(frames, camera, stage, new Set(), new Set())
++    expect(live.has('panel')).toBe(false)
++    expect(live.has('s1')).toBe(true)
++    expect(computeLiveFrames(frames, camera, stage, new Set(['panel']), new Set()).has('panel')).toBe(true)
++  })
++})
