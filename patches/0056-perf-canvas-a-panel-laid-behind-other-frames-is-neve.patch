@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Sat, 21 Nov 2026 03:16:01 +0000
-Subject: [PATCH 56/56] perf(canvas): a panel laid behind other frames is never
+Subject: [PATCH 56/60] perf(canvas): a panel laid behind other frames is never
  live by distance
 
 doop has no lightweight section, so a coloured panel with a title behind a group of screens is a

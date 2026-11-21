@@ -105,6 +105,10 @@ outside this repo.)
 | 0054 | feat(ui): the product chrome v0.15 added is hidden without FULL_UI | the native-app card and iOS prompt, Plan in Settings, the rail's upgrade offer, and Ask in the command palette outside the docked layout. The palette, find bar and shortcuts sheet stay (keys, not chrome) |
 | 0055 | test: browser tests reach app modules through the fixture page | v0.15's fixtures are a production build, so tests call `window.testImport` (the page's own module instances) instead of importing `/src`; selectors follow the bleed wrapper and the paper grid, `pageCanvas` waits for 0048's later mount, `frameEdge` turns culling off |
 | 0056 | perf(canvas): a panel laid behind other frames is never live by distance | `backdrops.ts`: a frame that contains another document frame, is at least 1 Mpx with at most 8 elements per Mpx, and is static (no script, video, canvas, nested document, keyframes) shows its picture unless pinned. The live pick took such panels first (their centre is the view's). On a copy of a page with 22 nested panels behind 47 screens: zoom to 60% main thread 615 -> 313 ms and live documents 7 -> 4, pan at 60% slow frames 44 -> 24, zoom 60 > 95 > 60% GPU process 13.5 -> 3.7 s. No frame on 555 real frames qualifies. `doop:backdrops='live'` turns it off |
+| 0057 | fix(previews): a picture is recorded under the version it was drawn from | A render reads the html when it starts but recorded the frame's version when it finished; an edit meanwhile stored old pixels under the new version, served immutable. Now the version of the copy it read is recorded, and a render an edit overtook is served short-lived and not cached |
+| 0058 | perf(previews): moving or renaming a frame keeps its picture | Every write bumps `updatedAt`, so a drag redrew the same pixels. A picture also records a design key (SHA-1 of html, width, height) and is current when it matches; the version sidecar becomes `<version> <key>` |
+| 0059 | perf(previews): a frame's picture is drawn once its design settles, not at the first look | `prerender.ts`: the smallest level drawn in the background 4 s after the last html or size change, not mid-stream, one at a time, after 2 s without an interactive render. First look after an edit, new visitor: 10 of 29 screens edited 2.27 -> 1.70 s, 2 tall frames 5.99 -> 1.61 s (what the page takes unedited). A burst of 30 edits: 24 s CPU, +300 MB peak, screenshots during it unchanged but the first (0.57 -> 0.87 s). `PREVIEW_PRERENDER=0` turns it off |
+| 0060 | feat(canvas): a frame waiting for its picture shows a placeholder, not a white box | `FramePreview`: Skeleton's pulse under the picture after 300 ms until it is decoded; after the last failed retry, "No picture of this frame yet. Select it to open it." |
 
 Measured (Chrome traces, 188-frame page, frames out of process, editor main thread,
 v0.12.0 → v0.12.0 + 0001-0004): pan at fit 2260 → 245 ms (37 slow frames → 0); zoom 8→60% 1700 →
@@ -453,3 +457,18 @@ neutral on a page of long frames); holding endless animations unless the frame i
 selected (five live frames pulsing cost 0.01 s of GPU process in 10 s, so nothing to save in this
 setup). Not tried: a fixed picture budget, live pick by on-screen area (worse offline), picture
 tiles for long frames.
+
+First load and waiting (2026-11-21): where does opening a canvas wait, and would a service worker
+help? First loads of copies of real pages on a local production build (headless Chrome, software
+GL, median of 3): every frame in view shown at 1.6 s for a new visitor and 0.5 s for a returning one
+with no shaping, 4.1 and 2.1 s on 4G (the 4G new visitor overstated by about 1.4 s: the local server
+sends the bundle uncompressed), and 5.0-7.8 s when the server had not drawn the pictures yet. A
+production log had 149 picture requests waiting 38 s at the median (54 s at worst) in one minute.
+So the first fixes are server-side (0057-0059) plus a placeholder for the wait (0060). Considered
+and left: a per-frame blur placeholder (ThumbHash or BlurHash; interface screenshots blur to nearly
+one colour), a progress bar (a single WebSocket message reports no progress, and the canvas data is
+about 0.5 s of a 2-4 s wait on 4G), a service worker (the HTTP cache already keeps versioned pictures;
+it cannot hold the WebSocket's canvas data). Not done yet: the canvas data without its html first
+and the html in batches (shells and picture requests sooner, an honest progress bar), and the last
+canvas kept on the device (IndexedDB) for a returning visitor. A cold load's 0.9 s before the first
+paint was a stall on the software GL of the test machine, not doop's.

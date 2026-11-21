@@ -1,0 +1,240 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 08:21:02 +0000
+Subject: [PATCH 57/60] fix(previews): a picture is recorded under the version
+ it was drawn from
+
+A preview render reads the frame's html when it starts (store.renderSource,
+a copy), but thumbs.create recorded the version from the frame object it was
+handed once the render was done. Edits change that object in place, so an edit
+landing while Chromium drew stored the old pixels under the new version, both
+in memory and in the version sidecar. The next request naming that version
+found them fresh, and the route served them as immutable for a year, until
+the frame's next edit. A request that joined a render already running had the
+same issue: it answered a newer version with older bytes, marked fresh.
+
+Now the render returns the bytes with the version of the copy it read
+(thumbs.Picture), and that version is what is recorded. getImage calls a
+render fresh only when it shows the frame as it is when the render finishes
+(thumbs.shows); otherwise it still serves the bytes (the best picture there
+is), not fresh, so they get the short lifetime, and drops them from its
+in-process cache.
+
+Pre-rendering pictures while agents edit (a later patch) makes this race
+common, so it goes first.
+---
+ server/previews.ts           | 16 +++++++++++--
+ server/thumbs.ts             | 45 +++++++++++++++++++++++++++---------
+ tests/previewVersion.test.ts | 19 +++++++++++++--
+ tests/thumbs.test.ts         | 13 +++++++++++
+ 4 files changed, 78 insertions(+), 15 deletions(-)
+
+diff --git a/server/previews.ts b/server/previews.ts
+index 7cc5997..30b5c40 100644
+--- a/server/previews.ts
++++ b/server/previews.ts
+@@ -77,6 +77,18 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
+      instantly even when stale (thumbs revalidates in the background), and
+      costs no Chromium boot — so it isn't metered either */
+   let fresh = true
++  /* A render reads the frame when it starts, and one already running is
++     shared: an edit landing meanwhile leaves its bytes a version behind.
++     They are still the best picture there is, but neither fresh (the route
++     would pin them for good under the new version) nor kept as this one. */
++  const current = (rendering: Promise<thumbs.Picture>): Promise<Buffer> =>
++    rendering.then((picture) => {
++      if (!thumbs.shows(picture, frame)) {
++        fresh = false
++        if (imgCache.get(key)?.buf === pending) imgCache.delete(key)
++      }
++      return picture.buf
++    })
+   if (!pending && preview) {
+     const stored = await thumbs.getStored(frame, level)
+     /* A request for exactly this version, answered from a thumbnail on record
+@@ -91,7 +103,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
+       req.version === frame.updatedAt &&
+       (await consumeRenderBudget(req.ip, req.isAuthenticated))
+     if (mustRender) {
+-      pending = thumbs.create(frame, level)
++      pending = current(thumbs.create(frame, level))
+       remember(key, pending, frame.updatedAt)
+     } else if (stored) {
+       pending = Promise.resolve(stored.buf)
+@@ -106,7 +118,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
+     if (!(await consumeRenderBudget(req.ip, req.isAuthenticated))) return { status: 'rate-limited' }
+     pending = preview
+       ? /* renders AND persists — the next cold start serves from storage */
+-        thumbs.create(frame, level)
++        current(thumbs.create(frame, level))
+       : loadScreenshot().then(async ({ renderFrame }) =>
+           renderFrame(await store.renderSource(frame), req.scale, {
+             type: req.ext === 'jpg' ? 'jpeg' : 'png',
+diff --git a/server/thumbs.ts b/server/thumbs.ts
+index 5186082..4cc1cc5 100644
+--- a/server/thumbs.ts
++++ b/server/thumbs.ts
+@@ -38,8 +38,21 @@ const slot = (frameId: string, level?: PreviewScale) => (level === undefined ? f
+ 
+ /** frame.updatedAt the stored thumb was rendered from; absent = unknown */
+ const written = new Map<string, number>()
++
++/** A finished render: the bytes, and the version of the frame they show. That
++ *  is the version of the copy the render read when it started, which an edit
++ *  landing while it ran makes older than the frame's. */
++export interface Picture {
++  buf: Buffer
++  version: number
++}
++
++/** Whether a picture shows the frame as it is now. */
++export function shows(picture: { version: number }, frame: Frame): boolean {
++  return picture.version === frame.updatedAt
++}
+ /** in-flight render+persist per frame — concurrent callers share it */
+-const pending = new Map<string, Promise<Buffer>>()
++const pending = new Map<string, Promise<Picture>>()
+ /** background revalidation throttle: an agent saving every few seconds
+  *  must not turn each dashboard poll into a Chromium render */
+ const lastAttempt = new Map<string, number>()
+@@ -70,55 +83,65 @@ const loadScreenshot = () => (screenshot ??= import('./screenshot.ts'))
+ 
+ /** The preview render: card-sized, clipped, cheap — matches what /i/?preview
+  *  serves, because this IS what /i/?preview serves. */
+-async function render(frame: Frame, level?: PreviewScale): Promise<Buffer> {
++async function render(frame: Frame, level?: PreviewScale): Promise<Picture> {
+   if (active >= MAX_CONCURRENT_RENDERS) await new Promise<void>((r) => waiting.push(r))
+   active++
+   try {
+     const { renderFrame } = await loadScreenshot()
+     /* the html is read when the render starts, not when it was queued */
+     const source = await store.renderSource(frame)
++    const version = source.updatedAt
+     /* A level of the pyramid is the whole frame, unclipped, at that scale.
+        WebP at 90 because the picture stands in for the live document right
+        beside live ones: JPEG at 70 rings around every glyph and hairline,
+        and WebP at 90 is clean at half the bytes of JPEG at 90 or PNG. */
+     if (level !== undefined)
+-      return await renderFrame(source, previewRenderScale(frame, level), { type: 'webp', quality: 90 })
+-    return await renderFrame(source, Math.min(1, 640 / frame.width), {
++      return {
++        buf: await renderFrame(source, previewRenderScale(source, level), { type: 'webp', quality: 90 }),
++        version,
++      }
++    const buf = await renderFrame(source, Math.min(1, 640 / source.width), {
+       type: 'jpeg',
+       quality: 70,
+       maxHeight: PREVIEW_MAX_HEIGHT,
+       /* a dashboard tile can wait; an agent's screenshot should not */
+       priority: 'background',
+     })
++    return { buf, version }
+   } finally {
+     active--
+     waiting.shift()?.()
+   }
+ }
+ 
+-/** Render now, persist, and return the bytes. Deduped per frame; rejects on
+- *  render failure (the caller decides what a failed render means). */
+-export function create(frame: Frame, level?: PreviewScale): Promise<Buffer> {
++/** Render now, persist, and return the picture. Deduped per frame; rejects on
++ *  render failure (the caller decides what a failed render means). A caller
++ *  that joins a render already running may get an older version than the
++ *  frame it passed: check with `shows`. */
++export function create(frame: Frame, level?: PreviewScale): Promise<Picture> {
+   const id = slot(frame.id, level)
+   const inflight = pending.get(id)
+   if (inflight) return inflight
+   lastAttempt.set(id, Date.now())
+-  const p = render(frame, level).then(async (buf) => {
++  const p = render(frame, level).then(async (picture) => {
++    const { buf, version } = picture
+     /* persist is best-effort: a bucket hiccup must not fail the response
+        that only needed the bytes */
+     try {
+       if (!dead.has(frame.id)) {
+         await storage.putObject(keyFor(frame.id, level), buf, mimeFor(level))
+-        written.set(id, frame.updatedAt)
++        /* the version rendered, not the frame's now: an edit during the
++           render left these bytes behind it, and they must read as stale */
++        written.set(id, version)
+         /* purge may have run during the put — its delete can land before
+            our write finishes, so re-check and clean up our own orphan */
+         if (dead.has(frame.id)) await storage.deleteObject(keyFor(frame.id, level))
+-        else await storage.putObject(versionKeyFor(frame.id, level), Buffer.from(String(frame.updatedAt)), 'text/plain')
++        else await storage.putObject(versionKeyFor(frame.id, level), Buffer.from(String(version)), 'text/plain')
+       }
+     } catch (e) {
+       console.error(`thumb persist failed for ${id}:`, e)
+     }
+-    return buf
++    return picture
+   })
+   pending.set(id, p)
+   p.catch(() => {}).finally(() => pending.delete(id))
+diff --git a/tests/previewVersion.test.ts b/tests/previewVersion.test.ts
+index 3c16464..f366a46 100644
+--- a/tests/previewVersion.test.ts
++++ b/tests/previewVersion.test.ts
+@@ -6,7 +6,11 @@ import type { Frame } from '../shared/types.ts'
+    next edit, so a thumbnail on record as older must not be that answer. */
+ 
+ const mocks = vi.hoisted(() => ({ getStored: vi.fn(), create: vi.fn() }))
+-vi.mock('../server/thumbs.ts', () => ({ getStored: mocks.getStored, create: mocks.create }))
++vi.mock('../server/thumbs.ts', () => ({
++  getStored: mocks.getStored,
++  create: mocks.create,
++  shows: (picture: { version: number }, f: Frame) => picture.version === f.updatedAt,
++}))
+ vi.mock('../server/screenshot.ts', () => ({ renderFrame: vi.fn() }))
+ 
+ import { getImage, type ImageRequest } from '../server/previews.ts'
+@@ -36,7 +40,7 @@ const request = (version?: number): ImageRequest => ({
+ 
+ beforeEach(() => {
+   mocks.getStored.mockReset()
+-  mocks.create.mockReset().mockResolvedValue(Buffer.from('rendered'))
++  mocks.create.mockReset().mockResolvedValue({ buf: Buffer.from('rendered'), version: 7 })
+ })
+ 
+ it('serves a current thumbnail as it is', async () => {
+@@ -63,3 +67,14 @@ it('serves a thumbnail of unknown age at once (stored before versions were recor
+   expect(await getImage(frame(7), request(7))).toEqual({ status: 'ok', buf: Buffer.from('legacy'), fresh: false })
+   expect(mocks.create).not.toHaveBeenCalled()
+ })
++
++it('does not call a render fresh when an edit landed while it ran', async () => {
++  mocks.getStored.mockResolvedValue({ buf: Buffer.from('old'), fresh: false, known: true })
++  const f = frame(7)
++  /* the render read version 7; the frame is at 8 by the time it is done */
++  mocks.create.mockImplementation(async () => {
++    f.updatedAt = 8
++    return { buf: Buffer.from('of 7'), version: 7 }
++  })
++  expect(await getImage(f, request(7))).toEqual({ status: 'ok', buf: Buffer.from('of 7'), fresh: false })
++})
+diff --git a/tests/thumbs.test.ts b/tests/thumbs.test.ts
+index ad794fc..5dc52b2 100644
+--- a/tests/thumbs.test.ts
++++ b/tests/thumbs.test.ts
+@@ -113,6 +113,19 @@ describe('thumbs', () => {
+     expect(mocks.putObject).toHaveBeenCalledWith('thumb/versioned.ver', Buffer.from('1'), 'text/plain')
+   })
+ 
++  it('records the version the render read, not the one an edit made while it ran', async () => {
++    const resolvers = deferredRenders()
++    const f = frame('edited-mid-render')
++    const p = thumbs.create(f, 0.25)
++    await tick()
++    f.updatedAt = 2
++    resolvers[0]!(Buffer.from('of 1'))
++    expect((await p).version).toBe(1)
++    await tick()
++    expect(mocks.putObject).toHaveBeenCalledWith('thumb/edited-mid-render.p25ver', Buffer.from('1'), 'text/plain')
++    expect(thumbs.shows(await p, f)).toBe(false)
++  })
++
+   it('knows a stored thumbnail is current after a restart, and does not render it again', async () => {
+     /* nothing in memory for this frame: only storage knows its version */
+     mocks.getObject.mockImplementation((key: string) =>

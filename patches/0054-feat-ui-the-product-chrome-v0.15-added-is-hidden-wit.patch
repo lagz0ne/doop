@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 06:03:32 +0000
-Subject: [PATCH 54/56] feat(ui): the product chrome v0.15 added is hidden
+Subject: [PATCH 54/60] feat(ui): the product chrome v0.15 added is hidden
  without FULL_UI
 
 With FULL_UI off, as for the earlier team and product entry points:

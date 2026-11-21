@@ -1,0 +1,708 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 08:25:54 +0000
+Subject: [PATCH 59/60] perf(previews): a frame's picture is drawn once its
+ design settles, not at the first look
+
+The editor shows a frame that is not a live document as its picture, and a
+picture was drawn by Chromium only when first asked for. Whoever first opened
+a page after an edit, often an agent's fresh work, looked at white boxes while
+the server drew them three at a time (0.3-0.7 s a screen-sized frame, 2-6 s a
+tall page). A production log had 149 such picture requests in one minute,
+for 58 frames, waiting 38 s at the median and 54 s at worst.
+
+server/prerender.ts draws a frame's picture in the background once its design
+has settled:
+- the store tells it of a frame whose html, width or height changed (a new
+  onDrawnChange hook, after the commit); a move, a rename, a lock or a restack
+  is not a change of picture (the previous patch);
+- SETTLE_MS (4 s) after the last change, and not while an agent is streaming
+  into the frame (every chunk is a change; it looks again a settle later);
+- only the smallest level (0.25): it is what every frame at fit and every
+  frame away from the view asks for when a page opens. The larger ones stay
+  drawn on demand;
+- one frame at a time at background priority, outside the per-IP render
+  budget (a signed-out visitor's 12 renders a minute were where its boxes
+  stayed white), and only after QUIET_MS (2 s) without an interactive render:
+  the render gate now counts interactive renders and when one last came or
+  went (renderBrowser.ts), since a background page shares the cores with an
+  agent's screenshots, and an agent's burst of edits is often followed by its
+  own screenshots;
+- a frame whose stored picture is already current, a hidden frame, an empty
+  one or a canvas element (always live) is skipped.
+
+Measured on a local production build (headless Chrome, software GL, 4 cores,
+copies of real pages, median of 3), opening a page as a new visitor 15-25 s
+after an agent's edit, all frames in view shown at:
+- 10 screens edited on a page of 29 in view: 2.27 -> 1.70 s;
+- 2 tall frames edited: 5.99 -> 1.61 s.
+Both are what the page takes with nothing edited. A burst of 30 edits costs
+24 s of CPU (2.5 s with nothing drawn ahead) and 300 MB more at the peak,
+drawn within 35 s; five screenshots taken 5 s into it: 0.87, 0.24, 0.26,
+0.33, 0.35 s against 0.57, 0.25, 0.31, 0.31, 0.36 s (before the quiet spell,
+0.31-1.33 s).
+
+PREVIEW_PRERENDER=0 turns it off, for a deployment whose renderer bills per
+session.
+---
+ .env.example                |   5 ++
+ server/env.ts               |   4 +
+ server/index.ts             |   3 +
+ server/prerender.ts         | 132 +++++++++++++++++++++++++++++
+ server/renderBrowser.ts     |  27 +++++-
+ server/store.ts             |  24 +++++-
+ server/thumbs.ts            |  37 ++++++---
+ tests/drawnChange.test.ts   |  37 +++++++++
+ tests/prerender.test.ts     | 161 ++++++++++++++++++++++++++++++++++++
+ tests/renderBrowser.test.ts |  13 +++
+ 10 files changed, 428 insertions(+), 15 deletions(-)
+ create mode 100644 server/prerender.ts
+ create mode 100644 tests/drawnChange.test.ts
+ create mode 100644 tests/prerender.test.ts
+
+diff --git a/.env.example b/.env.example
+index 8b279d6..d6e5cc3 100644
+--- a/.env.example
++++ b/.env.example
+@@ -384,6 +384,11 @@
+ # Pages the shared Chromium renders at once (default 4); more wait in a
+ # bounded queue and are refused with a 503 when it is full.
+ #RENDER_CONCURRENCY=4
++# A frame's smallest picture (what a page shows when it opens) is drawn in the background
++# once its design has settled for a few seconds, one frame at a time, so the first look
++# after an edit does not wait for the render. 0 draws pictures only when first asked for
++# (e.g. a remote browser billed per session).
++#PREVIEW_PRERENDER=1
+ # Render in a remote Chrome over the DevTools protocol instead of a local one.
+ # Assets load from BETTER_AUTH_URL, so the remote browser must be able to
+ # reach it (not localhost). A browser with no page open for 30s is closed,
+diff --git a/server/env.ts b/server/env.ts
+index 1842127..25c8798 100644
+--- a/server/env.ts
++++ b/server/env.ts
+@@ -323,6 +323,10 @@ const schema = {
+      provider such as Cloudflare): it may fetch public URLs itself instead of
+      through the DNS-pinned proxy. Never set it for a self-hosted renderer */
+   REMOTE_BROWSER_ISOLATED: bool({ default: false }),
++  /* draw a frame's smallest picture in the background once its design has
++     settled (server/prerender.ts), so the first look after an edit does not
++     wait for Chromium. Off: pictures are drawn when first asked for only */
++  PREVIEW_PRERENDER: bool({ default: true }),
+ 
+   /* ------------------------------------------------------ analytics */
+   POSTHOG_KEY: str({ default: undefined }),
+diff --git a/server/index.ts b/server/index.ts
+index d9a7b68..5e568b2 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -64,6 +64,7 @@ import { parseGuide } from '../shared/guides.ts'
+ import { getImage } from './previews.ts'
+ import { LayerNotFoundError, layerRefFromQuery, layerSelector } from './layerExport.ts'
+ import * as actions from './actions.ts'
++import { startPrerender } from './prerender.ts'
+ import { captureFeature, captureTokenResults } from './featureEvents.ts'
+ import { liveActivitiesRouter, logLiveActivityRequests, startLiveActivityDelivery } from './liveActivities.ts'
+ import { onCanvasEvent } from './events.ts'
+@@ -3681,6 +3682,8 @@ server.listen(PORT, () => {
+     (canvasId) =>
+       room(canvasId).length > 0 || (agentPresences.get(canvasId)?.size ?? 0) > 0 || actions.isCanvasStreaming(canvasId),
+   )
++  /* pictures drawn once a frame's design settles, not at the first look */
++  if (env.PREVIEW_PRERENDER) startPrerender(actions.isFrameStreaming)
+   setInterval(
+     () => {
+       const dropped = store.evictIdle(env.CANVAS_IDLE_MS)
+diff --git a/server/prerender.ts b/server/prerender.ts
+new file mode 100644
+index 0000000..ac4da33
+--- /dev/null
++++ b/server/prerender.ts
+@@ -0,0 +1,132 @@
++import { PREVIEW_SCALES, type Frame, type PreviewScale } from '../shared/types.ts'
++import { htmlLoaded } from './frameHtml.ts'
++import type { RendererStatus } from './renderBrowser.ts'
++import { store } from './store.ts'
++import * as thumbs from './thumbs.ts'
++
++/* Pictures drawn ahead of the first look.
++
++   The editor shows a frame that is not a live document as its picture
++   (/i/<id>.webp?preview&s=<level>&v=<version>, thumbs.ts), and a picture is
++   drawn by Chromium when it is first asked for. So whoever first opens a
++   page after an edit, often an agent's fresh work, looked at white boxes
++   while the server drew: 0.3-0.7 s a screen-sized frame and 2-6 s a tall
++   page, three at a time (measured on a local production build; a cold page
++   of 47 screens took 4.3 s to fill).
++
++   Here a frame whose design changed is drawn in the background once it has
++   settled: SETTLE_MS without another change, and not while an agent is still
++   streaming into it (every chunk is a change). Only the smallest level: it
++   is the one a page asks for when it opens (frames away from the view and
++   every frame at fit), and the larger ones stay drawn on demand. One frame
++   at a time, at background priority, and only once no interactive render
++   (an agent's screenshot, a picture someone is waiting for) has run for
++   QUIET_MS: a background page shares the machine's cores with them, and an
++   agent's burst of edits is often followed by its own screenshots (measured:
++   five screenshots during the drawing of 30 frames took 0.31-1.33 s, against
++   0.26-0.59 s with nothing drawn ahead). A frame whose picture is already
++   current is skipped. */
++
++export const SETTLE_MS = 4000
++export const QUIET_MS = 2000
++const LEVEL: PreviewScale = PREVIEW_SCALES[0]
++
++export interface PrerenderDeps {
++  getFrame(frameId: string): Frame | undefined
++  /** an agent is writing into the frame right now */
++  busy(frameId: string): boolean
++  /** the frame's stored picture at this level shows it as it is */
++  isCurrent(frame: Frame, level: PreviewScale): Promise<boolean>
++  draw(frame: Frame, level: PreviewScale): Promise<unknown>
++  /** the frame has nothing to draw: no html, or a canvas element (always live) */
++  skip(frame: Frame): boolean
++  settleMs?: number
++}
++
++export function createPrerender(deps: PrerenderDeps) {
++  const settleMs = deps.settleMs ?? SETTLE_MS
++  const timers = new Map<string, ReturnType<typeof setTimeout>>()
++  /* frames due, oldest first; a frame due again moves to the back */
++  const due = new Set<string>()
++  let drawing: Promise<void> | null = null
++
++  function schedule(frameId: string) {
++    clearTimeout(timers.get(frameId))
++    const timer = setTimeout(() => settled(frameId), settleMs)
++    timer.unref?.()
++    timers.set(frameId, timer)
++  }
++
++  function settled(frameId: string) {
++    timers.delete(frameId)
++    /* still streaming: its last chunk will be along, or the stream ends */
++    if (deps.busy(frameId)) return schedule(frameId)
++    due.delete(frameId)
++    due.add(frameId)
++    drawing ??= drain().finally(() => (drawing = null))
++  }
++
++  async function drain() {
++    /* a Set visits what is added while it is walked */
++    for (const frameId of due) {
++      due.delete(frameId)
++      const frame = deps.getFrame(frameId)
++      if (!frame || frame.hidden || deps.skip(frame)) continue
++      try {
++        if (await deps.isCurrent(frame, LEVEL)) continue
++        await deps.draw(frame, LEVEL)
++      } catch (e) {
++        console.error(`prerender failed for ${frameId}:`, e)
++      }
++    }
++  }
++
++  return {
++    schedule,
++    /** what is waiting: settling, and due (tests, shutdown) */
++    pending: () => ({ settling: timers.size, due: due.size, drawing: drawing !== null }),
++    /** resolves when nothing is being drawn (tests) */
++    idle: () => drawing ?? Promise.resolve(),
++  }
++}
++
++/** Resolves once no interactive render has held or waited for a slot for `ms`. */
++export async function quietFor(
++  ms: number,
++  status: () => Pick<RendererStatus, 'interactive' | 'interactiveQueued' | 'lastInteractiveAt'>,
++  now: () => number = Date.now,
++  sleep: (ms: number) => Promise<void> = (wait) => new Promise((r) => setTimeout(r, wait).unref?.()),
++): Promise<void> {
++  for (;;) {
++    const s = status()
++    const since = now() - s.lastInteractiveAt
++    if (!s.interactive && !s.interactiveQueued && since >= ms) return
++    await sleep(Math.max(100, ms - since))
++  }
++}
++
++/* the marker a canvas element carries (src/lib/drawing.ts isCanvasElement):
++   an element is always a live document, never shown as its picture */
++const CANVAS_ELEMENT = /<body\b[^>]*\bdata-doop-canvas-element=/i
++
++/** Draws the pictures of frames whose design changed, with the server's own
++ *  store and renderer. `busy`: a frame an agent is streaming into. */
++export function startPrerender(busy: (frameId: string) => boolean) {
++  let renderer: Promise<boolean> | undefined
++  const prerender = createPrerender({
++    getFrame: (frameId) => store.getFrame(frameId),
++    busy,
++    isCurrent: (frame, level) => thumbs.isCurrent(frame, level),
++    draw: async (frame, level) => {
++      /* lazy, as every screenshot.ts consumer: no browser, nothing to draw with */
++      renderer ??= import('./screenshot.ts').then((m) => m.rendererAvailable())
++      if (!(await renderer)) return
++      const { rendererStatus } = await import('./screenshot.ts')
++      await quietFor(QUIET_MS, rendererStatus)
++      await thumbs.create(frame, level, 'background')
++    },
++    skip: (frame) => htmlLoaded(frame) && (frame.html === '' || CANVAS_ELEMENT.test(frame.html)),
++  })
++  store.onDrawnChange(prerender.schedule)
++  return prerender
++}
+diff --git a/server/renderBrowser.ts b/server/renderBrowser.ts
+index 541f4fc..ead4642 100644
+--- a/server/renderBrowser.ts
++++ b/server/renderBrowser.ts
+@@ -138,14 +138,24 @@ interface Waiter {
+ export class RenderGate {
+   private active = 0
+   private background = 0
++  private interactive = 0
++  private lastInteractiveAt = 0
+   private readonly waiting: Waiter[] = []
+ 
+   constructor(
+     private readonly tuning: Pick<RendererTuning, 'maxConcurrent' | 'maxBackground' | 'maxQueued' | 'queueTimeoutMs'>,
++    private readonly now: () => number = Date.now,
+   ) {}
+ 
+   get stats() {
+-    return { active: this.active, background: this.background, queued: this.waiting.length }
++    return {
++      active: this.active,
++      background: this.background,
++      queued: this.waiting.length,
++      interactive: this.interactive,
++      interactiveQueued: this.waiting.filter((w) => w.priority === 'interactive').length,
++      lastInteractiveAt: this.lastInteractiveAt,
++    }
+   }
+ 
+   /** Resolves with the slot's release function, which is safe to call twice. */
+@@ -185,16 +195,23 @@ export class RenderGate {
+   private take(priority: RenderPriority): () => void {
+     this.active++
+     if (priority === 'background') this.background++
++    else this.interactiveTook(1)
+     let released = false
+     return () => {
+       if (released) return
+       released = true
+       this.active--
+       if (priority === 'background') this.background--
++      else this.interactiveTook(-1)
+       this.pump()
+     }
+   }
+ 
++  private interactiveTook(step: 1 | -1): void {
++    this.interactive += step
++    this.lastInteractiveAt = this.now()
++  }
++
+   private pump(): void {
+     while (this.waiting.length) {
+       const next =
+@@ -260,6 +277,12 @@ export interface RendererStatus {
+   active: number
+   background: number
+   queued: number
++  /** interactive renders holding a slot, and waiting for one */
++  interactive: number
++  interactiveQueued: number
++  /** when an interactive render last took or gave back a slot (0: never);
++   *  background work that can wait yields to a burst of them (prerender.ts) */
++  lastInteractiveAt: number
+   kills: number
+   recycles: number
+   /** when a page last opened; an uptime check alerts when this goes stale
+@@ -280,7 +303,7 @@ export function createRenderer(deps: RendererDeps): Renderer {
+   const tuning: RendererTuning = { ...DEFAULT_RENDERER_TUNING, ...deps.tuning }
+   const now = deps.now ?? Date.now
+   const log = deps.log ?? console
+-  const gate = new RenderGate(tuning)
++  const gate = new RenderGate(tuning, now)
+   let current: Generation | null = null
+   let sequence = 0
+   let kills = 0
+diff --git a/server/store.ts b/server/store.ts
+index 191d57e..2d6ae36 100644
+--- a/server/store.ts
++++ b/server/store.ts
+@@ -89,6 +89,8 @@ class Store {
+   private loading = new Map<string, Promise<void>>()
+   /** canvases an agent run or job is working on, counted */
+   private holds = new Map<string, number>()
++  /** told of frames whose pictures changed (onDrawnChange) */
++  private drawnListeners: Array<(frameId: string) => void> = []
+   /** rooms, agents and streams the store cannot see (wired by index.ts) */
+   private inUse: (canvasId: string) => boolean = () => false
+ 
+@@ -1202,9 +1204,22 @@ class Store {
+     this.touchCanvas(c, now)
+     this.saveFrameLater(frame, true)
+     this.saveCanvasLater(c)
++    if (frame.html) this.drawnChanged(frame.id)
+     return frame
+   }
+ 
++  /** Called, after the commit, with a frame whose html or size changed:
++   *  what its pictures show (server/prerender.ts). */
++  onDrawnChange(listener: (frameId: string) => void): void {
++    this.drawnListeners.push(listener)
++  }
++
++  private drawnChanged(frameId: string) {
++    afterCommit(() => {
++      for (const listener of this.drawnListeners) listener(frameId)
++    })
++  }
++
+   updateFrame(
+     frameId: string,
+     patch: Partial<
+@@ -1238,9 +1253,11 @@ class Store {
+       !canvasPages(this.canvases.get(frame.canvasId)!).some((p) => p.id === patch.pageId)
+     )
+       return undefined
+-    const designChanged =
+-      !opts.annotation &&
+-      (['html', 'width', 'height'] as const).some((key) => patch[key] !== undefined && patch[key] !== frame[key])
++    /* what a picture of the frame shows (thumbs.designKey) */
++    const drawnChanged = (['html', 'width', 'height'] as const).some(
++      (key) => patch[key] !== undefined && patch[key] !== frame[key],
++    )
++    const designChanged = !opts.annotation && drawnChanged
+     const c = this.canvases.get(frame.canvasId)!
+     requireBoundary('store.updateFrame')
+     const before = inTransaction() ? frameState(frame) : undefined
+@@ -1278,6 +1295,7 @@ class Store {
+     this.touchCanvas(c, stamp)
+     this.saveFrameLater(frame) // debounced: streaming appends land as one write per burst
+     this.saveCanvasLater(c)
++    if (drawnChanged) this.drawnChanged(frame.id)
+     return frame
+   }
+ 
+diff --git a/server/thumbs.ts b/server/thumbs.ts
+index 5aeb97a..9a21647 100644
+--- a/server/thumbs.ts
++++ b/server/thumbs.ts
+@@ -7,6 +7,7 @@ import {
+ } from '../shared/types.ts'
+ import { createHash } from 'node:crypto'
+ import { htmlLoaded } from './frameHtml.ts'
++import type { RenderPriority } from './renderBrowser.ts'
+ import * as storage from './storage.ts'
+ import { store } from './store.ts'
+ 
+@@ -121,7 +122,7 @@ const loadScreenshot = () => (screenshot ??= import('./screenshot.ts'))
+ 
+ /** The preview render: card-sized, clipped, cheap — matches what /i/?preview
+  *  serves, because this IS what /i/?preview serves. */
+-async function render(frame: Frame, level?: PreviewScale): Promise<Picture> {
++async function render(frame: Frame, level?: PreviewScale, priority?: RenderPriority): Promise<Picture> {
+   if (active >= MAX_CONCURRENT_RENDERS) await new Promise<void>((r) => waiting.push(r))
+   active++
+   try {
+@@ -136,7 +137,11 @@ async function render(frame: Frame, level?: PreviewScale): Promise<Picture> {
+        and WebP at 90 is clean at half the bytes of JPEG at 90 or PNG. */
+     if (level !== undefined)
+       return {
+-        buf: await renderFrame(source, previewRenderScale(source, level), { type: 'webp', quality: 90 }),
++        buf: await renderFrame(source, previewRenderScale(source, level), {
++          type: 'webp',
++          quality: 90,
++          ...(priority ? { priority } : null),
++        }),
+         ...drawn,
+       }
+     const buf = await renderFrame(source, Math.min(1, 640 / source.width), {
+@@ -157,12 +162,12 @@ async function render(frame: Frame, level?: PreviewScale): Promise<Picture> {
+  *  render failure (the caller decides what a failed render means). A caller
+  *  that joins a render already running may get an older version than the
+  *  frame it passed: check with `shows`. */
+-export function create(frame: Frame, level?: PreviewScale): Promise<Picture> {
++export function create(frame: Frame, level?: PreviewScale, priority?: RenderPriority): Promise<Picture> {
+   const id = slot(frame.id, level)
+   const inflight = pending.get(id)
+   if (inflight) return inflight
+   lastAttempt.set(id, Date.now())
+-  const p = render(frame, level).then(async (picture) => {
++  const p = render(frame, level, priority).then(async (picture) => {
+     const { buf, ...drawn } = picture
+     /* persist is best-effort: a bucket hiccup must not fail the response
+        that only needed the bytes */
+@@ -210,12 +215,7 @@ export async function getStored(
+     written.delete(id)
+     return null
+   }
+-  /* after a restart the version is on storage, not in memory: read it once */
+-  if (!written.has(id)) {
+-    const stored = readSidecar((await storage.getObject(versionKeyFor(frame.id, level)).catch(() => null))?.toString())
+-    if (stored && !written.has(id)) written.set(id, stored)
+-  }
+-  const drawn = written.get(id)
++  const drawn = await recall(frame, level)
+   const fresh = !!drawn && shows(drawn, frame)
+   /* current by its design while the version moved on (a move, a rename):
+      record the version, so the next asks need no hash, and so does a restart */
+@@ -232,6 +232,23 @@ export async function getStored(
+   return { buf, fresh, known: written.has(id) }
+ }
+ 
++/** What the stored picture was drawn from. After a restart that is on
++ *  storage, not in memory: read once. */
++async function recall(frame: Frame, level?: PreviewScale): Promise<Rendered | undefined> {
++  const id = slot(frame.id, level)
++  if (!written.has(id)) {
++    const stored = readSidecar((await storage.getObject(versionKeyFor(frame.id, level)).catch(() => null))?.toString())
++    if (stored && !written.has(id)) written.set(id, stored)
++  }
++  return written.get(id)
++}
++
++/** Whether a picture is stored that shows the frame as it is (server/prerender.ts). */
++export async function isCurrent(frame: Frame, level?: PreviewScale): Promise<boolean> {
++  const drawn = await recall(frame, level)
++  return !!drawn && shows(drawn, frame)
++}
++
+ /** Frame (or its whole canvas) is gone — drop the derived object too, so the
+  *  thumb folder holds only live frames. Best-effort fire-and-forget. */
+ export function purge(frameId: string): void {
+diff --git a/tests/drawnChange.test.ts b/tests/drawnChange.test.ts
+new file mode 100644
+index 0000000..4d00450
+--- /dev/null
++++ b/tests/drawnChange.test.ts
+@@ -0,0 +1,37 @@
++import { beforeEach, expect, it, vi } from 'vitest'
++
++/* persistence is not under test: which writes count as a new picture is */
++vi.mock('../server/db/persist.ts', () => ({
++  saveCanvas: () => {},
++  saveFrame: () => {},
++  savePageCopy: () => Promise.resolve(),
++  saveCanvasCopy: () => Promise.resolve(),
++}))
++
++const { store } = await import('../server/store.ts')
++
++const changed: string[] = []
++store.onDrawnChange((frameId) => changed.push(frameId))
++let canvasId: string
++
++beforeEach(() => {
++  canvasId = store.createCanvas('drawn', 'kevin').id
++  changed.length = 0
++})
++
++it('tells of a frame whose html or size changed, and not of a move, a rename or a restack', () => {
++  const f = store.createFrame(canvasId, { name: 'a', html: '<p>a</p>' }, 'kevin')!
++  expect(changed).toEqual([f.id])
++  store.updateFrame(f.id, { x: 300, y: 40 }, 'kevin')
++  store.updateFrame(f.id, { name: 'renamed', z: -1, locked: true }, 'kevin')
++  store.updateFrame(f.id, { html: '<p>a</p>' }, 'kevin')
++  expect(changed).toEqual([f.id])
++  store.updateFrame(f.id, { html: '<p>b</p>' }, 'kevin')
++  store.updateFrame(f.id, { width: 1000 }, 'kevin')
++  expect(changed).toEqual([f.id, f.id, f.id])
++})
++
++it('does not tell of a new frame with nothing in it', () => {
++  store.createFrame(canvasId, { name: 'empty' }, 'kevin')
++  expect(changed).toEqual([])
++})
+diff --git a/tests/prerender.test.ts b/tests/prerender.test.ts
+new file mode 100644
+index 0000000..4811b3f
+--- /dev/null
++++ b/tests/prerender.test.ts
+@@ -0,0 +1,161 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import type { Frame } from '../shared/types'
++import { createPrerender, quietFor, type PrerenderDeps } from '../server/prerender.ts'
++
++const frame = (id: string, extra: Partial<Frame> = {}): Frame =>
++  ({
++    id,
++    canvasId: 'c',
++    name: id,
++    x: 0,
++    y: 0,
++    width: 1280,
++    height: 900,
++    html: '<p>x</p>',
++    updatedAt: 1,
++    ...extra,
++  }) as Frame
++
++function setup(frames: Frame[], over: Partial<PrerenderDeps> = {}) {
++  const byId = new Map(frames.map((f) => [f.id, f]))
++  const drawn: string[] = []
++  const deps: PrerenderDeps = {
++    getFrame: (id) => byId.get(id),
++    busy: () => false,
++    isCurrent: () => Promise.resolve(false),
++    draw: (f) => {
++      drawn.push(f.id)
++      return Promise.resolve()
++    },
++    skip: () => false,
++    settleMs: 1000,
++    ...over,
++  }
++  return { prerender: createPrerender(deps), drawn }
++}
++
++beforeEach(() => {
++  vi.useFakeTimers()
++})
++afterEach(() => {
++  vi.useRealTimers()
++})
++
++describe('prerender', () => {
++  it('draws a frame once its changes have settled, once for a burst of them', async () => {
++    const { prerender, drawn } = setup([frame('a')])
++    for (let i = 0; i < 5; i++) {
++      prerender.schedule('a')
++      await vi.advanceTimersByTimeAsync(500)
++    }
++    expect(drawn).toEqual([])
++    await vi.advanceTimersByTimeAsync(1000)
++    await prerender.idle()
++    expect(drawn).toEqual(['a'])
++  })
++
++  it('waits for a stream into the frame to end', async () => {
++    let streaming = true
++    const { prerender, drawn } = setup([frame('a')], { busy: () => streaming })
++    prerender.schedule('a')
++    await vi.advanceTimersByTimeAsync(5000)
++    expect(drawn).toEqual([])
++    streaming = false
++    await vi.advanceTimersByTimeAsync(1000)
++    await prerender.idle()
++    expect(drawn).toEqual(['a'])
++  })
++
++  it('leaves out what has nothing to draw, is hidden, gone, or already current', async () => {
++    const { prerender, drawn } = setup(
++      [frame('current'), frame('hidden', { hidden: true }), frame('element'), frame('due')],
++      {
++        isCurrent: (f) => Promise.resolve(f.id === 'current'),
++        skip: (f) => f.id === 'element',
++      },
++    )
++    for (const id of ['current', 'hidden', 'element', 'gone', 'due']) prerender.schedule(id)
++    await vi.advanceTimersByTimeAsync(1000)
++    await prerender.idle()
++    expect(drawn).toEqual(['due'])
++  })
++
++  it('draws one frame at a time, and again one that changed while it was drawn', async () => {
++    const finish: Array<() => void> = []
++    const order: string[] = []
++    const { prerender } = setup([frame('a'), frame('b')], {
++      draw: (f) => {
++        order.push(f.id)
++        return new Promise<void>((r) => finish.push(r))
++      },
++    })
++    prerender.schedule('a')
++    prerender.schedule('b')
++    await vi.advanceTimersByTimeAsync(1000)
++    expect(order).toEqual(['a'])
++    /* a changes again while it is being drawn */
++    prerender.schedule('a')
++    finish.shift()!()
++    await vi.advanceTimersByTimeAsync(0)
++    expect(order).toEqual(['a', 'b'])
++    await vi.advanceTimersByTimeAsync(1000)
++    finish.shift()!()
++    await vi.advanceTimersByTimeAsync(0)
++    expect(order).toEqual(['a', 'b', 'a'])
++    finish.shift()!()
++    await prerender.idle()
++    expect(prerender.pending()).toEqual({ settling: 0, due: 0, drawing: false })
++  })
++
++  it('keeps going after a failed render', async () => {
++    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
++    const drawn: string[] = []
++    const { prerender } = setup([frame('bad'), frame('good')], {
++      draw: (f) => {
++        drawn.push(f.id)
++        return f.id === 'bad' ? Promise.reject(new Error('boom')) : Promise.resolve()
++      },
++    })
++    prerender.schedule('bad')
++    prerender.schedule('good')
++    await vi.advanceTimersByTimeAsync(1000)
++    await prerender.idle()
++    expect(drawn).toEqual(['bad', 'good'])
++    expect(err).toHaveBeenCalled()
++    err.mockRestore()
++  })
++})
++
++describe('quietFor', () => {
++  it('waits while interactive renders run or wait, then for the quiet spell after the last one', async () => {
++    let clock = 10_000
++    const state = { interactive: 1, interactiveQueued: 0, lastInteractiveAt: 9_000 }
++    const slept: number[] = []
++    const sleep = (ms: number) => {
++      slept.push(ms)
++      clock += ms
++      /* the screenshot finishes during the first wait */
++      if (slept.length === 1) Object.assign(state, { interactive: 0, lastInteractiveAt: clock })
++      return Promise.resolve()
++    }
++    await quietFor(
++      2000,
++      () => state,
++      () => clock,
++      sleep,
++    )
++    expect(slept).toEqual([1000, 2000])
++    expect(clock - state.lastInteractiveAt).toBeGreaterThanOrEqual(2000)
++  })
++
++  it('does not wait when nothing interactive has run lately', async () => {
++    const sleep = vi.fn(() => Promise.resolve())
++    await quietFor(
++      2000,
++      () => ({ interactive: 0, interactiveQueued: 0, lastInteractiveAt: 0 }),
++      () => 50_000,
++      sleep,
++    )
++    expect(sleep).not.toHaveBeenCalled()
++  })
++})
+diff --git a/tests/renderBrowser.test.ts b/tests/renderBrowser.test.ts
+index faac1f0..0f82a1d 100644
+--- a/tests/renderBrowser.test.ts
++++ b/tests/renderBrowser.test.ts
+@@ -326,6 +326,19 @@ describe('RenderGate', () => {
+     expect(gate.stats).toMatchObject({ active: 1, queued: 0 })
+   })
+ 
++  it('counts interactive renders and when one last came or went, for background work to yield to', async () => {
++    let clock = 1000
++    const gate = new RenderGate(tuning, () => clock)
++    expect(gate.stats).toMatchObject({ interactive: 0, interactiveQueued: 0, lastInteractiveAt: 0 })
++    await gate.acquire('background')
++    expect(gate.stats.lastInteractiveAt).toBe(0)
++    const release = await gate.acquire('interactive')
++    expect(gate.stats).toMatchObject({ interactive: 1, lastInteractiveAt: 1000 })
++    clock = 1500
++    release()
++    expect(gate.stats).toMatchObject({ interactive: 0, lastInteractiveAt: 1500 })
++  })
++
+   it('keeps background work to its share', async () => {
+     const gate = new RenderGate(tuning)
+     await gate.acquire('background')

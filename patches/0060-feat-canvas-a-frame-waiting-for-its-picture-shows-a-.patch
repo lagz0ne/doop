@@ -1,0 +1,165 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lagz0ne <15101444+lagz0ne@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 08:30:01 +0000
+Subject: [PATCH 60/60] feat(canvas): a frame waiting for its picture shows a
+ placeholder, not a white box
+
+A frame that is neither a live document nor showing its picture yet was a
+plain white box: indistinguishable from an empty design, for as long as the
+picture took to arrive or the server took to draw it (seconds on the first
+look after an edit, until the previous patch draws it ahead).
+
+FramePreview now shows, under the picture, the pulse every placeholder in the
+app uses (Skeleton's bg-paper-deep with skeleton-pulse), starting after 300 ms
+so a picture that arrives sooner never shows it, and gone once the picture is
+decoded. It is one endless, delayed animation: a finite fade-in is cancelled
+when the picture arrives, and its rejected `finished` broke code awaiting the
+page's animations. A picture whose last retry failed too (a render that failed, a
+signed-out visitor past the render budget) says so instead of staying white:
+'No picture of this frame yet. Select it to open it.', at a constant size on
+screen; selecting it makes it a live document. Canvas elements, which have no
+picture, are unchanged.
+---
+ src/components/FrameView.tsx    | 32 ++++++++++++++++++++++++++-
+ src/lib/i18n/en/stage.ts        |  1 +
+ src/lib/i18n/pt-BR/stage.ts     |  1 +
+ tests/liveFramesBrowser.test.ts | 39 +++++++++++++++++++++++++++++++++
+ 4 files changed, 72 insertions(+), 1 deletion(-)
+
+diff --git a/src/components/FrameView.tsx b/src/components/FrameView.tsx
+index 7850132..d25944f 100644
+--- a/src/components/FrameView.tsx
++++ b/src/components/FrameView.tsx
+@@ -2517,6 +2517,7 @@ function FramePreview({
+   frame: Frame
+   /** its picture is decoded and on screen */ onShown?: () => void
+ }) {
++  const t = useT()
+   const element = isCanvasElement(frame.html)
+   /* A preview that fails to load (a render that failed, an anonymous viewer
+      past the render budget) is asked for again, a few times and less often
+@@ -2549,12 +2550,41 @@ function FramePreview({
+      shell and live view. */
+   const cached = !!url && shownPreviews.has(url)
+   const picture = !!frame.html && !element && !!url
++  /* the last retry failed too: the frame says so instead of staying white */
++  const [failedUrl, setFailedUrl] = useState<string | null>(null)
++  const failed = !!url && failedUrl === url
++  /* Nothing of the frame is on screen yet: its picture is on its way, or
++     being drawn by the server (the first look after an edit, until it is
++     drawn ahead, server/prerender.ts). A plain white box read as an empty
++     design, so a frame that waits longer than a glance (300 ms) shows the
++     same pulse as every placeholder in the app (Skeleton); a picture that
++     arrives sooner never shows it. One endless animation, delayed, over a
++     transparent box: a finite one (a fade-in) would be cancelled when the
++     picture arrives, and a cancelled animation's `finished` rejects for
++     whoever awaits the page's animations. */
++  const waiting = !!frame.html && !element && shownUrl === null && !failed
+   return (
+     <div
+       className={cn('relative block overflow-hidden', element ? 'bg-transparent' : 'bg-white')}
+       style={{ width: frame.width, height: frame.height }}
+       data-doop-frame-preview=""
+     >
++      {waiting && (
++        <div
++          aria-hidden
++          data-doop-preview-waiting=""
++          className="pointer-events-none absolute inset-0 animate-[skeleton-pulse_1.4s_ease-in-out_0.3s_infinite] bg-paper-deep opacity-0"
++        />
++      )}
++      {failed && (
++        <div
++          data-doop-preview-failed=""
++          className="pointer-events-none absolute inset-0 flex items-center justify-center bg-paper-deep p-[calc(8px/var(--zoom,1))] text-center text-ink-faint"
++          style={{ fontSize: 'calc(12px / var(--zoom, 1))' }}
++        >
++          {t('stage.pictureFailed')}
++        </div>
++      )}
+       {picture && behind && (
+         <img
+           key="behind"
+@@ -2585,7 +2615,7 @@ function FramePreview({
+             e.currentTarget.decode().then(done, done)
+           }}
+           onError={() => {
+-            if (attempt >= PREVIEW_RETRIES) return
++            if (attempt >= PREVIEW_RETRIES) return setFailedUrl(url)
+             window.clearTimeout(timer.current)
+             timer.current = window.setTimeout(
+               () => setRetry({ version: frame.updatedAt, count: attempt + 1 }),
+diff --git a/src/lib/i18n/en/stage.ts b/src/lib/i18n/en/stage.ts
+index 9e964bd..a52d3c4 100644
+--- a/src/lib/i18n/en/stage.ts
++++ b/src/lib/i18n/en/stage.ts
+@@ -59,6 +59,7 @@ export const stage = {
+   textNumberedList: 'Numbered list',
+   frameChanged: 'Frame changed. Right-click again.',
+   findingElement: 'Finding element…',
++  pictureFailed: 'No picture of this frame yet. Select it to open it.',
+ 
+   /* the frame and element menus */
+   paste: 'Paste',
+diff --git a/src/lib/i18n/pt-BR/stage.ts b/src/lib/i18n/pt-BR/stage.ts
+index f902b6e..eb7afeb 100644
+--- a/src/lib/i18n/pt-BR/stage.ts
++++ b/src/lib/i18n/pt-BR/stage.ts
+@@ -59,6 +59,7 @@ export const stage: Catalog['stage'] = {
+   textNumberedList: 'Lista numerada',
+   frameChanged: 'O frame mudou. Clique com o botão direito de novo.',
+   findingElement: 'Procurando elemento…',
++  pictureFailed: 'Este frame ainda não tem imagem. Selecione-o para abri-lo.',
+ 
+   /* the frame and element menus */
+   paste: 'Colar',
+diff --git a/tests/liveFramesBrowser.test.ts b/tests/liveFramesBrowser.test.ts
+index 2e2fb9f..791f692 100644
+--- a/tests/liveFramesBrowser.test.ts
++++ b/tests/liveFramesBrowser.test.ts
+@@ -270,6 +270,45 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
+     await store(page, 'select(null)')
+   }, 30_000)
+ 
++  it('shows a frame whose picture is on its way as a placeholder, not a white box, until it arrives', async () => {
++    const p = await browser.newPage()
++    await p.setViewport({ width: 1600, height: 1000 })
++    /* the server draws the pictures: they arrive 1.5 s after they are asked for */
++    const PNG = Buffer.from(
++      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
++      'base64',
++    )
++    await p.setRequestInterception(true)
++    p.on('request', (req) => {
++      if (!new URL(req.url()).pathname.startsWith('/i/')) return void req.continue()
++      setTimeout(() => void req.respond({ status: 200, contentType: 'image/png', body: PNG }).catch(() => {}), 1500)
++    })
++    await p.goto(fixtureUrl('pages.html'))
++    await p.waitForFunction(() => typeof window.seedPages === 'function')
++    await p.evaluate((c) => window.seedPages(c), canvas)
++    await camera(p, { x: 0, y: 0, zoom: 0.08 })
++    const waiting = () =>
++      p.evaluate(() => {
++        const marks = [...document.querySelectorAll('[data-doop-preview-waiting]')]
++        return { count: marks.length, shown: marks.filter((m) => Number(getComputedStyle(m).opacity) > 0.3).length }
++      })
++    await new Promise((r) => setTimeout(r, 500))
++    const before = await waiting()
++    expect(before.count).toBeGreaterThan(0)
++    expect(before.shown).toBeGreaterThan(0)
++    /* in view: below the fold a lazy picture is not even asked for, and waits on */
++    await p.waitForFunction(
++      () =>
++        ![...document.querySelectorAll('[data-doop-preview-waiting]')].some((m) => {
++          const r = m.getBoundingClientRect()
++          return r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth
++        }),
++      { timeout: 10_000 },
++    )
++    expect(await p.evaluate(() => document.querySelectorAll('[data-doop-frame-preview] img').length)).toBeGreaterThan(0)
++    await p.close()
++  }, 30_000)
++
+   it('measures a click with culling on and off (written to $LIVEFRAMES_BENCH, not asserted)', async () => {
+     async function measure(cull: boolean) {
+       const p = await browser.newPage()

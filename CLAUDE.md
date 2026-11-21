@@ -157,6 +157,12 @@ transform still applies, then `bin/doop check --test` and commit (`vendor/doop` 
   Canvas renderer (0040: Auto removes the key), and the zoom pill can show a renderer label (a view
   option, off by default, from the zoom menu or that card): GPU, DOM or Live, `· pictures`, and
   auto / set / reload, with each level's reason in its tooltip and the pick in its menu. `docs/history.md` has what each measured and what is not verified.
+- Frame pictures (`/i/<id>.webp?preview&s=<level>&v=<version>`) are drawn by the server's
+  Chromium. Since 0059 a frame's smallest picture is drawn in the background about 4 s after its
+  html or size last changed (not mid-stream, one at a time, after 2 s without an interactive
+  render); `PREVIEW_PRERENDER=0` on the server draws only on request. A picture is current when
+  its version or its design (html, width, height, 0058) matches, so a move or a rename keeps it.
+  A frame still waiting for its picture pulses (0060) instead of showing white.
 - Render reports: each browser in the trial posts its counts to `/api/telemetry/render` (0038: a
   closed schema, nothing about the canvas or the account). The server forwards them as OTLP/HTTP
   JSON logs when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (with `OTEL_SERVICE_NAME` and
