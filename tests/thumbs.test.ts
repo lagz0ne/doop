@@ -40,6 +40,10 @@ function deferredRenders() {
 
 const tick = () => new Promise((r) => setTimeout(r, 25))
 
+/** what was written to a version sidecar: `<version> <design key>` */
+const sidecarOf = (key: string) =>
+  String((mocks.putObject.mock.calls.filter((c) => c[0] === key).at(-1)?.[1] as Buffer | undefined) ?? '')
+
 beforeEach(() => {
   mocks.renderFrame.mockReset()
   mocks.putObject.mockReset().mockResolvedValue(undefined)
@@ -110,7 +114,7 @@ describe('thumbs', () => {
     mocks.renderFrame.mockResolvedValue(Buffer.from('jpg'))
     await thumbs.create(frame('versioned'))
     expect(mocks.putObject).toHaveBeenCalledWith('thumb/versioned.jpg', Buffer.from('jpg'), 'image/jpeg')
-    expect(mocks.putObject).toHaveBeenCalledWith('thumb/versioned.ver', Buffer.from('1'), 'text/plain')
+    expect(sidecarOf('thumb/versioned.ver')).toMatch(/^1 /)
   })
 
   it('records the version the render read, not the one an edit made while it ran', async () => {
@@ -118,11 +122,11 @@ describe('thumbs', () => {
     const f = frame('edited-mid-render')
     const p = thumbs.create(f, 0.25)
     await tick()
-    f.updatedAt = 2
+    Object.assign(f, { html: '<p>edited</p>', updatedAt: 2 })
     resolvers[0]!(Buffer.from('of 1'))
     expect((await p).version).toBe(1)
     await tick()
-    expect(mocks.putObject).toHaveBeenCalledWith('thumb/edited-mid-render.p25ver', Buffer.from('1'), 'text/plain')
+    expect(sidecarOf('thumb/edited-mid-render.p25ver')).toMatch(/^1 /)
     expect(thumbs.shows(await p, f)).toBe(false)
   })
 
@@ -135,6 +139,36 @@ describe('thumbs', () => {
     expect(stored).toEqual({ buf: Buffer.from('kept'), fresh: true, known: true })
     await tick()
     expect(mocks.renderFrame).not.toHaveBeenCalled()
+  })
+
+  it('keeps a picture current when the frame only moved, and not when its design changed', async () => {
+    mocks.renderFrame.mockResolvedValue(Buffer.from('drawn'))
+    const f = { ...frame('moved'), html: '<p>a</p>' }
+    await thumbs.create(f, 0.25)
+    mocks.renderFrame.mockClear()
+    mocks.getObject.mockImplementation((key: string) => Promise.resolve(key.endsWith('ver') ? null : Buffer.from('b')))
+    /* a move, a rename: the version moves on, the design does not */
+    Object.assign(f, { x: 400, name: 'renamed', updatedAt: 2 })
+    expect((await thumbs.getStored(f, 0.25))?.fresh).toBe(true)
+    expect(thumbs.shows({ version: 1, design: thumbs.designKey({ ...f, updatedAt: 1 }) }, f)).toBe(true)
+    /* the new version is recorded, so a restart knows it too */
+    expect(sidecarOf('thumb/moved.p25ver')).toMatch(/^2 /)
+    await tick()
+    expect(mocks.renderFrame).not.toHaveBeenCalled()
+    /* a resize or an html change is a new design */
+    Object.assign(f, { width: 1000, updatedAt: 3 })
+    expect((await thumbs.getStored(f, 0.25))?.fresh).toBe(false)
+    Object.assign(f, { width: 1280, html: '<p>b</p>', updatedAt: 4 })
+    expect(thumbs.shows({ version: 2, design: thumbs.designKey({ ...f, html: '<p>a</p>', updatedAt: 2 }) }, f)).toBe(
+      false,
+    )
+  })
+
+  it('reads a sidecar from before design keys as a version alone', async () => {
+    mocks.getObject.mockImplementation((key: string) =>
+      Promise.resolve(Buffer.from(key.endsWith('.ver') ? '1' : 'kept')),
+    )
+    expect((await thumbs.getStored({ ...frame('legacy-sidecar'), updatedAt: 2 }))?.fresh).toBe(false)
   })
 
   it('re-renders a stored thumbnail whose version is behind the frame', async () => {
@@ -155,7 +189,7 @@ describe('thumbs', () => {
     await thumbs.create(frame('level'), 0.5)
     expect(mocks.renderFrame).toHaveBeenCalledWith(expect.anything(), 0.5, { type: 'webp', quality: 90 })
     expect(mocks.putObject).toHaveBeenCalledWith('thumb/level.p50', Buffer.from('webp'), 'image/webp')
-    expect(mocks.putObject).toHaveBeenCalledWith('thumb/level.p50ver', Buffer.from('1'), 'text/plain')
+    expect(sidecarOf('thumb/level.p50ver')).toMatch(/^1 /)
   })
 
   it('renders a huge frame below the level it was asked at, within the picture limits', async () => {
