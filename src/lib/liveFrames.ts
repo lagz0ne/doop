@@ -30,6 +30,8 @@ export interface FrameBox {
   height: number
   /** canvas elements (shapes, text) have no opaque preview: never imaged */
   element?: boolean
+  /** a panel behind other frames (backdrops.ts): live only when pinned */
+  backdrop?: boolean
 }
 
 export interface Camera {
@@ -124,8 +126,11 @@ export function computeLiveFrames(
      is live whatever the zoom, and none of them counts against the cap */
   for (const f of near) if (f.element) live.add(f.id)
   if (!readable) return live
+  /* a backdrop is never live by distance: it would win the pick (its centre
+     is near the view's whenever the view is inside it) and it is the largest,
+     emptiest document on the page; its picture stands in for it */
   const documents = near
-    .filter((f) => !f.element)
+    .filter((f) => !f.element && !f.backdrop)
     .map((f) => ({ id: f.id, d: Math.hypot(f.x + f.width / 2 - cx, f.y + f.height / 2 - cy) }))
     .sort((a, b) => a.d - b.d)
   for (const f of documents.slice(0, MAX_LIVE)) live.add(f.id)

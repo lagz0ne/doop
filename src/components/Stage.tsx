@@ -62,6 +62,7 @@ import { NO_INSETS, fitBox, type StageInsets } from '../lib/viewFit'
 import { spaceWouldScroll } from '../lib/spaceScroll'
 import { ZOOM_DRAG_MIN, ZOOM_TOOL_STEP, zoomAtPoint, zoomToBox } from '../lib/zoomTool'
 import { isCanvasElement } from '../lib/drawing'
+import { backdropIds, backdropsEnabled } from '../lib/backdrops'
 import {
   computeLiveFrames,
   cullingEnabled,
@@ -526,9 +527,19 @@ export function Stage({
      followed once it rests, so a pan never mounts documents it only passes. */
   useEffect(() => {
     if (!cullingEnabled()) return
-    const frames: FrameBox[] = (canvas?.frames ?? [])
+    const shown = (canvas?.frames ?? [])
       .filter((f) => !f.hidden)
-      .map((f) => ({ id: f.id, x: f.x, y: f.y, width: f.width, height: f.height, element: isCanvasElement(f.html) }))
+      .map((f) => ({ ...f, element: isCanvasElement(f.html) }))
+    const backdrops = backdropsEnabled() ? backdropIds(shown) : new Set<string>()
+    const frames: FrameBox[] = shown.map((f) => ({
+      id: f.id,
+      x: f.x,
+      y: f.y,
+      width: f.width,
+      height: f.height,
+      element: f.element,
+      backdrop: backdrops.has(f.id),
+    }))
     const elements = new Set(frames.filter((f) => f.element).map((f) => f.id))
     let timer = 0
     let pump = 0
