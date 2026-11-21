@@ -138,14 +138,24 @@ interface Waiter {
 export class RenderGate {
   private active = 0
   private background = 0
+  private interactive = 0
+  private lastInteractiveAt = 0
   private readonly waiting: Waiter[] = []
 
   constructor(
     private readonly tuning: Pick<RendererTuning, 'maxConcurrent' | 'maxBackground' | 'maxQueued' | 'queueTimeoutMs'>,
+    private readonly now: () => number = Date.now,
   ) {}
 
   get stats() {
-    return { active: this.active, background: this.background, queued: this.waiting.length }
+    return {
+      active: this.active,
+      background: this.background,
+      queued: this.waiting.length,
+      interactive: this.interactive,
+      interactiveQueued: this.waiting.filter((w) => w.priority === 'interactive').length,
+      lastInteractiveAt: this.lastInteractiveAt,
+    }
   }
 
   /** Resolves with the slot's release function, which is safe to call twice. */
@@ -185,14 +195,21 @@ export class RenderGate {
   private take(priority: RenderPriority): () => void {
     this.active++
     if (priority === 'background') this.background++
+    else this.interactiveTook(1)
     let released = false
     return () => {
       if (released) return
       released = true
       this.active--
       if (priority === 'background') this.background--
+      else this.interactiveTook(-1)
       this.pump()
     }
+  }
+
+  private interactiveTook(step: 1 | -1): void {
+    this.interactive += step
+    this.lastInteractiveAt = this.now()
   }
 
   private pump(): void {
@@ -260,6 +277,12 @@ export interface RendererStatus {
   active: number
   background: number
   queued: number
+  /** interactive renders holding a slot, and waiting for one */
+  interactive: number
+  interactiveQueued: number
+  /** when an interactive render last took or gave back a slot (0: never);
+   *  background work that can wait yields to a burst of them (prerender.ts) */
+  lastInteractiveAt: number
   kills: number
   recycles: number
   /** when a page last opened; an uptime check alerts when this goes stale
@@ -280,7 +303,7 @@ export function createRenderer(deps: RendererDeps): Renderer {
   const tuning: RendererTuning = { ...DEFAULT_RENDERER_TUNING, ...deps.tuning }
   const now = deps.now ?? Date.now
   const log = deps.log ?? console
-  const gate = new RenderGate(tuning)
+  const gate = new RenderGate(tuning, now)
   let current: Generation | null = null
   let sequence = 0
   let kills = 0

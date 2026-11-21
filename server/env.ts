@@ -323,6 +323,10 @@ const schema = {
      provider such as Cloudflare): it may fetch public URLs itself instead of
      through the DNS-pinned proxy. Never set it for a self-hosted renderer */
   REMOTE_BROWSER_ISOLATED: bool({ default: false }),
+  /* draw a frame's smallest picture in the background once its design has
+     settled (server/prerender.ts), so the first look after an edit does not
+     wait for Chromium. Off: pictures are drawn when first asked for only */
+  PREVIEW_PRERENDER: bool({ default: true }),
 
   /* ------------------------------------------------------ analytics */
   POSTHOG_KEY: str({ default: undefined }),

@@ -89,6 +89,8 @@ class Store {
   private loading = new Map<string, Promise<void>>()
   /** canvases an agent run or job is working on, counted */
   private holds = new Map<string, number>()
+  /** told of frames whose pictures changed (onDrawnChange) */
+  private drawnListeners: Array<(frameId: string) => void> = []
   /** rooms, agents and streams the store cannot see (wired by index.ts) */
   private inUse: (canvasId: string) => boolean = () => false
 
@@ -1202,7 +1204,20 @@ class Store {
     this.touchCanvas(c, now)
     this.saveFrameLater(frame, true)
     this.saveCanvasLater(c)
+    if (frame.html) this.drawnChanged(frame.id)
     return frame
+  }
+
+  /** Called, after the commit, with a frame whose html or size changed:
+   *  what its pictures show (server/prerender.ts). */
+  onDrawnChange(listener: (frameId: string) => void): void {
+    this.drawnListeners.push(listener)
+  }
+
+  private drawnChanged(frameId: string) {
+    afterCommit(() => {
+      for (const listener of this.drawnListeners) listener(frameId)
+    })
   }
 
   updateFrame(
@@ -1238,9 +1253,11 @@ class Store {
       !canvasPages(this.canvases.get(frame.canvasId)!).some((p) => p.id === patch.pageId)
     )
       return undefined
-    const designChanged =
-      !opts.annotation &&
-      (['html', 'width', 'height'] as const).some((key) => patch[key] !== undefined && patch[key] !== frame[key])
+    /* what a picture of the frame shows (thumbs.designKey) */
+    const drawnChanged = (['html', 'width', 'height'] as const).some(
+      (key) => patch[key] !== undefined && patch[key] !== frame[key],
+    )
+    const designChanged = !opts.annotation && drawnChanged
     const c = this.canvases.get(frame.canvasId)!
     requireBoundary('store.updateFrame')
     const before = inTransaction() ? frameState(frame) : undefined
@@ -1278,6 +1295,7 @@ class Store {
     this.touchCanvas(c, stamp)
     this.saveFrameLater(frame) // debounced: streaming appends land as one write per burst
     this.saveCanvasLater(c)
+    if (drawnChanged) this.drawnChanged(frame.id)
     return frame
   }
 

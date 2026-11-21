@@ -64,6 +64,7 @@ import { parseGuide } from '../shared/guides.ts'
 import { getImage } from './previews.ts'
 import { LayerNotFoundError, layerRefFromQuery, layerSelector } from './layerExport.ts'
 import * as actions from './actions.ts'
+import { startPrerender } from './prerender.ts'
 import { captureFeature, captureTokenResults } from './featureEvents.ts'
 import { liveActivitiesRouter, logLiveActivityRequests, startLiveActivityDelivery } from './liveActivities.ts'
 import { onCanvasEvent } from './events.ts'
@@ -3681,6 +3682,8 @@ server.listen(PORT, () => {
     (canvasId) =>
       room(canvasId).length > 0 || (agentPresences.get(canvasId)?.size ?? 0) > 0 || actions.isCanvasStreaming(canvasId),
   )
+  /* pictures drawn once a frame's design settles, not at the first look */
+  if (env.PREVIEW_PRERENDER) startPrerender(actions.isFrameStreaming)
   setInterval(
     () => {
       const dropped = store.evictIdle(env.CANVAS_IDLE_MS)

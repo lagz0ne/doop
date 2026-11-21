@@ -7,6 +7,7 @@ import {
 } from '../shared/types.ts'
 import { createHash } from 'node:crypto'
 import { htmlLoaded } from './frameHtml.ts'
+import type { RenderPriority } from './renderBrowser.ts'
 import * as storage from './storage.ts'
 import { store } from './store.ts'
 
@@ -121,7 +122,7 @@ const loadScreenshot = () => (screenshot ??= import('./screenshot.ts'))
 
 /** The preview render: card-sized, clipped, cheap — matches what /i/?preview
  *  serves, because this IS what /i/?preview serves. */
-async function render(frame: Frame, level?: PreviewScale): Promise<Picture> {
+async function render(frame: Frame, level?: PreviewScale, priority?: RenderPriority): Promise<Picture> {
   if (active >= MAX_CONCURRENT_RENDERS) await new Promise<void>((r) => waiting.push(r))
   active++
   try {
@@ -136,7 +137,11 @@ async function render(frame: Frame, level?: PreviewScale): Promise<Picture> {
        and WebP at 90 is clean at half the bytes of JPEG at 90 or PNG. */
     if (level !== undefined)
       return {
-        buf: await renderFrame(source, previewRenderScale(source, level), { type: 'webp', quality: 90 }),
+        buf: await renderFrame(source, previewRenderScale(source, level), {
+          type: 'webp',
+          quality: 90,
+          ...(priority ? { priority } : null),
+        }),
         ...drawn,
       }
     const buf = await renderFrame(source, Math.min(1, 640 / source.width), {
@@ -157,12 +162,12 @@ async function render(frame: Frame, level?: PreviewScale): Promise<Picture> {
  *  render failure (the caller decides what a failed render means). A caller
  *  that joins a render already running may get an older version than the
  *  frame it passed: check with `shows`. */
-export function create(frame: Frame, level?: PreviewScale): Promise<Picture> {
+export function create(frame: Frame, level?: PreviewScale, priority?: RenderPriority): Promise<Picture> {
   const id = slot(frame.id, level)
   const inflight = pending.get(id)
   if (inflight) return inflight
   lastAttempt.set(id, Date.now())
-  const p = render(frame, level).then(async (picture) => {
+  const p = render(frame, level, priority).then(async (picture) => {
     const { buf, ...drawn } = picture
     /* persist is best-effort: a bucket hiccup must not fail the response
        that only needed the bytes */
@@ -210,12 +215,7 @@ export async function getStored(
     written.delete(id)
     return null
   }
-  /* after a restart the version is on storage, not in memory: read it once */
-  if (!written.has(id)) {
-    const stored = readSidecar((await storage.getObject(versionKeyFor(frame.id, level)).catch(() => null))?.toString())
-    if (stored && !written.has(id)) written.set(id, stored)
-  }
-  const drawn = written.get(id)
+  const drawn = await recall(frame, level)
   const fresh = !!drawn && shows(drawn, frame)
   /* current by its design while the version moved on (a move, a rename):
      record the version, so the next asks need no hash, and so does a restart */
@@ -230,6 +230,23 @@ export async function getStored(
   /* `known`: the version it was rendered from is on record (a thumbnail from
      before versions were stored is of unknown age, not known to be old) */
   return { buf, fresh, known: written.has(id) }
+}
+
+/** What the stored picture was drawn from. After a restart that is on
+ *  storage, not in memory: read once. */
+async function recall(frame: Frame, level?: PreviewScale): Promise<Rendered | undefined> {
+  const id = slot(frame.id, level)
+  if (!written.has(id)) {
+    const stored = readSidecar((await storage.getObject(versionKeyFor(frame.id, level)).catch(() => null))?.toString())
+    if (stored && !written.has(id)) written.set(id, stored)
+  }
+  return written.get(id)
+}
+
+/** Whether a picture is stored that shows the frame as it is (server/prerender.ts). */
+export async function isCurrent(frame: Frame, level?: PreviewScale): Promise<boolean> {
+  const drawn = await recall(frame, level)
+  return !!drawn && shows(drawn, frame)
 }
 
 /** Frame (or its whole canvas) is gone — drop the derived object too, so the

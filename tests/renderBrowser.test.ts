@@ -326,6 +326,19 @@ describe('RenderGate', () => {
     expect(gate.stats).toMatchObject({ active: 1, queued: 0 })
   })
 
+  it('counts interactive renders and when one last came or went, for background work to yield to', async () => {
+    let clock = 1000
+    const gate = new RenderGate(tuning, () => clock)
+    expect(gate.stats).toMatchObject({ interactive: 0, interactiveQueued: 0, lastInteractiveAt: 0 })
+    await gate.acquire('background')
+    expect(gate.stats.lastInteractiveAt).toBe(0)
+    const release = await gate.acquire('interactive')
+    expect(gate.stats).toMatchObject({ interactive: 1, lastInteractiveAt: 1000 })
+    clock = 1500
+    release()
+    expect(gate.stats).toMatchObject({ interactive: 0, lastInteractiveAt: 1500 })
+  })
+
   it('keeps background work to its share', async () => {
     const gate = new RenderGate(tuning)
     await gate.acquire('background')
