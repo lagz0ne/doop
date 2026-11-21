@@ -59,6 +59,7 @@ export const stage = {
   textNumberedList: 'Numbered list',
   frameChanged: 'Frame changed. Right-click again.',
   findingElement: 'Finding element…',
+  pictureFailed: 'No picture of this frame yet. Select it to open it.',
 
   /* the frame and element menus */
   paste: 'Paste',

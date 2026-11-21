@@ -59,6 +59,7 @@ export const stage: Catalog['stage'] = {
   textNumberedList: 'Lista numerada',
   frameChanged: 'O frame mudou. Clique com o botão direito de novo.',
   findingElement: 'Procurando elemento…',
+  pictureFailed: 'Este frame ainda não tem imagem. Selecione-o para abri-lo.',
 
   /* the frame and element menus */
   paste: 'Colar',

@@ -270,6 +270,45 @@ describe.skipIf(!findBrowserPath())('viewport culling on a 200-frame page', () =
     await store(page, 'select(null)')
   }, 30_000)
 
+  it('shows a frame whose picture is on its way as a placeholder, not a white box, until it arrives', async () => {
+    const p = await browser.newPage()
+    await p.setViewport({ width: 1600, height: 1000 })
+    /* the server draws the pictures: they arrive 1.5 s after they are asked for */
+    const PNG = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
+      'base64',
+    )
+    await p.setRequestInterception(true)
+    p.on('request', (req) => {
+      if (!new URL(req.url()).pathname.startsWith('/i/')) return void req.continue()
+      setTimeout(() => void req.respond({ status: 200, contentType: 'image/png', body: PNG }).catch(() => {}), 1500)
+    })
+    await p.goto(fixtureUrl('pages.html'))
+    await p.waitForFunction(() => typeof window.seedPages === 'function')
+    await p.evaluate((c) => window.seedPages(c), canvas)
+    await camera(p, { x: 0, y: 0, zoom: 0.08 })
+    const waiting = () =>
+      p.evaluate(() => {
+        const marks = [...document.querySelectorAll('[data-doop-preview-waiting]')]
+        return { count: marks.length, shown: marks.filter((m) => Number(getComputedStyle(m).opacity) > 0.3).length }
+      })
+    await new Promise((r) => setTimeout(r, 500))
+    const before = await waiting()
+    expect(before.count).toBeGreaterThan(0)
+    expect(before.shown).toBeGreaterThan(0)
+    /* in view: below the fold a lazy picture is not even asked for, and waits on */
+    await p.waitForFunction(
+      () =>
+        ![...document.querySelectorAll('[data-doop-preview-waiting]')].some((m) => {
+          const r = m.getBoundingClientRect()
+          return r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth
+        }),
+      { timeout: 10_000 },
+    )
+    expect(await p.evaluate(() => document.querySelectorAll('[data-doop-frame-preview] img').length)).toBeGreaterThan(0)
+    await p.close()
+  }, 30_000)
+
   it('measures a click with culling on and off (written to $LIVEFRAMES_BENCH, not asserted)', async () => {
     async function measure(cull: boolean) {
       const p = await browser.newPage()

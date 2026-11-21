@@ -2517,6 +2517,7 @@ function FramePreview({
   frame: Frame
   /** its picture is decoded and on screen */ onShown?: () => void
 }) {
+  const t = useT()
   const element = isCanvasElement(frame.html)
   /* A preview that fails to load (a render that failed, an anonymous viewer
      past the render budget) is asked for again, a few times and less often
@@ -2549,12 +2550,41 @@ function FramePreview({
      shell and live view. */
   const cached = !!url && shownPreviews.has(url)
   const picture = !!frame.html && !element && !!url
+  /* the last retry failed too: the frame says so instead of staying white */
+  const [failedUrl, setFailedUrl] = useState<string | null>(null)
+  const failed = !!url && failedUrl === url
+  /* Nothing of the frame is on screen yet: its picture is on its way, or
+     being drawn by the server (the first look after an edit, until it is
+     drawn ahead, server/prerender.ts). A plain white box read as an empty
+     design, so a frame that waits longer than a glance (300 ms) shows the
+     same pulse as every placeholder in the app (Skeleton); a picture that
+     arrives sooner never shows it. One endless animation, delayed, over a
+     transparent box: a finite one (a fade-in) would be cancelled when the
+     picture arrives, and a cancelled animation's `finished` rejects for
+     whoever awaits the page's animations. */
+  const waiting = !!frame.html && !element && shownUrl === null && !failed
   return (
     <div
       className={cn('relative block overflow-hidden', element ? 'bg-transparent' : 'bg-white')}
       style={{ width: frame.width, height: frame.height }}
       data-doop-frame-preview=""
     >
+      {waiting && (
+        <div
+          aria-hidden
+          data-doop-preview-waiting=""
+          className="pointer-events-none absolute inset-0 animate-[skeleton-pulse_1.4s_ease-in-out_0.3s_infinite] bg-paper-deep opacity-0"
+        />
+      )}
+      {failed && (
+        <div
+          data-doop-preview-failed=""
+          className="pointer-events-none absolute inset-0 flex items-center justify-center bg-paper-deep p-[calc(8px/var(--zoom,1))] text-center text-ink-faint"
+          style={{ fontSize: 'calc(12px / var(--zoom, 1))' }}
+        >
+          {t('stage.pictureFailed')}
+        </div>
+      )}
       {picture && behind && (
         <img
           key="behind"
@@ -2585,7 +2615,7 @@ function FramePreview({
             e.currentTarget.decode().then(done, done)
           }}
           onError={() => {
-            if (attempt >= PREVIEW_RETRIES) return
+            if (attempt >= PREVIEW_RETRIES) return setFailedUrl(url)
             window.clearTimeout(timer.current)
             timer.current = window.setTimeout(
               () => setRetry({ version: frame.updatedAt, count: attempt + 1 }),
